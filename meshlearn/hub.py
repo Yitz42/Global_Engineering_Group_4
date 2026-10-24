@@ -621,9 +621,13 @@ class Hub:
             f"<input type='hidden' name='back' value='{esc(here)}'><button class='secondary'>Remove</button></form></td></tr>"
             for i in selected.values()
         )
+        languages = self.catalog.languages()
+        current = self.setting("lang")
+        if current not in {code for code, _ in languages}:
+            languages.insert(0, (current, 0))
         lang_options = "".join(
-            f"<option value='{esc(code)}'{' selected' if code == self.setting('lang') else ''}>"
-            f"{esc(cat.LANGUAGES.get(code, code))} ({n})</option>" for code, n in self.catalog.languages()[:60]
+            f"<option value='{esc(code)}'{' selected' if code == current else ''}>"
+            f"{esc(cat.language_name(code))}{f' ({n} collections)' if n else ''}</option>" for code, n in languages
         )
         short = {v: k for k, v in cat.SHORT_TO_ISO.items()}.get(self.setting("lang"))
         plan = (
@@ -661,8 +665,8 @@ class Hub:
             page_no = min(page_no, pages)
             shown = groups[(page_no - 1) * per_page: page_no * per_page]
             lang_filter = "<option value=''>All languages</option>" + "".join(
-                f"<option value='{esc(code)}'{' selected' if code == lang else ''}>{esc(cat.LANGUAGES.get(code, code))}</option>"
-                for code, _ in self.catalog.languages()[:60])
+                f"<option value='{esc(code)}'{' selected' if code == lang else ''}>{esc(cat.language_name(code))}</option>"
+                for code, n in self.catalog.languages() if n)
             level_filter = "".join(f"<option value='{v}'{' selected' if v == level else ''}>{esc(t)}</option>" for v, t in LEVEL_FILTERS)
             kind_filter = "<option value=''>All kinds</option>" + "".join(
                 f"<option{' selected' if k == kind else ''}>{esc(k)}</option>" for k in self.catalog.labels(lang, min_level))
@@ -766,8 +770,12 @@ class Hub:
 
     def library_suggest(self, req: Request) -> Response:
         short = {v: k for k, v in cat.SHORT_TO_ISO.items()}.get(self.setting("lang"))
-        if not short or not self.catalog.entries:
-            return redirect("/library")
+        if not self.catalog.entries:
+            return redirect("/library?" + urlencode(
+                {"msg": "First download the list of collections (button below), then ask for a starter set."}))
+        if not short:
+            return redirect("/library?" + urlencode(
+                {"msg": "Starter sets exist for English, Portuguese and German. Pick collections by hand for this language."}))
         picks = self.catalog.suggest(short, self.library_budget())
         self.db.execute("DELETE FROM library_selection")
         for item in picks:

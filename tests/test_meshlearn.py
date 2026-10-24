@@ -475,6 +475,27 @@ class CardDownloadTests(unittest.TestCase):
         self.assertIn("hub laptop itself", hub.library_download_start(outsider).headers["Location"].replace("+", " "))
 
 
+class LibraryLanguageTests(unittest.TestCase):
+    """The students' language must be choosable before the collection list is downloaded."""
+
+    def test_language_menu_works_without_catalog(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        hub = Hub(os.path.join(tmp, "hub.db"), lambda h: _QuietRadio())
+        port = free_port()
+        server = hub.app.serve_in_thread("127.0.0.1", port)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{port}"
+        html = urllib.request.urlopen(f"{url}/library").read().decode()
+        self.assertIn("<option value='por'>Portuguese</option>", html)
+        self.assertIn("<option value='swa'>Swahili</option>", html)
+        html = urllib.request.urlopen(f"{url}/library/settings", urllib.parse.urlencode({"lang": "swa"}).encode()).read().decode()
+        self.assertEqual(hub.setting("lang"), "swa")
+        self.assertIn("<option value='swa' selected>Swahili</option>", html)
+        html = urllib.request.urlopen(f"{url}/library/suggest", b"").read().decode()
+        self.assertIn("First download the list", html)
+
+
 class _QuietRadio:
     def status(self):
         return {"pending": 0, "acked": 0, "failed": 0, "frames_sent": 0}

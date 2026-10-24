@@ -180,7 +180,7 @@ docs/hardware.md, docs/android-setup.md
 python3 -m unittest discover -s tests -v
 ```
 
-There are 32 tests. They cover:
+There are 33 tests. They cover:
 
 - framing, corruption, and missing-piece reports;
 - lossless compact format;

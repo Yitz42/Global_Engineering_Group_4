@@ -46,6 +46,10 @@ LANGUAGES = {
 }
 SHORT_TO_ISO = {"en": "eng", "pt": "por", "de": "deu"}
 
+
+def language_name(code: str) -> str:
+    return LANGUAGES.get(code, code)
+
 # Education rating: 3 = core learning, 2 = education and reference, 1 = general, 0 = not for school.
 LEVELS = {3: "Core learning", 2: "Learning reference", 1: "General interest", 0: "Not school-related"}
 
@@ -152,11 +156,16 @@ class Catalog:
         return len(entries)
 
     def languages(self) -> List[Tuple[str, int]]:
+        """(code, number of collections) for every language: those in the catalog, most
+        collections first, then the built-in names, so the menu works before the list is downloaded."""
         counts: Dict[str, int] = {}
         for e in self.entries:
             for code in e["lang"].split(","):
-                counts[code] = counts.get(code, 0) + 1
-        return sorted(counts.items(), key=lambda kv: -kv[1])
+                if code:
+                    counts[code] = counts.get(code, 0) + 1
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], language_name(kv[0])))
+        rest = sorted((code for code in LANGUAGES if code not in counts and code != "mul"), key=language_name)
+        return ranked + [(code, 0) for code in rest]
 
     def groups(self, lang: str = "", min_level: int = 2, query: str = "", label: str = "") -> List[dict]:
         """Collections (all flavours of one name together), education first, then smallest."""
