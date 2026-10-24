@@ -61,6 +61,7 @@ RULES: List[Tuple[str, str, int]] = [
     (r"^category:wikibooks$|^name:(libretexts|milneopentextbooks|openstax|openmusictheory|learningstatistic|jeffe\.cs|ethanweed)", "Textbooks", 3),
     (r"^category:(wikiversity|mooc)$|^name:(khanacademy|crashcourse|artofproblemsolving|oer4schools|ubongo|kolibri|avanti|diksha|madrasa|moldova-ministry-education|cest-pas-sorcier|biologycourses|voa_learning|genomicseducation|science-in-the-bath|ncase)|^tag:(openedx|kolibri|khan-academy)$", "Courses and lessons", 3),
     (r"^category:vikidia$|^name:(klexikon|wikimini)", "Encyclopedia for children", 3),
+    (r"^name:(booksdash|prunelle|africanstorybook)", "Picture books and stories", 3),
     (r"^category:wikipedia$", "Encyclopedia", 2),
     (r"^category:wiktionary$", "Dictionary", 2),
     (r"^category:(wikisource|gutenberg)$", "Books and source texts", 2),
@@ -80,6 +81,79 @@ EDU_WORDS = re.compile(
     r"\b(education|educational|school|students?|teach\w*|course|courses|lesson|lessons|textbooks?|curriculum|learn\w*|"
     r"math\w*|science|biology|chemistry|physics|history|geography|kids|children|"
     r"escola|ensino|aula|curso|estudantes|schule|unterricht|lernen|kurs|kinder)\b", re.I)
+
+
+# Suitable ages (youngest, oldest; 99 = no upper limit). The catalog has no age
+# data, so known collections get a range here and the rest are read from clues
+# in their description. Tried in order against the same keys as RULES.
+AGE_RULES: List[Tuple[str, Tuple[int, int]]] = [
+    (r"^category:stack_exchange$|^name:devdocs", (16, 99)),          # before keyword clues like "teachers"
+    (r"^name:(booksdash|prunelle|africanstorybook|ubongo|wikimini)", (3, 9)),
+    (r"^name:ted_mul_kids$", (6, 12)),
+    (r"^name:klexikon", (6, 12)),
+    (r"^name:vikidia_pt", (8, 14)),                                     # "para crianças e adolescentes"
+    (r"^category:vikidia$", (8, 13)),
+    (r"^name:voa_fr", (8, 12)),
+    (r"^name:diksha-std5", (9, 11)),
+    (r"^name:khanacademy", (6, 18)),
+    (r"^name:libretexts\.org_\w+_k12", (5, 18)),
+    (r"^name:artofproblemsolving", (11, 18)),
+    (r"^name:scratch-wiki", (8, 16)),
+    (r"^category:phet$", (8, 99)),
+    (r"^name:ted_mul_ted-ed$", (12, 18)),
+    (r"^name:(oer4schools|edutechwiki)", (19, 99)),                    # for teachers
+    (r"^name:libretexts|^category:mooc$|^tag:openedx$|^name:(biologycourses|milneopentextbooks|jeffe\.cs|stacks\.math)", (17, 99)),
+    (r"^name:(crashcourse|freecodecamp)", (13, 99)),
+    (r"^category:wikiversity$", (15, 99)),
+    (r"^category:wikibooks$", (13, 99)),
+    (r"^category:(ted|wikisource)$", (14, 99)),
+    (r"^name:(medlineplus|mdwiki|wikem)|^tag:(medical|medicine)$", (15, 99)),
+    (r"^category:wiktionary$", (10, 99)),
+    (r"^name:wikipedia_\w+_(100|top)", (10, 99)),
+    (r"^category:(wikipedia|gutenberg)$", (12, 99)),
+]
+AGE_CLUES: List[Tuple[re.Pattern, Tuple[int, int]]] = [
+    (re.compile(r"picture ?books?|read-?aloud|young children|bilderb|livros? ilustrad", re.I), (3, 8)),
+    (re.compile(r"\b(kids|children|childrens|enfants?|crianças|kinder\w*|niños|infantil)\b", re.I), (5, 12)),
+    (re.compile(r"\b(primary|elementary|grundschul\w*|ensino fundamental)\b", re.I), (6, 11)),
+    (re.compile(r"\bk-?12\b", re.I), (5, 18)),
+    (re.compile(r"\bmiddle school\b", re.I), (11, 14)),
+    (re.compile(r"\b(high school|secondary|ensino médio|gymnasium)\b", re.I), (14, 18)),
+    (re.compile(r"\b(university|college|undergraduate|graduate|universität|universidade)\b", re.I), (17, 99)),
+    (re.compile(r"\bteachers?\b|\bprofessores\b|\blehrer\w*", re.I), (19, 99)),
+]
+DEFAULT_AGE_RANGE = (12, 99)
+
+
+def ages_for(entry: dict) -> Tuple[int, int, bool]:
+    """(youngest, oldest, estimated) suitable ages for a collection."""
+    keys = [f"category:{entry.get('category', '')}", f"name:{entry.get('name', '')}"]
+    keys += [f"tag:{t.lower()}" for t in entry.get("tags", [])]
+    for pattern, ages in AGE_RULES:
+        rx = re.compile(pattern)
+        if any(rx.search(k) for k in keys):
+            return ages[0], ages[1], False
+    text = " ".join([entry.get("title", ""), entry.get("summary", "")])
+    for rx, ages in AGE_CLUES:
+        if rx.search(text):
+            return ages[0], ages[1], False
+    return DEFAULT_AGE_RANGE[0], DEFAULT_AGE_RANGE[1], True
+
+
+def age_label(lo: int, hi: int, estimated: bool = False) -> str:
+    if lo >= 19:
+        text = "Teachers and adults"
+    elif hi >= 99:
+        text = f"Ages {lo}+"
+    else:
+        text = f"Ages {lo}–{hi}"
+    return text + (" (estimated)" if estimated else "")
+
+
+def _rate(entry: dict) -> None:
+    entry["level"], entry["label"] = classify(entry)
+    lo, hi, est = ages_for(entry)
+    entry["ages"], entry["age_est"] = [lo, hi], est
 
 
 def classify(entry: dict) -> Tuple[int, str]:
@@ -117,7 +191,7 @@ def parse_catalog(xml_bytes: bytes) -> List[dict]:
             "articles": int(get("articleCount") or 0), "updated": get("updated")[:10],
             "size": size, "url": url, "file": os.path.basename(urllib.parse.urlparse(url).path),
         }
-        entry["level"], entry["label"] = classify(entry)
+        _rate(entry)
         entries.append(entry)
     return entries
 
@@ -141,7 +215,7 @@ class Catalog:
                     data = json.load(fh)
                 self.entries, self.fetched_at = data["entries"], data["fetched_at"]
                 for e in self.entries:  # re-rate with the current rules
-                    e["level"], e["label"] = classify(e)
+                    _rate(e)
             except (OSError, ValueError, KeyError):
                 self.entries = []
 
@@ -167,8 +241,10 @@ class Catalog:
         rest = sorted((code for code in LANGUAGES if code not in counts and code != "mul"), key=language_name)
         return ranked + [(code, 0) for code in rest]
 
-    def groups(self, lang: str = "", min_level: int = 2, query: str = "", label: str = "") -> List[dict]:
-        """Collections (all flavours of one name together), education first, then smallest."""
+    def groups(self, lang: str = "", min_level: int = 2, query: str = "", label: str = "",
+               ages=None, only_fit: bool = False) -> List[dict]:
+        """Collections (all flavours of one name together). Those suited to the students'
+        ages come first, then the most educational, then the smallest."""
         query = query.lower().strip()
         by_name: Dict[str, dict] = {}
         for e in self.entries:
@@ -178,15 +254,19 @@ class Catalog:
                 continue
             if query and query not in " ".join([e["title"], e["summary"], e["name"]] + e["tags"]).lower():
                 continue
+            fits = ages is None or library.ages_overlap(tuple(e["ages"]), ages)
+            if only_fit and not fits:
+                continue
             group = by_name.setdefault(e["name"], {"name": e["name"], "title": e["title"], "summary": e["summary"],
                                                    "lang": e["lang"], "label": e["label"], "level": e["level"],
-                                                   "category": e["category"], "options": []})
+                                                   "category": e["category"], "ages": e["ages"], "age_est": e["age_est"],
+                                                   "fits": fits, "options": []})
             group["options"].append(e)
         order = {f: i for i, f in enumerate(library.FLAVOURS)}
         groups = list(by_name.values())
         for g in groups:
             g["options"].sort(key=lambda o: (order.get(o["flavour"], 99), o["size"]))
-        groups.sort(key=lambda g: (-g["level"], g["label"], g["options"][0]["size"]))
+        groups.sort(key=lambda g: (not g["fits"], -g["level"], g["label"], g["options"][0]["size"]))
         return groups
 
     def labels(self, lang: str = "", min_level: int = 0) -> List[str]:
@@ -203,10 +283,10 @@ class Catalog:
                 return e
         return None
 
-    def suggest(self, short_lang: str, budget: int) -> List[dict]:
-        """The built-in starter plan for a language, sized to the card, from the cached catalog."""
+    def suggest(self, short_lang: str, budget: int, ages=library.DEFAULT_AGES) -> List[dict]:
+        """The built-in starter plan for a language and the students' ages, sized to the card."""
         packages = []
-        for spec in library.PACKAGES.get(short_lang, []):
+        for spec in library.specs_for(short_lang, ages):
             pkg = library.Package(spec["key"], spec["collection"], spec["license"])
             if "kiwix" in spec:
                 for e in self.entries:
@@ -229,7 +309,7 @@ class Catalog:
         return picks
 
 
-GUTENBERG_IDS = library.PACKAGES["en"][2]["gutenberg"]
+GUTENBERG_IDS = next(s["gutenberg"] for s in library.PACKAGES["en"] if s["key"] == "books")
 GUTENBERG_BYTES_PER_BOOK = 620_000  # average of the ten default books, measured Oct 2026
 
 
@@ -238,14 +318,14 @@ def gutenberg_choice() -> dict:
     size = GUTENBERG_BYTES_PER_BOOK * len(files)
     item = {"key": "gutenberg|classics", "title": f"{len(files)} classic novels (Project Gutenberg, plain text)",
             "label": "Books and source texts", "level": 2, "lang": "eng", "size": size, "folder": "books",
-            "kind": "txt", "files": files, "license": "Public domain in the USA"}
+            "kind": "txt", "files": files, "license": "Public domain in the USA", "ages": [12, 99]}
     return {"item": item, "option": library.Option("", item["title"], size, files, "txt")}
 
 
 def selection_item(entry: dict) -> dict:
     flavour = f" ({entry['flavour']})" if entry["flavour"] else ""
     return {"key": f"{entry['name']}|{entry['flavour']}", "title": entry["title"] + flavour, "label": entry["label"],
-            "level": entry["level"], "lang": entry["lang"], "size": entry["size"],
+            "level": entry["level"], "lang": entry["lang"], "size": entry["size"], "ages": entry["ages"],
             "folder": entry["category"] or "other", "kind": "zim", "files": [(entry["url"], entry["file"])],
             "license": "See the collection's source"}
 

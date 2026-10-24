@@ -475,6 +475,59 @@ class CardDownloadTests(unittest.TestCase):
         self.assertIn("hub laptop itself", hub.library_download_start(outsider).headers["Location"].replace("+", " "))
 
 
+class AgeTests(unittest.TestCase):
+    def entry(self, name, category="", summary="", tags=()):
+        return {"name": name, "category": category, "title": name, "summary": summary, "tags": list(tags)}
+
+    def test_known_collections_and_description_clues(self):
+        self.assertEqual(catalog.ages_for(self.entry("vikidia_en_all", "vikidia")), (8, 13, False))
+        self.assertEqual(catalog.ages_for(self.entry("booksdash_en_all")), (3, 9, False))
+        self.assertEqual(catalog.ages_for(self.entry("wikiversity_en_all", "wikiversity")), (15, 99, False))
+        self.assertEqual(catalog.ages_for(self.entry("x_en_all", summary="Math for middle school students")), (11, 14, False))
+        self.assertEqual(catalog.ages_for(self.entry("y_en_all", summary="Stories for kids")), (5, 12, False))
+        self.assertEqual(catalog.ages_for(self.entry("z_en_all", summary="Lecture notes for university courses")), (17, 99, False))
+        # Stack Exchange "for teachers and students" is still a Q&A site for older students
+        self.assertEqual(catalog.ages_for(self.entry("chemistry.stackexchange.com_en_all", "stack_exchange",
+                                                     "Q&A for teachers and students")), (16, 99, False))
+        self.assertEqual(catalog.ages_for(self.entry("mystery_en_all", summary="Assorted pages")), (12, 99, True))
+
+    def test_age_groups_overlap(self):
+        self.assertTrue(library.ages_overlap((8, 13), ["lower"]))      # shares 12 and 13 with 12-14
+        self.assertFalse(library.ages_overlap((6, 12), ["lower"]))     # only age 12 in common
+        self.assertTrue(library.ages_overlap((19, 99), ["adult"]))
+        self.assertFalse(library.ages_overlap((15, 99), ["early", "primary"]))
+        self.assertEqual(library.age_span(["primary", "lower"]), (9, 14))
+
+    def test_browse_and_starter_sets_follow_ages(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cat = catalog.Catalog(os.path.join(tmp, "c.json"))
+        cat.entries = catalog.parse_catalog(fake_catalog_xml())
+        young = [g["name"] for g in cat.groups("eng", 2, ages=["primary"], only_fit=True)]
+        self.assertIn("vikidia_en_all", young)
+        self.assertNotIn("wikipedia_en_all", young)
+        teens = [g["name"] for g in cat.groups("eng", 2, ages=["upper"], only_fit=False)]
+        self.assertLess(teens.index("wikipedia_en_all"), teens.index("vikidia_en_all"))  # suited ones first
+        kid_keys = [p["key"] for p in cat.suggest("en", 10**10, ["primary"])]
+        self.assertIn("vikidia_en_all|nopic", kid_keys)
+        self.assertNotIn("wikipedia_en_all|mini", kid_keys)
+        teen_keys = [p["key"] for p in cat.suggest("en", 10**12, ["upper"])]
+        self.assertNotIn("vikidia_en_all|nopic", teen_keys)
+
+    def test_hub_saves_students_ages(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        hub = Hub(os.path.join(tmp, "hub.db"), lambda h: _QuietRadio())
+        self.assertEqual(hub.student_ages(), ["lower", "upper"])
+        port = free_port()
+        server = hub.app.serve_in_thread("127.0.0.1", port)
+        self.addCleanup(server.shutdown)
+        body = urllib.parse.urlencode([("ages_form", "1"), ("ages", "early"), ("ages", "primary")]).encode()
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/library/settings", body).read().decode()
+        self.assertEqual(hub.student_ages(), ["early", "primary"])
+        self.assertIn("starter set for ages 5–11", html)
+
+
 class LibraryLanguageTests(unittest.TestCase):
     """The students' language must be choosable before the collection list is downloaded."""
 

@@ -98,9 +98,21 @@ The hub's **Card library** page lists every collection in the [Kiwix](https://li
 | General interest | Wikivoyage, Wikiquote, Stack Exchange Q&A, iFixit repair guides, software docs, maps |
 | Not school-related | Game and fan wikis |
 
-By default the page shows the first two levels in the students' language. The teacher can switch to core learning only or everything, filter by kind, or search ("biology", "math").
+**Suited to the students' ages.** The teacher ticks the students' age groups: 5–8, 9–11, 12–14, 15–18, or teachers and adults. The default is 12–14 and 15–18, the project's secondary-school learners. Groups go by age rather than grade, so they mean the same in every country.
 
-**Fitting the card.** The teacher enters the card size, and each collection shows its versions with sizes: article intros (mini), text only (nopic), or with images (maxi). A bar tracks how much of the card the picks use and warns when they don't fit. "Suggest a starter set" fills the card automatically for English, Portuguese or German.
+The catalog has no age data, so MeshLearn estimates a range for each collection:
+
+- **Known collections have fixed ranges.** Examples: picture books 3–9, Klexikon 6–12, Vikidia 8–13, PhET 8+, Wikibooks 13+, Wikiversity 15+, university textbooks 17+, teacher resources for adults.
+- **Others are read from their descriptions.** Words like "kids", "middle school", "high school", "university" or "teachers" set the range.
+- **The rest are marked "12+ (estimated)".**
+
+A collection counts as suited when its range shares at least two years with a chosen group. Each collection shows its age range as a badge.
+
+By default the page shows only collections that suit the chosen ages, at the first two education levels, in the students' language. The teacher can show any age (suited ones still come first), switch to core learning only or everything, filter by kind, or search ("biology", "math").
+
+**Fitting the card.** The teacher enters the card size, and each collection shows its versions with sizes: article intros (mini), text only (nopic), or with images (maxi). A bar tracks how much of the card the picks use and warns when they don't fit. "Suggest a starter set" fills the card automatically for English, Portuguese or German, using only collections that suit the students' ages.
+
+For young children that means picture books, children's encyclopedias, TED talks for kids and science simulations, rather than Wikiversity or university textbooks. A chosen collection outside the students' ages is flagged.
 
 **Copying to the card.** "Copy to memory card" downloads the picks straight onto a card in the laptop's card reader. It runs in the background with a progress bar, can be stopped and resumed, and skips files already on the card. The phone's Library page lists everything once the card is back in the phone.
 
@@ -108,16 +120,26 @@ Only the hub laptop's own browser can start downloads or update the list, since 
 
 ## What fits on the card
 
-The fetcher looks up current file sizes from the Kiwix catalog every time it runs, so these plans change as the collections are updated. These are the automatic starter sets as of October 24, 2026, keeping 2 GB free for assignments and the system:
+The fetcher looks up current file sizes from the Kiwix catalog every time it runs, so these plans change as the collections are updated. These are the automatic starter sets as of October 24, 2026, keeping 2 GB free for assignments and the system.
 
-| Card | English | Portuguese | German |
+**Secondary students (ages 12–18, the default):**
+
+| Card | Language | Starter set | Total |
 | --- | --- | --- | --- |
-| 8 GB | PhET, Wikipedia 100, 10 classic books, Best of Wikipedia (mini), Wikibooks (text) — 4.3 GB | — | — |
-| 16 GB | — | PhET, Wikilivros, all of Wikipedia (text only) — 7.3 GB | — |
-| 32 GB | PhET, 10 classic books, Wikibooks, Wikiversity, all of Wikipedia (article intros) — 23.1 GB | — | — |
-| 64 GB | — | — | PhET, Wikibooks, all of Wikipedia with images — 52.3 GB |
+| 8 GB | English | PhET, Vikidia, Wikipedia 100, 10 classic books, Best of Wikipedia (intros), Wikibooks (text only) | 4.3 GB |
+| 16 GB | Portuguese | PhET, Vikidia, Wikilivros, all of Wikipédia (text only) | 7.3 GB |
+| 32 GB | English | PhET, Vikidia, 10 classic books, Wikibooks, Wikiversity, all of Wikipedia (intros) | 23.2 GB |
+| 64 GB | German | PhET, Wikibooks, all of Wikipedia with images | 52.3 GB |
 
-Run `python3 -m meshlearn library --sd-gb <size> --lang <en|pt|de> --dest <folder> --dry-run` to see the plan for any card. Content keeps its original license (Wikipedia projects: CC BY-SA; PhET: CC BY 4.0; Project Gutenberg texts: public domain in the USA).
+**Younger students (ages 5–11):**
+
+| Card | Language | Starter set | Total |
+| --- | --- | --- | --- |
+| 8 GB | Portuguese | PhET, Vikidia, TED kids, Best of Wikipédia (text only) | 5.2 GB |
+| 16 GB | English | PhET, Vikidia, Prunelle picture books, Wikipedia 100, Best of Wikipedia, TED kids | 11.9 GB |
+| 16 GB | German | PhET, Klexikon, TED kids, Best of Wikipedia | 8.8 GB |
+
+Run `python3 -m meshlearn library --sd-gb <size> --lang <en|pt|de> --ages <groups> --dest <folder> --dry-run` to see the plan for any card. Age groups are `early` (5–8), `primary` (9–11), `lower` (12–14), `upper` (15–18) and `adult`. Content keeps its original license (Wikipedia projects: CC BY-SA; PhET: CC BY 4.0; TED talks: CC BY-NC-ND; Project Gutenberg texts: public domain in the USA).
 
 ## How the mesh link works
 
@@ -180,7 +202,7 @@ docs/hardware.md, docs/android-setup.md
 python3 -m unittest discover -s tests -v
 ```
 
-There are 33 tests. They cover:
+There are 37 tests. They cover:
 
 - framing, corruption, and missing-piece reports;
 - lossless compact format;
@@ -189,7 +211,7 @@ There are 33 tests. They cover:
 - the library planner;
 - delivery through 40% simulated loss, with each message delivered exactly once;
 - selective resend staying under 4× the message size at 30% loss;
-- catalog parsing and education rating;
+- catalog parsing, education rating, and age ranges;
 - starter sets that fit the card;
 - copying chosen collections onto a card from a local test server.
 

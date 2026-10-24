@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS library_selection (key TEXT PRIMARY KEY, item TEXT NOT NULL, added REAL NOT NULL);
 """
 
-LIBRARY_DEFAULTS = {"card_gb": "32", "reserve_gb": "2", "lang": "eng", "dest": ""}
+LIBRARY_DEFAULTS = {"card_gb": "32", "reserve_gb": "2", "lang": "eng", "dest": "", "ages": ",".join(library.DEFAULT_AGES)}
+AGE_FILTERS = [("fit", "Suited to the students' ages"), ("any", "Any age (suited ones first)")]
 LEVEL_FILTERS = [("3", "Core learning only"), ("2", "Education and reference"), ("0", "Everything")]
 
 ACTION_LABELS = {"open": "opening", "close": "closing", "update": "sending update", "copy": "sending full copy"}
@@ -574,6 +575,16 @@ class Hub:
         self.db.execute("INSERT INTO library_selection (key, item, added) VALUES (?, ?, ?)",
                         (item["key"], json.dumps(item), time.time()))
 
+    def student_ages(self) -> List[str]:
+        valid = {g[0] for g in library.AGE_GROUPS}
+        return [a for a in self.setting("ages").split(",") if a in valid] or [g[0] for g in library.AGE_GROUPS]
+
+    def _ages_text(self, ages: List[str]) -> str:
+        if len(ages) == len(library.AGE_GROUPS):
+            return "all ages"
+        lo, hi = library.age_span(ages)
+        return "teachers and adults" if lo >= 19 else (f"ages {lo}+" if hi >= 99 else f"ages {lo}–{hi}")
+
     def library_budget(self) -> int:
         try:
             return library.usable_bytes(float(self.setting("card_gb")), float(self.setting("reserve_gb")))
@@ -598,12 +609,14 @@ class Hub:
         level = req.query.get("level", "2")
         kind = req.query.get("kind", "")
         query = req.query.get("q", "")
+        agefit = req.query.get("agefit", "fit")
+        ages = self.student_ages()
         try:
             page_no = max(1, int(req.query.get("page", "1")))
         except ValueError:
             page_no = 1
         here = "/library?" + urlencode({k: v for k, v in {"lang": lang, "level": level, "kind": kind, "q": query,
-                                                           "page": page_no}.items() if v not in ("", None)})
+                                                           "agefit": agefit, "page": page_no}.items() if v not in ("", None)})
         notice = req.query.get("msg", "")
         selected = {i["key"]: i for i in self.selection()}
         budget = self.library_budget()
@@ -615,8 +628,16 @@ class Hub:
         bar = (f"<div style='height:14px;border-radius:7px;background:var(--line);overflow:hidden' role='img' "
                f"aria-label='{pct}% of the card used'><div style='height:100%;width:{pct}%;background:"
                f"{'var(--bad)' if over else 'var(--accent)'}'></div></div>")
+        def age_note(i):
+            if not i.get("ages"):
+                return ""
+            note = cat.age_label(*i["ages"])
+            if not library.ages_overlap(tuple(i["ages"]), ages):
+                return f" · <span class='warn'>{esc(note)}: outside the students' ages</span>"
+            return f" · {esc(note)}"
+
         rows = "".join(
-            f"<tr><td>{esc(i['title'])}<div class='muted'>{esc(i['label'])}</div></td><td>{self._gb(i['size'])}</td>"
+            f"<tr><td>{esc(i['title'])}<div class='muted'>{esc(i['label'])}{age_note(i)}</div></td><td>{self._gb(i['size'])}</td>"
             f"<td><form method='post' action='/library/remove'><input type='hidden' name='key' value='{esc(i['key'])}'>"
             f"<input type='hidden' name='back' value='{esc(here)}'><button class='secondary'>Remove</button></form></td></tr>"
             for i in selected.values()
@@ -630,20 +651,24 @@ class Hub:
             f"{esc(cat.language_name(code))}{f' ({n} collections)' if n else ''}</option>" for code, n in languages
         )
         short = {v: k for k, v in cat.SHORT_TO_ISO.items()}.get(self.setting("lang"))
+        age_boxes = "".join(
+            f"<label class='option' style='display:inline-flex;margin-right:16px'><input type='checkbox' name='ages' value='{key}'"
+            f"{' checked' if key in ages else ''}> {esc(text)}</label>" for key, text, _, _ in library.AGE_GROUPS)
         plan = (
             "<div class='card'>"
             "<form method='post' action='/library/settings' class='grid'>"
             f"<div><label for='card_gb'>Card size (GB on the label)</label><input type='number' id='card_gb' name='card_gb' min='1' step='1' value='{esc(self.setting('card_gb'))}'></div>"
             f"<div><label for='reserve_gb'>Keep free for assignments (GB)</label><input type='number' id='reserve_gb' name='reserve_gb' min='0' step='0.5' value='{esc(self.setting('reserve_gb'))}'></div>"
             f"<div><label for='lang_set'>Students' language</label><select id='lang_set' name='lang'>{lang_options}</select></div>"
-            "<div><label>&nbsp;</label><button class='secondary'>Save</button></div></form>"
+            f"<fieldset style='grid-column:1/-1;margin:0'><legend>Students' ages</legend>{age_boxes}</fieldset>"
+            "<div><input type='hidden' name='ages_form' value='1'><button class='secondary'>Save</button></div></form>"
             f"<p><strong>{self._gb(used)}</strong> chosen of <strong>{self._gb(budget)}</strong> available on the card"
             + (f" · <span class='bad'>{self._gb(used - budget)} too much: remove something or use a bigger card</span>" if over else "")
             + f"</p>{bar}"
             + (f"<table>{rows}</table>" if rows else "<p class='muted'>Nothing chosen yet. Add collections below, or let MeshLearn suggest a starter set.</p>")
             + "<p>"
             + (f"<form method='post' action='/library/suggest' style='display:inline'><button class='secondary'>"
-               f"{'Replace with' if rows else 'Suggest'} a starter set for this card</button></form>" if short else
+               f"{'Replace with' if rows else 'Suggest'} a starter set for {esc(self._ages_text(ages))}</button></form>" if short else
                "<span class='muted'>Starter sets exist for English, Portuguese and German; pick collections by hand for other languages.</span>")
             + (" <a class='button' href='/library/download'>Copy to memory card…</a>" if rows else "")
             + "</p></div>"
@@ -659,7 +684,7 @@ class Hub:
                 min_level = int(level)
             except ValueError:
                 min_level = 2
-            groups = self.catalog.groups(lang, min_level, query, kind)
+            groups = self.catalog.groups(lang, min_level, query, kind, ages=ages, only_fit=agefit != "any")
             per_page = 40
             pages = max(1, (len(groups) + per_page - 1) // per_page)
             page_no = min(page_no, pages)
@@ -668,6 +693,7 @@ class Hub:
                 f"<option value='{esc(code)}'{' selected' if code == lang else ''}>{esc(cat.language_name(code))}</option>"
                 for code, n in self.catalog.languages() if n)
             level_filter = "".join(f"<option value='{v}'{' selected' if v == level else ''}>{esc(t)}</option>" for v, t in LEVEL_FILTERS)
+            age_filter = "".join(f"<option value='{v}'{' selected' if v == agefit else ''}>{esc(t)}</option>" for v, t in AGE_FILTERS)
             kind_filter = "<option value=''>All kinds</option>" + "".join(
                 f"<option{' selected' if k == kind else ''}>{esc(k)}</option>" for k in self.catalog.labels(lang, min_level))
             filters = (
@@ -676,13 +702,17 @@ class Hub:
                 f"<div><label for='lang'>Language</label><select id='lang' name='lang'>{lang_filter}</select></div>"
                 f"<div><label for='level'>Show</label><select id='level' name='level'>{level_filter}</select></div>"
                 f"<div><label for='kind'>Kind</label><select id='kind' name='kind'>{kind_filter}</select></div>"
+                f"<div><label for='agefit'>Ages ({esc(self._ages_text(ages))})</label><select id='agefit' name='agefit'>{age_filter}</select></div>"
                 "<div><label>&nbsp;</label><button>Filter</button></div></form>"
             )
             items = ""
-            if lang in ("", "eng") and not query and kind in ("", "Books and source texts") and min_level <= 2 and page_no == 1:
-                g = cat.gutenberg_choice()["item"]
+            g = cat.gutenberg_choice()["item"]
+            g_fits = library.ages_overlap(tuple(g["ages"]), ages)
+            if (lang in ("", "eng") and not query and kind in ("", "Books and source texts") and min_level <= 2
+                    and page_no == 1 and (g_fits or agefit == "any")):
                 items += self._library_row(g["title"], "Ten well-known novels as plain text that opens in any browser.",
-                                           g["label"], 2, "eng", [(g, "Add", g["key"] in selected)], here, show_lang=not lang)
+                                           g["label"], 2, "eng", [(g, "Add", g["key"] in selected)], here, show_lang=not lang,
+                                           ages=g["ages"], age_est=False, fits=g_fits)
             for g in shown:
                 options = []
                 for o in g["options"]:
@@ -691,11 +721,11 @@ class Hub:
                         "nopic", "nopic: text only").replace("maxi", "maxi: with images")
                     options.append((item, label, item["key"] in selected))
                 items += self._library_row(g["title"], g["summary"], g["label"], g["level"], g["lang"], options, here,
-                                           show_lang=not lang)
+                                           show_lang=not lang, ages=g["ages"], age_est=g["age_est"], fits=g["fits"])
             nav = ""
             if pages > 1:
                 def link(p, text):
-                    params = {k: v for k, v in {"lang": lang, "level": level, "kind": kind, "q": query}.items() if v}
+                    params = {k: v for k, v in {"lang": lang, "level": level, "kind": kind, "q": query, "agefit": agefit}.items() if v}
                     params["page"] = p
                     return f"<a class='button secondary' href='/library?{esc(urlencode(params))}'>{text}</a>"
                 nav = (f"<p>{link(page_no - 1, '← Previous') if page_no > 1 else ''} "
@@ -710,14 +740,20 @@ class Hub:
             )
         body = (
             (f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "")
-            + "<p class='muted'>Choose what goes on each phone's memory card. Learning material is listed first. "
+            + "<p class='muted'>Choose what goes on each phone's memory card. Material that suits the students' ages and "
+            "learning material are listed first. Age ranges come from each collection's name and description. "
             "Everything is free and works without internet once it is on the card.</p>"
             + "<h2>This card</h2>" + plan + "<h2>Available collections</h2>" + browse
         )
         return Response(self._page("Card library", body))
 
-    def _library_row(self, title, summary, label, level, lang, options, here, show_lang) -> str:
+    def _library_row(self, title, summary, label, level, lang, options, here, show_lang,
+                     ages=None, age_est=False, fits=True) -> str:
         badge_class = {3: "good", 2: "", 1: "muted", 0: "bad"}.get(level, "")
+        age_badge = ""
+        if ages:
+            age_badge = (f" <span class='pill{'' if fits else ' warn'}'>{esc(cat.age_label(ages[0], ages[1], age_est))}"
+                         f"{'' if fits else ' · not the students’ ages'}</span>")
         codes = [c for c in lang.split(",") if c]
         if len(codes) > 3:
             langs = f"multilingual ({len(codes)} languages)"
@@ -735,7 +771,7 @@ class Hub:
                 buttons += (f"<form method='post' action='/library/add' style='display:inline'>"
                             f"<input type='hidden' name='key' value='{esc(item['key'])}'><input type='hidden' name='back' value='{esc(here)}'>"
                             f"<button class='secondary'>{esc(text)} · {self._gb(item['size'])}</button></form>")
-        return (f"<tr><td><strong>{esc(title)}</strong> <span class='pill {badge_class}'>{esc(label)}</span>"
+        return (f"<tr><td><strong>{esc(title)}</strong> <span class='pill {badge_class}'>{esc(label)}</span>{age_badge}"
                 f"{' <span class=muted>· ' + esc(langs) + '</span>' if langs else ''}"
                 f"<div class='muted'>{esc(summary[:160])}</div></td><td>{buttons}</td></tr>")
 
@@ -747,6 +783,10 @@ class Hub:
                     self.set_setting(key, f"{value:g}")
             except ValueError:
                 pass
+        if req.form.get("ages_form"):
+            valid = [g[0] for g in library.AGE_GROUPS]
+            chosen = [a for a in req.form_list("ages") if a in valid]
+            self.set_setting("ages", ",".join(chosen or valid))
         lang = req.form.get("lang", "").strip()[:12]
         if lang:
             self.set_setting("lang", lang)
@@ -776,11 +816,13 @@ class Hub:
         if not short:
             return redirect("/library?" + urlencode(
                 {"msg": "Starter sets exist for English, Portuguese and German. Pick collections by hand for this language."}))
-        picks = self.catalog.suggest(short, self.library_budget())
+        ages = self.student_ages()
+        picks = self.catalog.suggest(short, self.library_budget(), ages)
         self.db.execute("DELETE FROM library_selection")
         for item in picks:
             self.select_item(item)
-        return redirect("/library?" + urlencode({"msg": f"Suggested {len(picks)} collections that fit this card. Change anything you like."}))
+        return redirect("/library?" + urlencode({"msg": f"Suggested {len(picks)} collections for {self._ages_text(ages)} "
+                                                        "that fit this card. Change anything you like."}))
 
     def library_refresh(self, req: Request) -> Response:
         if not self._local(req):

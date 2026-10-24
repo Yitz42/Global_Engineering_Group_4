@@ -30,33 +30,71 @@ USER_AGENT = "MeshLearn-library-fetcher/0.1 (offline education prototype)"
 # without images, maxi = everything. An empty string means the book has one flavour.
 FLAVOURS = ("mini", "nopic", "maxi", "")
 
-# Packages in priority order per language. Earlier packages are kept first when
-# the card is small; later ones are added, and flavours upgraded, as room allows.
+# Age groups, by age rather than school grade so they mean the same in every country.
+AGE_GROUPS = [
+    ("early", "Ages 5–8", 5, 8),
+    ("primary", "Ages 9–11", 9, 11),
+    ("lower", "Ages 12–14", 12, 14),
+    ("upper", "Ages 15–18", 15, 18),
+    ("adult", "Adults and teachers", 19, 99),
+]
+DEFAULT_AGES = ("lower", "upper")  # the project's learners are secondary-school students
+
+
+def age_span(groups) -> Tuple[int, int]:
+    """Youngest and oldest age covered by a list of age-group keys."""
+    chosen = [g for g in AGE_GROUPS if g[0] in groups] or AGE_GROUPS
+    return min(g[2] for g in chosen), max(g[3] for g in chosen)
+
+
+def ages_overlap(ages: Tuple[int, int], groups) -> bool:
+    """True if a collection for `ages` suits at least one chosen group: they share at
+    least two years, so a children's collection ending at 12 doesn't count for ages 12-14."""
+    return any(min(ages[1], hi) - max(ages[0], lo) >= 1 for key, _, lo, hi in AGE_GROUPS if key in groups)
+
+
+# Packages in priority order per language, with the ages each suits. Earlier
+# packages are kept first when the card is small; later ones are added, and
+# flavours upgraded, as room allows. Only packages that suit the students' ages
+# are considered.
 PACKAGES: Dict[str, List[dict]] = {
     "en": [
-        {"key": "phet", "kiwix": "phet_en_all", "collection": "Science simulations (PhET)", "license": "CC BY 4.0"},
-        {"key": "wp100", "kiwix": "wikipedia_en_100", "collection": "Encyclopedia", "license": "CC BY-SA"},
+        {"key": "phet", "kiwix": "phet_en_all", "collection": "Science simulations (PhET)", "license": "CC BY 4.0", "ages": (8, 99)},
+        {"key": "kidsenc", "kiwix": "vikidia_en_all", "collection": "Encyclopedia for children (Vikidia)", "license": "CC BY-SA", "ages": (8, 13)},
+        {"key": "picture", "kiwix": "prunelle_en_interactive-books", "collection": "Picture books (Prunelle)", "license": "See source", "ages": (3, 9)},
+        {"key": "wp100", "kiwix": "wikipedia_en_100", "collection": "Encyclopedia", "license": "CC BY-SA", "ages": (10, 99)},
         {"key": "books", "gutenberg": [1342, 84, 11, 1661, 2701, 98, 74, 120, 1260, 35],
-         "collection": "Classic books (Project Gutenberg)", "license": "Public domain in the USA"},
-        {"key": "wptop", "kiwix": "wikipedia_en_top", "collection": "Encyclopedia", "license": "CC BY-SA"},
-        {"key": "wikibooks", "kiwix": "wikibooks_en_all", "collection": "Textbooks (Wikibooks)", "license": "CC BY-SA"},
-        {"key": "wikiversity", "kiwix": "wikiversity_en_all", "collection": "Courses (Wikiversity)", "license": "CC BY-SA"},
-        {"key": "wpall", "kiwix": "wikipedia_en_all", "collection": "Encyclopedia", "license": "CC BY-SA"},
-        {"key": "wiktionary", "kiwix": "wiktionary_en_all", "collection": "Dictionary (Wiktionary)", "license": "CC BY-SA"},
+         "collection": "Classic books (Project Gutenberg)", "license": "Public domain in the USA", "ages": (12, 99)},
+        {"key": "wptop", "kiwix": "wikipedia_en_top", "collection": "Encyclopedia", "license": "CC BY-SA", "ages": (10, 99)},
+        {"key": "wikibooks", "kiwix": "wikibooks_en_all", "collection": "Textbooks (Wikibooks)", "license": "CC BY-SA", "ages": (13, 99)},
+        {"key": "wikiversity", "kiwix": "wikiversity_en_all", "collection": "Courses (Wikiversity)", "license": "CC BY-SA", "ages": (15, 99)},
+        {"key": "tedkids", "kiwix": "ted_mul_kids", "collection": "TED talks for kids (video)", "license": "CC BY-NC-ND", "ages": (6, 12)},
+        {"key": "readaloud", "kiwix": "booksdash_en_all", "collection": "Read-aloud picture books (Book Dash)", "license": "CC BY 4.0", "ages": (3, 8)},
+        {"key": "wpall", "kiwix": "wikipedia_en_all", "collection": "Encyclopedia", "license": "CC BY-SA", "ages": (12, 99)},
+        {"key": "wiktionary", "kiwix": "wiktionary_en_all", "collection": "Dictionary (Wiktionary)", "license": "CC BY-SA", "ages": (10, 99)},
     ],
     "pt": [
-        {"key": "phet", "kiwix": "phet_pt_all", "collection": "Simulações de ciências (PhET)", "license": "CC BY 4.0"},
-        {"key": "wptop", "kiwix": "wikipedia_pt_top", "collection": "Enciclopédia", "license": "CC BY-SA"},
-        {"key": "wikibooks", "kiwix": "wikibooks_pt_all", "collection": "Livros didáticos (Wikilivros)", "license": "CC BY-SA"},
-        {"key": "wpall", "kiwix": "wikipedia_pt_all", "collection": "Enciclopédia", "license": "CC BY-SA"},
+        {"key": "phet", "kiwix": "phet_pt_all", "collection": "Simulações de ciências (PhET)", "license": "CC BY 4.0", "ages": (8, 99)},
+        {"key": "kidsenc", "kiwix": "vikidia_pt_all", "collection": "Enciclopédia para crianças (Vikidia)", "license": "CC BY-SA", "ages": (8, 14)},
+        {"key": "tedkids", "kiwix": "ted_mul_kids", "collection": "TED talks for kids (video)", "license": "CC BY-NC-ND", "ages": (6, 12)},
+        {"key": "wptop", "kiwix": "wikipedia_pt_top", "collection": "Enciclopédia", "license": "CC BY-SA", "ages": (10, 99)},
+        {"key": "wikibooks", "kiwix": "wikibooks_pt_all", "collection": "Livros didáticos (Wikilivros)", "license": "CC BY-SA", "ages": (13, 99)},
+        {"key": "wpall", "kiwix": "wikipedia_pt_all", "collection": "Enciclopédia", "license": "CC BY-SA", "ages": (12, 99)},
     ],
     "de": [
-        {"key": "phet", "kiwix": "phet_de_all", "collection": "Naturwissenschaftliche Simulationen (PhET)", "license": "CC BY 4.0"},
-        {"key": "wptop", "kiwix": "wikipedia_de_top", "collection": "Enzyklopädie", "license": "CC BY-SA"},
-        {"key": "wikibooks", "kiwix": "wikibooks_de_all", "collection": "Lehrbücher (Wikibooks)", "license": "CC BY-SA"},
-        {"key": "wpall", "kiwix": "wikipedia_de_all", "collection": "Enzyklopädie", "license": "CC BY-SA"},
+        {"key": "phet", "kiwix": "phet_de_all", "collection": "Naturwissenschaftliche Simulationen (PhET)", "license": "CC BY 4.0", "ages": (8, 99)},
+        {"key": "kidsenc", "kiwix": "klexikon_de_all", "collection": "Kinderlexikon (Klexikon)", "license": "CC BY-SA", "ages": (6, 12)},
+        {"key": "tedkids", "kiwix": "ted_mul_kids", "collection": "TED talks for kids (video)", "license": "CC BY-NC-ND", "ages": (6, 12)},
+        {"key": "wptop", "kiwix": "wikipedia_de_top", "collection": "Enzyklopädie", "license": "CC BY-SA", "ages": (10, 99)},
+        {"key": "wikibooks", "kiwix": "wikibooks_de_all", "collection": "Lehrbücher (Wikibooks)", "license": "CC BY-SA", "ages": (13, 99)},
+        {"key": "wpall", "kiwix": "wikipedia_de_all", "collection": "Enzyklopädie", "license": "CC BY-SA", "ages": (12, 99)},
     ],
 }
+
+
+def specs_for(lang: str, ages=DEFAULT_AGES) -> List[dict]:
+    """The starter packages for a language that suit the students' ages."""
+    return [spec for spec in PACKAGES.get(lang, []) if ages_overlap(spec["ages"], ages)]
 
 # All of Wikipedia already contains its top-articles sets, so it replaces them.
 SUPERSEDES = {"wpall": ("wptop", "wp100")}
@@ -137,12 +175,12 @@ def gutenberg_option(ids: List[int]) -> Option:
     return Option("", f"{len(files)} classic books", total, files, "txt")
 
 
-def resolve(lang: str, log=print) -> List[Package]:
+def resolve(lang: str, log=print, ages=DEFAULT_AGES) -> List[Package]:
     """Look up live sizes for every package in a language."""
     if lang not in PACKAGES:
         raise ValueError(f"unknown language {lang!r}; choose from {', '.join(PACKAGES)}")
     packages = []
-    for spec in PACKAGES[lang]:
+    for spec in specs_for(lang, ages):
         pkg = Package(spec["key"], spec["collection"], spec["license"])
         try:
             if "kiwix" in spec:
@@ -277,9 +315,10 @@ def gutenberg_titles(dest_dir: str) -> Dict[str, str]:
     return titles
 
 
-def run(sd_gb: float, lang: str, dest: str, reserve_gb: float = 2.0, dry_run: bool = False, log=print) -> int:
+def run(sd_gb: float, lang: str, dest: str, reserve_gb: float = 2.0, dry_run: bool = False, log=print,
+        ages=DEFAULT_AGES) -> int:
     log(f"Looking up current open content for language '{lang}'...")
-    packages = resolve(lang, log)
+    packages = resolve(lang, log, ages)
     budget = usable_bytes(sd_gb, reserve_gb)
     if not dry_run:
         os.makedirs(dest, exist_ok=True)

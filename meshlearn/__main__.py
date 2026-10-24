@@ -139,7 +139,8 @@ def cmd_library(args) -> int:
         print("Give --sd-gb (card size), or --from-hub to use the selection made on the hub's Card library page.",
               file=sys.stderr)
         return 2
-    return run_library(args.sd_gb, args.lang, args.dest, reserve_gb=args.reserve_gb, dry_run=args.dry_run)
+    ages = [a.strip() for a in args.ages.split(",") if a.strip()]
+    return run_library(args.sd_gb, args.lang, args.dest, reserve_gb=args.reserve_gb, dry_run=args.dry_run, ages=ages)
 
 
 def _library_from_hub(args) -> int:
@@ -216,6 +217,9 @@ def main(argv=None) -> int:
     lib.add_argument("--lang", default="en", choices=["en", "pt", "de"])
     lib.add_argument("--dest", required=True, help="the phone's library folder, e.g. /Volumes/SDCARD/meshlearn/library")
     lib.add_argument("--reserve-gb", type=float, default=2.0, help="space to leave free (default 2)")
+    lib.add_argument("--ages", default="lower,upper",
+                     help="students' age groups: early (5-8), primary (9-11), lower (12-14), upper (15-18), adult; "
+                          "comma-separated (default lower,upper)")
     lib.add_argument("--dry-run", action="store_true", help="show the plan without downloading")
     lib.set_defaults(func=cmd_library)
 
