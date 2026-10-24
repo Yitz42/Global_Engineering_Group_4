@@ -226,9 +226,16 @@ def main(argv=None) -> int:
     except OSError as exc:
         if exc.errno != errno.EADDRINUSE:
             raise
+        other_ports = {
+            "demo": "demo --hub-port 8100 --phone-port 8180 --sim-port 47101",
+            "hub": "hub --port 8100 --sim-port 47101",
+            "phone": "phone --port 8180 --sim-port 47102 " + " ".join(
+                a for a in (f"--data {args.data}", f"--hub {args.hub}") if "None" not in a) if args.command == "phone" else "",
+        }.get(args.command, "")
         print("A port MeshLearn needs is already in use, probably by another MeshLearn demo, hub or phone "
-              "that is still running.\nStop it with Ctrl+C in its terminal, or pick other ports, e.g.:\n"
-              "  python3 -m meshlearn demo --hub-port 8100 --phone-port 8180 --sim-port 47101", file=sys.stderr)
+              "that is still running. (The demo already includes a teacher hub at http://localhost:8000.)\n"
+              "Stop the other one with Ctrl+C in its terminal" + (f", or pick other ports:\n  python3 -m meshlearn {other_ports}"
+                                                                 if other_ports else "."), file=sys.stderr)
         return 1
 
 
