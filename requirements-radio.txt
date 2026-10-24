@@ -1,0 +1,3 @@
+# Only needed to talk to real Meshtastic radios. The demo, hub and phone
+# otherwise use the Python standard library alone.
+meshtastic>=2.3

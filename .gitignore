@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local data from running the hub, phone or demo
+hub-data/
+phone-data/
+*.db
+*.db-journal
+
+# Downloaded library content
+*.zim
+*.part
+library/
+!meshlearn/starter_library/
