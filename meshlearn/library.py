@@ -200,8 +200,10 @@ def _fmt(num: int) -> str:
     return f"{num / 1e9:.2f} GB" if num >= 1e8 else f"{num / 1e6:.1f} MB"
 
 
-def download(url: str, dest: str, expected: int, log=print) -> None:
-    """Download with resume: a partial file is continued, not restarted."""
+def download(url: str, dest: str, expected: int, log=print, cancel=None, progress=None) -> None:
+    """Download with resume: a partial file is continued, not restarted.
+    `cancel` (a threading.Event) stops early and keeps the partial file for next time;
+    `progress(bytes_so_far)` is called as data arrives."""
     part = dest + ".part"
     have = os.path.getsize(part) if os.path.exists(part) else 0
     if os.path.exists(dest) and (not expected or os.path.getsize(dest) == expected):
@@ -218,11 +220,15 @@ def download(url: str, dest: str, expected: int, log=print) -> None:
         last = time.monotonic()
         with open(part, mode) as fh:
             while True:
+                if cancel is not None and cancel.is_set():
+                    return
                 chunk = resp.read(1024 * 1024)
                 if not chunk:
                     break
                 fh.write(chunk)
                 have += len(chunk)
+                if progress is not None:
+                    progress(have)
                 if time.monotonic() - last > 5:
                     pct = f" {100 * have / expected:.0f}%" if expected else ""
                     log(f"  {os.path.basename(dest)}: {_fmt(have)}{pct}")

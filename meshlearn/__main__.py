@@ -133,7 +133,42 @@ by radio. Ctrl+C to stop.
 
 
 def cmd_library(args) -> int:
+    if args.from_hub:
+        return _library_from_hub(args)
+    if args.sd_gb is None:
+        print("Give --sd-gb (card size), or --from-hub to use the selection made on the hub's Card library page.",
+              file=sys.stderr)
+        return 2
     return run_library(args.sd_gb, args.lang, args.dest, reserve_gb=args.reserve_gb, dry_run=args.dry_run)
+
+
+def _library_from_hub(args) -> int:
+    """Download the collections the teacher chose on the hub's Card library page."""
+    from .catalog import DownloadJob, remaining_bytes
+
+    hub = Hub(os.path.join(args.from_hub, "hub.db"), lambda handler: _NoRadio())
+    items = hub.selection()
+    if not items:
+        print("Nothing is chosen yet. Pick collections on the hub's Card library page first.", file=sys.stderr)
+        return 1
+    dest = os.path.dirname(os.path.normpath(args.dest)) if os.path.basename(os.path.normpath(args.dest)) == "library" else args.dest
+    for item in items:
+        print(f"  {item['size'] / 1e9:8.2f} GB  {item['title']}")
+    print(f"  {remaining_bytes(items, dest) / 1e9:8.2f} GB  still to download into {os.path.join(dest, 'library')}")
+    if args.dry_run:
+        return 0
+    job = DownloadJob(items, dest)
+    job.start()
+    while job.is_alive():
+        job.join(5)
+        p = job.progress()
+        print(f"  {p['done'] / 1e9:.2f} / {p['total'] / 1e9:.2f} GB  {p['current']}")
+    p = job.progress()
+    if p["state"] != "done":
+        print(f"Stopped: {p['error'] or p['state']}. Run again to resume.", file=sys.stderr)
+        return 1
+    print("Done. The phone's Library page lists everything.")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -176,7 +211,8 @@ def main(argv=None) -> int:
     pk.set_defaults(func=cmd_pack)
 
     lib = sub.add_parser("library", help="download open content sized to an SD card")
-    lib.add_argument("--sd-gb", type=float, required=True, help="card size printed on the label, in GB")
+    lib.add_argument("--sd-gb", type=float, help="card size printed on the label, in GB")
+    lib.add_argument("--from-hub", metavar="HUB_DATA", help="download the selection made on the hub's Card library page")
     lib.add_argument("--lang", default="en", choices=["en", "pt", "de"])
     lib.add_argument("--dest", required=True, help="the phone's library folder, e.g. /Volumes/SDCARD/meshlearn/library")
     lib.add_argument("--reserve-gb", type=float, default=2.0, help="space to leave free (default 2)")

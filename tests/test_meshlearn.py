@@ -3,12 +3,15 @@
 Run with: python -m unittest discover -s tests -v
 """
 
+import functools
+import http.server
 import io
 import json
 import os
 import shutil
 import socket
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -18,11 +21,12 @@ import zipfile
 from http.cookiejar import CookieJar
 
 from meshlearn import assignments as asg
-from meshlearn import library, protocol
+from meshlearn import catalog, library, protocol
 from meshlearn.hub import Hub
 from meshlearn.messenger import Messenger
 from meshlearn.phone import Phone
 from meshlearn.transport import UdpSimTransport
+from meshlearn.web import Request
 
 SAMPLE = os.path.join(os.path.dirname(__file__), "..", "meshlearn", "sample_assignment.json")
 GOOD_ANSWERS = {"q1": "1", "q2": "0,75", "q3": "chlorophyll", "q4": "1", "q5": "We share bread."}
@@ -341,6 +345,139 @@ class CoursePackTests(EndToEndBase):
         aid = "a-fractions1"
         self.assertTrue(wait_for(lambda: (self.hub._holding("phone-1", aid) or {"version": ""})["version"]
                                  == self.hub.current_version(aid)))
+
+
+FAKE_CATALOG = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+{entries}
+</feed>"""
+FAKE_ENTRY = """<entry><title>{title}</title><summary>{summary}</summary><language>{lang}</language><name>{name}</name>
+<flavour>{flavour}</flavour><category>{category}</category><tags>{tags}</tags><articleCount>10</articleCount><updated>2026-09-01T00:00:00Z</updated>
+<link rel="http://opds-spec.org/acquisition/open-access" type="application/x-zim" href="{base}/{name}_{flavour}.zim.meta4" length="{size}"/></entry>"""
+
+
+def fake_catalog_xml(base="https://download.example.org/zim"):
+    rows = [
+        ("PhET Interactive Simulations", "Simulations", "eng", "phet_en_all", "", "phet", "phet", 110_000_000),
+        ("Wikipedia", "The free encyclopedia", "eng", "wikipedia_en_all", "mini", "wikipedia", "wikipedia", 14_000_000_000),
+        ("Wikipedia", "The free encyclopedia", "eng", "wikipedia_en_all", "nopic", "wikipedia", "wikipedia", 52_000_000_000),
+        ("Wikipedia 100", "Top 100", "eng", "wikipedia_en_100", "", "wikipedia", "wikipedia", 330_000_000),
+        ("Vikidia", "The encyclopedia for children", "eng", "vikidia_en_all", "nopic", "vikidia", "vikidia", 11_000_000),
+        ("Stardew Valley Wiki", "Farming game", "eng", "stardewvalleywiki.com_en_all", "", "", "gaming;fandom", 90_000_000),
+        ("Ocean course", "A short course for school students about oceans", "eng", "oceans_en_all", "", "", "", 5_000_000),
+        ("Simulações", "PhET em português", "por", "phet_pt_all", "", "phet", "phet", 80_000_000),
+    ]
+    entries = "".join(FAKE_ENTRY.format(title=t, summary=s, lang=l, name=n, flavour=f, category=c, tags=g, size=z, base=base)
+                      for t, s, l, n, f, c, g, z in rows)
+    return FAKE_CATALOG.format(entries=entries).encode()
+
+
+class CatalogTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.cat = catalog.Catalog(os.path.join(self.tmp, "catalog.json"))
+        self.cat.entries = catalog.parse_catalog(fake_catalog_xml())
+
+    def test_parse_strips_metalink_and_reads_sizes(self):
+        phet = self.cat.find("phet_en_all", "")
+        self.assertTrue(phet["url"].endswith("phet_en_all_.zim"))
+        self.assertEqual(phet["size"], 110_000_000)
+
+    def test_education_comes_first_and_games_are_marked(self):
+        levels = {e["name"]: (e["level"], e["label"]) for e in self.cat.entries}
+        self.assertEqual(levels["phet_en_all"], (3, "Science simulations"))
+        self.assertEqual(levels["vikidia_en_all"], (3, "Encyclopedia for children"))
+        self.assertEqual(levels["wikipedia_en_all"], (2, "Encyclopedia"))
+        self.assertEqual(levels["oceans_en_all"], (2, "Learning reference"))  # found by its description
+        self.assertEqual(levels["stardewvalleywiki.com_en_all"][0], 0)
+        names = [g["name"] for g in self.cat.groups("eng", 2)]
+        self.assertEqual(names[:2], ["vikidia_en_all", "phet_en_all"])  # core learning, smallest first
+        self.assertNotIn("stardewvalleywiki.com_en_all", names)
+        self.assertIn("stardewvalleywiki.com_en_all", [g["name"] for g in self.cat.groups("eng", 0)])
+        self.assertEqual([g["name"] for g in self.cat.groups("por", 0)], ["phet_pt_all"])
+
+    def test_wikipedia_flavours_are_one_collection(self):
+        wp = next(g for g in self.cat.groups("eng", 2) if g["name"] == "wikipedia_en_all")
+        self.assertEqual([o["flavour"] for o in wp["options"]], ["mini", "nopic"])
+
+    def test_suggest_fits_budget(self):
+        picks = self.cat.suggest("en", 1_000_000_000)
+        self.assertLessEqual(sum(p["size"] for p in picks), 1_000_000_000)
+        self.assertIn("phet_en_all|", [p["key"] for p in picks])
+
+    def test_cache_survives_restart(self):
+        with open(self.cat.cache_path, "w") as fh:
+            json.dump({"fetched_at": 1.0, "entries": self.cat.entries}, fh)
+        again = catalog.Catalog(self.cat.cache_path)
+        self.assertEqual(len(again.entries), len(self.cat.entries))
+
+
+class _Files(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+class CardDownloadTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.src = os.path.join(self.tmp, "mirror")
+        os.makedirs(self.src)
+        with open(os.path.join(self.src, "vikidia_en_all_nopic.zim"), "wb") as fh:
+            fh.write(os.urandom(300_000))
+        with open(os.path.join(self.src, "pg11.txt"), "w") as fh:
+            fh.write("Title: Alice's Adventures in Wonderland\n\nAlice was beginning to get very tired...\n")
+        handler = functools.partial(_Files, directory=self.src)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def items(self):
+        zim = {"key": "vikidia_en_all|nopic", "title": "Vikidia (nopic)", "label": "Encyclopedia for children", "level": 3,
+               "lang": "eng", "size": 300_000, "folder": "vikidia", "kind": "zim",
+               "files": [(f"{self.base}/vikidia_en_all_nopic.zim", "vikidia_en_all_nopic.zim")], "license": "x"}
+        books = {"key": "gutenberg|classics", "title": "1 classic novel", "label": "Books and source texts", "level": 2,
+                 "lang": "eng", "size": 60, "folder": "books", "kind": "txt",
+                 "files": [(f"{self.base}/pg11.txt", "pg11.txt")], "license": "Public domain in the USA"}
+        return [zim, books]
+
+    def test_copies_files_and_writes_index_the_phone_reads(self):
+        card = os.path.join(self.tmp, "card", "meshlearn")
+        self.assertEqual(catalog.remaining_bytes(self.items(), card), 300_060)
+        job = catalog.DownloadJob(self.items(), card)
+        job.start()
+        job.join(30)
+        self.assertEqual(job.progress()["state"], "done", job.progress())
+        self.assertEqual(catalog.remaining_bytes(self.items(), card), 0)
+        phone = Phone(card, "hub", "t", lambda h: None)
+        titles = {i["title"] for i in phone.library_items()}
+        self.assertIn("Vikidia (nopic)", titles)
+        self.assertIn("Alice's Adventures in Wonderland", titles)
+
+    def test_hub_library_page_and_selection(self):
+        hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        hub.catalog.entries = catalog.parse_catalog(fake_catalog_xml(self.base))
+        port = free_port()
+        server = hub.app.serve_in_thread("127.0.0.1", port)
+        self.addCleanup(server.shutdown)
+        post = lambda path, data: urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", urllib.parse.urlencode(data).encode()).read().decode()  # noqa: E731
+        page_html = post("/library/add", {"key": "wikipedia_en_all|mini"})
+        self.assertIn("14.00 GB</strong> chosen", page_html)
+        post("/library/add", {"key": "wikipedia_en_all|nopic"})  # replaces the other version
+        self.assertEqual([i["key"] for i in hub.selection()], ["wikipedia_en_all|nopic"])
+        self.assertIn("too much", urllib.request.urlopen(f"http://127.0.0.1:{port}/library").read().decode())
+        post("/library/suggest", {})
+        self.assertLessEqual(sum(i["size"] for i in hub.selection()), hub.library_budget())
+        self.assertIn("Vikidia", urllib.request.urlopen(f"http://127.0.0.1:{port}/library?level=3").read().decode())
+        outsider = Request("POST", "/library/download", {}, {}, b"dest=/tmp", "10.0.0.7")
+        self.assertIn("hub laptop itself", hub.library_download_start(outsider).headers["Location"].replace("+", " "))
+
+
+class _QuietRadio:
+    def status(self):
+        return {"pending": 0, "acked": 0, "failed": 0, "frames_sent": 0}
 
 
 if __name__ == "__main__":

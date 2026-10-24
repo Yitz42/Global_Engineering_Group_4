@@ -13,11 +13,15 @@ import csv
 import io
 import json
 import logging
+import os
 import time
 import zipfile
 from typing import Dict, Iterable, List, Optional
+from urllib.parse import urlencode
 
 from . import assignments as asg
+from . import catalog as cat
+from . import library
 from . import protocol
 from .db import Database
 from .messenger import Messenger
@@ -47,7 +51,12 @@ CREATE TABLE IF NOT EXISTS submissions (
     answers TEXT NOT NULL, submitted_at REAL, received_at REAL NOT NULL,
     grade TEXT, manual TEXT NOT NULL DEFAULT '{}', result_msg_id INTEGER
 );
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS library_selection (key TEXT PRIMARY KEY, item TEXT NOT NULL, added REAL NOT NULL);
 """
+
+LIBRARY_DEFAULTS = {"card_gb": "32", "reserve_gb": "2", "lang": "eng", "dest": ""}
+LEVEL_FILTERS = [("3", "Core learning only"), ("2", "Education and reference"), ("0", "Everything")]
 
 ACTION_LABELS = {"open": "opening", "close": "closing", "update": "sending update", "copy": "sending full copy"}
 
@@ -60,6 +69,8 @@ class Hub:
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
+        self.catalog = cat.Catalog(os.path.join(os.path.dirname(os.path.abspath(db_path)), "catalog.json"))
+        self.download_job: Optional[cat.DownloadJob] = None
         self.app = App("hub")
         self._routes()
 
@@ -237,7 +248,8 @@ class Hub:
     # -- web ------------------------------------------------------------------
 
     def _nav(self) -> str:
-        return "<a href='/'>Dashboard</a><a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a>"
+        return ("<a href='/'>Dashboard</a><a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a>"
+                "<a href='/library'>Card library</a>")
 
     def _page(self, title: str, body: str) -> str:
         return page(title, body, self._nav(), site="MeshLearn Teacher Hub")
@@ -261,6 +273,16 @@ class Hub:
         app.add_route("POST", "/phones", self.phones_add)
         app.add_route("POST", "/mesh/retry", self.mesh_retry)
         app.add_route("GET", "/api/status", lambda r: json_response(self.messenger.status()))
+        app.add_route("GET", "/library", self.library_page)
+        app.add_route("POST", "/library/settings", self.library_settings)
+        app.add_route("POST", "/library/add", self.library_add)
+        app.add_route("POST", "/library/remove", self.library_remove)
+        app.add_route("POST", "/library/suggest", self.library_suggest)
+        app.add_route("POST", "/library/refresh", self.library_refresh)
+        app.add_route("GET", "/library/download", self.library_download_page)
+        app.add_route("POST", "/library/download", self.library_download_start)
+        app.add_route("POST", "/library/download/cancel", self.library_download_cancel)
+        app.add_route("GET", "/api/library/progress", self.library_progress)
 
     def dashboard(self, req: Request) -> Response:
         rows = self.db.all(
@@ -530,6 +552,315 @@ class Hub:
     def mesh_retry(self, req: Request) -> Response:
         self.messenger.retry_now()
         return redirect("/")
+
+    # -- card library ---------------------------------------------------------
+
+    def setting(self, key: str) -> str:
+        row = self.db.one("SELECT value FROM settings WHERE key = ?", (key,))
+        return row["value"] if row else LIBRARY_DEFAULTS.get(key, "")
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    def selection(self) -> List[dict]:
+        return [json.loads(r["item"]) for r in self.db.all("SELECT item FROM library_selection ORDER BY added")]
+
+    def select_item(self, item: dict) -> None:
+        name = item["key"].split("|")[0]
+        # One version (flavour) per collection: picking another replaces it.
+        for row in self.db.all("SELECT key FROM library_selection"):
+            if row["key"].split("|")[0] == name:
+                self.db.execute("DELETE FROM library_selection WHERE key = ?", (row["key"],))
+        self.db.execute("INSERT INTO library_selection (key, item, added) VALUES (?, ?, ?)",
+                        (item["key"], json.dumps(item), time.time()))
+
+    def library_budget(self) -> int:
+        try:
+            return library.usable_bytes(float(self.setting("card_gb")), float(self.setting("reserve_gb")))
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _local(req: Request) -> bool:
+        """Downloads write to this laptop's disk, so only its own browser may start them."""
+        return req.client in ("127.0.0.1", "::1")
+
+    @staticmethod
+    def _gb(num: int) -> str:
+        return f"{num / 1e9:.2f} GB" if num >= 1e8 else f"{num / 1e6:.0f} MB" if num >= 1e6 else f"{max(num, 1) / 1e3:.0f} KB"
+
+    def _back(self, req: Request) -> Response:
+        back = req.form.get("back", "")
+        return redirect(back if back.startswith("/library") else "/library")
+
+    def library_page(self, req: Request) -> Response:
+        lang = req.query.get("lang", self.setting("lang"))
+        level = req.query.get("level", "2")
+        kind = req.query.get("kind", "")
+        query = req.query.get("q", "")
+        try:
+            page_no = max(1, int(req.query.get("page", "1")))
+        except ValueError:
+            page_no = 1
+        here = "/library?" + urlencode({k: v for k, v in {"lang": lang, "level": level, "kind": kind, "q": query,
+                                                           "page": page_no}.items() if v not in ("", None)})
+        notice = req.query.get("msg", "")
+        selected = {i["key"]: i for i in self.selection()}
+        budget = self.library_budget()
+        used = sum(i["size"] for i in selected.values())
+
+        # -- plan panel
+        pct = min(100, round(100 * used / budget)) if budget else 100
+        over = used > budget
+        bar = (f"<div style='height:14px;border-radius:7px;background:var(--line);overflow:hidden' role='img' "
+               f"aria-label='{pct}% of the card used'><div style='height:100%;width:{pct}%;background:"
+               f"{'var(--bad)' if over else 'var(--accent)'}'></div></div>")
+        rows = "".join(
+            f"<tr><td>{esc(i['title'])}<div class='muted'>{esc(i['label'])}</div></td><td>{self._gb(i['size'])}</td>"
+            f"<td><form method='post' action='/library/remove'><input type='hidden' name='key' value='{esc(i['key'])}'>"
+            f"<input type='hidden' name='back' value='{esc(here)}'><button class='secondary'>Remove</button></form></td></tr>"
+            for i in selected.values()
+        )
+        lang_options = "".join(
+            f"<option value='{esc(code)}'{' selected' if code == self.setting('lang') else ''}>"
+            f"{esc(cat.LANGUAGES.get(code, code))} ({n})</option>" for code, n in self.catalog.languages()[:60]
+        )
+        short = {v: k for k, v in cat.SHORT_TO_ISO.items()}.get(self.setting("lang"))
+        plan = (
+            "<div class='card'>"
+            "<form method='post' action='/library/settings' class='grid'>"
+            f"<div><label for='card_gb'>Card size (GB on the label)</label><input type='number' id='card_gb' name='card_gb' min='1' step='1' value='{esc(self.setting('card_gb'))}'></div>"
+            f"<div><label for='reserve_gb'>Keep free for assignments (GB)</label><input type='number' id='reserve_gb' name='reserve_gb' min='0' step='0.5' value='{esc(self.setting('reserve_gb'))}'></div>"
+            f"<div><label for='lang_set'>Students' language</label><select id='lang_set' name='lang'>{lang_options}</select></div>"
+            "<div><label>&nbsp;</label><button class='secondary'>Save</button></div></form>"
+            f"<p><strong>{self._gb(used)}</strong> chosen of <strong>{self._gb(budget)}</strong> available on the card"
+            + (f" · <span class='bad'>{self._gb(used - budget)} too much: remove something or use a bigger card</span>" if over else "")
+            + f"</p>{bar}"
+            + (f"<table>{rows}</table>" if rows else "<p class='muted'>Nothing chosen yet. Add collections below, or let MeshLearn suggest a starter set.</p>")
+            + "<p>"
+            + (f"<form method='post' action='/library/suggest' style='display:inline'><button class='secondary'>"
+               f"{'Replace with' if rows else 'Suggest'} a starter set for this card</button></form>" if short else
+               "<span class='muted'>Starter sets exist for English, Portuguese and German; pick collections by hand for other languages.</span>")
+            + (" <a class='button' href='/library/download'>Copy to memory card…</a>" if rows else "")
+            + "</p></div>"
+        )
+
+        # -- catalog browser
+        if not self.catalog.entries:
+            browse = ("<div class='card'><p>The list of available collections has not been downloaded yet. "
+                      "Connect this laptop to the internet once, then:</p>"
+                      "<form method='post' action='/library/refresh'><button>Download the list (about 4 MB)</button></form></div>")
+        else:
+            try:
+                min_level = int(level)
+            except ValueError:
+                min_level = 2
+            groups = self.catalog.groups(lang, min_level, query, kind)
+            per_page = 40
+            pages = max(1, (len(groups) + per_page - 1) // per_page)
+            page_no = min(page_no, pages)
+            shown = groups[(page_no - 1) * per_page: page_no * per_page]
+            lang_filter = "<option value=''>All languages</option>" + "".join(
+                f"<option value='{esc(code)}'{' selected' if code == lang else ''}>{esc(cat.LANGUAGES.get(code, code))}</option>"
+                for code, _ in self.catalog.languages()[:60])
+            level_filter = "".join(f"<option value='{v}'{' selected' if v == level else ''}>{esc(t)}</option>" for v, t in LEVEL_FILTERS)
+            kind_filter = "<option value=''>All kinds</option>" + "".join(
+                f"<option{' selected' if k == kind else ''}>{esc(k)}</option>" for k in self.catalog.labels(lang, min_level))
+            filters = (
+                "<form method='get' action='/library' class='card grid'>"
+                f"<div><label for='q'>Search</label><input type='text' id='q' name='q' value='{esc(query)}' placeholder='e.g. math, biology, chemistry'></div>"
+                f"<div><label for='lang'>Language</label><select id='lang' name='lang'>{lang_filter}</select></div>"
+                f"<div><label for='level'>Show</label><select id='level' name='level'>{level_filter}</select></div>"
+                f"<div><label for='kind'>Kind</label><select id='kind' name='kind'>{kind_filter}</select></div>"
+                "<div><label>&nbsp;</label><button>Filter</button></div></form>"
+            )
+            items = ""
+            if lang in ("", "eng") and not query and kind in ("", "Books and source texts") and min_level <= 2 and page_no == 1:
+                g = cat.gutenberg_choice()["item"]
+                items += self._library_row(g["title"], "Ten well-known novels as plain text that opens in any browser.",
+                                           g["label"], 2, "eng", [(g, "Add", g["key"] in selected)], here, show_lang=not lang)
+            for g in shown:
+                options = []
+                for o in g["options"]:
+                    item = cat.selection_item(o)
+                    label = (o["flavour"] or "Add").replace("mini", "mini: article intros").replace(
+                        "nopic", "nopic: text only").replace("maxi", "maxi: with images")
+                    options.append((item, label, item["key"] in selected))
+                items += self._library_row(g["title"], g["summary"], g["label"], g["level"], g["lang"], options, here,
+                                           show_lang=not lang)
+            nav = ""
+            if pages > 1:
+                def link(p, text):
+                    params = {k: v for k, v in {"lang": lang, "level": level, "kind": kind, "q": query}.items() if v}
+                    params["page"] = p
+                    return f"<a class='button secondary' href='/library?{esc(urlencode(params))}'>{text}</a>"
+                nav = (f"<p>{link(page_no - 1, '← Previous') if page_no > 1 else ''} "
+                       f"<span class='muted'>Page {page_no} of {pages}</span> {link(page_no + 1, 'Next →') if page_no < pages else ''}</p>")
+            when = time.strftime("%b %d, %Y", time.localtime(self.catalog.fetched_at)) if self.catalog.fetched_at else "?"
+            browse = (
+                filters
+                + f"<p class='muted'>{len(groups)} collection{'' if len(groups) == 1 else 's'} match · list from {when} · "
+                "<form method='post' action='/library/refresh' style='display:inline'><button class='secondary'>Update the list</button></form></p>"
+                + (f"<table><tr><th>Collection</th><th>Add to card</th></tr>{items}</table>" if items else "<p class='muted'>Nothing matches.</p>")
+                + nav
+            )
+        body = (
+            (f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "")
+            + "<p class='muted'>Choose what goes on each phone's memory card. Learning material is listed first. "
+            "Everything is free and works without internet once it is on the card.</p>"
+            + "<h2>This card</h2>" + plan + "<h2>Available collections</h2>" + browse
+        )
+        return Response(self._page("Card library", body))
+
+    def _library_row(self, title, summary, label, level, lang, options, here, show_lang) -> str:
+        badge_class = {3: "good", 2: "", 1: "muted", 0: "bad"}.get(level, "")
+        codes = [c for c in lang.split(",") if c]
+        if len(codes) > 3:
+            langs = f"multilingual ({len(codes)} languages)"
+        elif show_lang or len(codes) > 1:
+            langs = ", ".join(cat.LANGUAGES.get(c, c) for c in codes)
+        else:
+            langs = ""
+        buttons = ""
+        for item, text, chosen in options:
+            if chosen:
+                buttons += (f"<form method='post' action='/library/remove' style='display:inline'>"
+                            f"<input type='hidden' name='key' value='{esc(item['key'])}'><input type='hidden' name='back' value='{esc(here)}'>"
+                            f"<button aria-pressed='true'>✓ {esc(text)} · {self._gb(item['size'])}</button></form>")
+            else:
+                buttons += (f"<form method='post' action='/library/add' style='display:inline'>"
+                            f"<input type='hidden' name='key' value='{esc(item['key'])}'><input type='hidden' name='back' value='{esc(here)}'>"
+                            f"<button class='secondary'>{esc(text)} · {self._gb(item['size'])}</button></form>")
+        return (f"<tr><td><strong>{esc(title)}</strong> <span class='pill {badge_class}'>{esc(label)}</span>"
+                f"{' <span class=muted>· ' + esc(langs) + '</span>' if langs else ''}"
+                f"<div class='muted'>{esc(summary[:160])}</div></td><td>{buttons}</td></tr>")
+
+    def library_settings(self, req: Request) -> Response:
+        for key in ("card_gb", "reserve_gb"):
+            try:
+                value = float(req.form.get(key, ""))
+                if value >= 0:
+                    self.set_setting(key, f"{value:g}")
+            except ValueError:
+                pass
+        lang = req.form.get("lang", "").strip()[:12]
+        if lang:
+            self.set_setting("lang", lang)
+            return redirect("/library?" + urlencode({"lang": lang}))
+        return redirect("/library")
+
+    def library_add(self, req: Request) -> Response:
+        key = req.form.get("key", "")
+        if key == "gutenberg|classics":
+            self.select_item(cat.gutenberg_choice()["item"])
+        else:
+            name, _, flavour = key.partition("|")
+            entry = self.catalog.find(name, flavour)
+            if entry:
+                self.select_item(cat.selection_item(entry))
+        return self._back(req)
+
+    def library_remove(self, req: Request) -> Response:
+        self.db.execute("DELETE FROM library_selection WHERE key = ?", (req.form.get("key", ""),))
+        return self._back(req)
+
+    def library_suggest(self, req: Request) -> Response:
+        short = {v: k for k, v in cat.SHORT_TO_ISO.items()}.get(self.setting("lang"))
+        if not short or not self.catalog.entries:
+            return redirect("/library")
+        picks = self.catalog.suggest(short, self.library_budget())
+        self.db.execute("DELETE FROM library_selection")
+        for item in picks:
+            self.select_item(item)
+        return redirect("/library?" + urlencode({"msg": f"Suggested {len(picks)} collections that fit this card. Change anything you like."}))
+
+    def library_refresh(self, req: Request) -> Response:
+        if not self._local(req):
+            return redirect("/library?" + urlencode({"msg": "Update the list from the hub laptop itself."}))
+        try:
+            count = self.catalog.refresh()
+            msg = f"Downloaded the list: {count} collections available."
+        except Exception as exc:
+            msg = f"Could not download the list ({exc}). Is this laptop online?"
+        return redirect("/library?" + urlencode({"msg": msg}))
+
+    def library_download_page(self, req: Request) -> Response:
+        job = self.download_job
+        selected = self.selection()
+        total = sum(i["size"] for i in selected)
+        if job and job.is_alive():
+            p = job.progress()
+            pct = round(100 * p["done"] / p["total"]) if p["total"] else 0
+            body = (
+                "<meta http-equiv='refresh' content='3'>"
+                f"<div class='card'><p><strong>Copying to {esc(p['library_dir'])}</strong></p>"
+                f"<p>{self._gb(p['done'])} of {self._gb(p['total'])} ({pct}%)</p>"
+                f"<div style='height:14px;border-radius:7px;background:var(--line);overflow:hidden' role='progressbar' "
+                f"aria-valuenow='{pct}' aria-valuemin='0' aria-valuemax='100'><div style='height:100%;width:{pct}%;background:var(--accent)'></div></div>"
+                f"<p class='muted'>Now: {esc(p['current'])}</p>"
+                f"<p>Finished: {esc(', '.join(p['finished'])) or 'none yet'}</p>"
+                "<form method='post' action='/library/download/cancel'><button class='secondary'>Stop (you can resume later)</button></form></div>"
+            )
+            return Response(self._page("Copying to the card", body))
+        status = ""
+        if job:
+            p = job.progress()
+            if p["state"] == "done":
+                status = (f"<p class='good' role='status'>Done: copied {len(p['finished'])} collections to {esc(p['library_dir'])}. "
+                          "Put the card back in the phone; its Library page lists everything.</p>")
+            elif p["state"] == "cancelled":
+                status = "<p class='warn' role='status'>Stopped. Start again to resume where it left off.</p>"
+            elif p["state"] == "failed":
+                status = f"<p class='bad' role='alert'>Copy failed: {esc(p['error'])}. Start again to resume.</p>"
+        notice = req.query.get("msg", "")
+        dest = self.setting("dest")
+        free = cat.free_bytes(dest) if dest else None
+        space = f" · {self._gb(free)} free there" if free is not None else ""
+        body = (
+            status + (f"<p class='bad' role='alert'>{esc(notice)}</p>" if notice else "")
+            + f"<p>{len(selected)} collections, <strong>{self._gb(total)}</strong> in total. "
+            "<a href='/library'>Change the selection</a></p>"
+            "<div class='card'><ol>"
+            "<li>Put the phone's microSD card in this laptop's card reader.</li>"
+            "<li>Enter the phone's MeshLearn folder on the card. With Termux this is "
+            "<code>&lt;card&gt;/Android/data/com.termux/files/meshlearn</code>.</li>"
+            "<li>Start. Large collections take a while; you can stop and resume later.</li></ol>"
+            "<form method='post' action='/library/download'>"
+            f"<label for='dest'>MeshLearn folder on the card{space}</label>"
+            f"<input type='text' id='dest' name='dest' value='{esc(dest)}' placeholder='/Volumes/SDCARD/Android/data/com.termux/files/meshlearn' required>"
+            "<button>Start copying</button></form></div>"
+            "<p class='muted'>Needs internet on this laptop. Files that are already on the card are skipped.</p>"
+        )
+        return Response(self._page("Copy to memory card", body))
+
+    def library_download_start(self, req: Request) -> Response:
+        if not self._local(req):
+            return redirect("/library/download?" + urlencode({"msg": "Start the copy from the hub laptop itself."}))
+        if self.download_job and self.download_job.is_alive():
+            return redirect("/library/download")
+        dest = os.path.expanduser(req.form.get("dest", "").strip())
+        if not dest or not os.path.isdir(os.path.dirname(dest.rstrip(os.sep)) or dest):
+            return redirect("/library/download?" + urlencode({"msg": f"Folder not found: {dest}. Is the card inserted?"}))
+        items = self.selection()
+        os.makedirs(dest, exist_ok=True)
+        needed = cat.remaining_bytes(items, dest)
+        free = cat.free_bytes(dest) or 0
+        if needed > free:
+            return redirect("/library/download?" + urlencode(
+                {"msg": f"Not enough space: need {self._gb(needed)}, the card has {self._gb(free)} free."}))
+        self.set_setting("dest", dest)
+        self.download_job = cat.DownloadJob(items, dest)
+        self.download_job.start()
+        return redirect("/library/download")
+
+    def library_download_cancel(self, req: Request) -> Response:
+        if self.download_job and self._local(req):
+            self.download_job.cancel()
+            self.download_job.join(timeout=10)
+        return redirect("/library/download")
+
+    def library_progress(self, req: Request) -> Response:
+        return json_response(self.download_job.progress() if self.download_job else {"state": "idle"})
 
 
 BUILDER_HTML = """

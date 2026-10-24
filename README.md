@@ -34,7 +34,7 @@ flowchart LR
 
 | Piece | What it does | Runs on |
 | --- | --- | --- |
-| Teacher hub | Assignment builder and editor, open/hide per phone, course pack export, auto-grading, manual grading of written answers, CSV export | Any laptop with Python 3.9+ |
+| Teacher hub | Assignment builder and editor, open/hide per phone, course pack export, auto-grading, manual grading of written answers, CSV export, card library browser | Any laptop with Python 3.9+ |
 | Student phone | Stored assignments, student website with answer checking, results, offline library, batched store-and-forward queue | Old Android phone with Termux, data on microSD |
 | Mesh link | Compressed, chunked, acknowledged messages that resend only lost pieces and survive reboots | Meshtastic radios, or a built-in simulator |
 | Library fetcher | Picks the best open content that fits the card (Kiwix offline Wikipedia, Wikibooks, Wikiversity, PhET, Project Gutenberg) in English, Portuguese, or German, and downloads it with resume | Any computer with internet, before deployment |
@@ -79,15 +79,36 @@ The simulated radio drops 20% of packets, so you can watch the retries work. Cha
      ```bash
      python3 -m meshlearn pack --out /Volumes/SDCARD/Android/data/com.termux/files/meshlearn
      ```
-6. **Fill the library** before the phone leaves an area with internet:
+6. **Fill the library** before the phone leaves an area with internet. Open **Card library** on the hub, choose collections, and press **Copy to memory card** with the phone's card in the laptop's card reader (see below). Or, without the browser:
    ```bash
    python3 -m meshlearn library --sd-gb 32 --lang pt --dest /Volumes/SDCARD/Android/data/com.termux/files/meshlearn/library --dry-run
    ```
-   Drop `--dry-run` to download. Run it again to resume an interrupted download.
+   Drop `--dry-run` to download. Run it again to resume an interrupted download. To download what was chosen on the hub page, use `--from-hub hub-data` in place of `--sd-gb`.
+
+## Choosing what goes on the card
+
+The hub's **Card library** page lists every collection in the [Kiwix](https://library.kiwix.org) catalog that can go on a phone. In October 2026 that was 3,658 collections in more than 100 languages, plus a set of classic novels from Project Gutenberg. The list is downloaded once (about 4 MB) and kept on the hub, so it can be browsed offline afterwards.
+
+**Learning material comes first.** Each collection gets a label and a level, set by simple rules from its category, name, tags and description:
+
+| Level | Examples |
+| --- | --- |
+| Core learning | PhET science simulations, Wikibooks and LibreTexts textbooks, Wikiversity, Khan Academy, CrashCourse, Art of Problem Solving, OER4Schools, Vikidia and Klexikon (encyclopedias for children) |
+| Learning reference | Wikipedia, Wiktionary, Wikisource and Gutenberg books, TED talks, freeCodeCamp, ProofWiki, MedlinePlus, and anything whose description mentions courses, lessons, students or school subjects |
+| General interest | Wikivoyage, Wikiquote, Stack Exchange Q&A, iFixit repair guides, software docs, maps |
+| Not school-related | Game and fan wikis |
+
+By default the page shows the first two levels in the students' language. The teacher can switch to core learning only or everything, filter by kind, or search ("biology", "math").
+
+**Fitting the card.** The teacher enters the card size, and each collection shows its versions with sizes: article intros (mini), text only (nopic), or with images (maxi). A bar tracks how much of the card the picks use and warns when they don't fit. "Suggest a starter set" fills the card automatically for English, Portuguese or German.
+
+**Copying to the card.** "Copy to memory card" downloads the picks straight onto a card in the laptop's card reader. It runs in the background with a progress bar, can be stopped and resumed, and skips files already on the card. The phone's Library page lists everything once the card is back in the phone.
+
+Only the hub laptop's own browser can start downloads or update the list, since both write to that laptop's disk.
 
 ## What fits on the card
 
-The fetcher looks up current file sizes from the Kiwix catalog every time it runs, so these plans change as the collections are updated. Example plans from October 24, 2026, keeping 2 GB free for assignments and the system:
+The fetcher looks up current file sizes from the Kiwix catalog every time it runs, so these plans change as the collections are updated. These are the automatic starter sets as of October 24, 2026, keeping 2 GB free for assignments and the system:
 
 | Card | English | Portuguese | German |
 | --- | --- | --- | --- |
@@ -145,6 +166,7 @@ meshlearn/
   hub.py             teacher dashboard, open/hide per phone, course pack export
   phone.py           stored assignments, student website, batching, library browser
   library.py         open-content planner and downloader
+  catalog.py         full Kiwix catalog: education rating, card budget, background copy to card
   web.py             tiny standard-library web framework
   starter_library/   three short original lessons included on every phone
   sample_assignment.json
@@ -158,7 +180,7 @@ docs/hardware.md, docs/android-setup.md
 python3 -m unittest discover -s tests -v
 ```
 
-There are 25 tests. They cover:
+There are 32 tests. They cover:
 
 - framing, corruption, and missing-piece reports;
 - lossless compact format;
@@ -166,7 +188,10 @@ There are 25 tests. They cover:
 - grading and validation;
 - the library planner;
 - delivery through 40% simulated loss, with each message delivered exactly once;
-- selective resend staying under 4× the message size at 30% loss.
+- selective resend staying under 4× the message size at 30% loss;
+- catalog parsing and education rating;
+- starter sets that fit the card;
+- copying chosen collections onto a card from a local test server.
 
 End-to-end tests run through both websites:
 
