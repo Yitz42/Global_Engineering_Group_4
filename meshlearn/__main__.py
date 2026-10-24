@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import logging
 import os
@@ -184,7 +185,15 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-    return args.func(args)
+    try:
+        return args.func(args)
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise
+        print("A port MeshLearn needs is already in use, probably by another MeshLearn demo, hub or phone "
+              "that is still running.\nStop it with Ctrl+C in its terminal, or pick other ports, e.g.:\n"
+              "  python3 -m meshlearn demo --hub-port 8100 --phone-port 8180 --sim-port 47101", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
