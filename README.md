@@ -4,7 +4,11 @@
 
 ECEP 405 Global Engineering, Team 4 (Accessible Education), Fall 2026 prototype.
 
-A teacher builds interactive assignments on a **teacher hub** and sends them over a Meshtastic LoRa mesh to an **old Android phone** in the community. The phone keeps everything on its microSD card and runs a small website on its own Wi-Fi hotspot. Students join the hotspot with any device, read the offline library, and complete the work. The phone checks answers are complete, saves them, and sends them back to the hub over the radio whenever the link is up. The teacher grades, and the result returns the same way. No internet, cell signal, or ISP is needed at any point.
+A teacher builds interactive assignments on a **teacher hub**. An **old Android phone** in the community keeps a copy of every assignment, plus an offline library, on its microSD card. It also runs a small website on its own Wi-Fi hotspot. The copies are loaded by memory card or over school Wi-Fi.
+
+When the teacher opens an assignment, the hub sends a one-packet message over a Meshtastic LoRa mesh. Students join the hotspot with any device, read the library, and complete the work. The phone checks that answers are complete, batches several students' work together, and radios it back to the hub whenever the link is up. The teacher grades, and the results come back the same way.
+
+The radio only carries a full assignment when the teacher adds or edits one after the phone's copy was loaded. No internet, cell signal, or ISP is needed at any point.
 
 ```mermaid
 flowchart LR
@@ -30,9 +34,9 @@ flowchart LR
 
 | Piece | What it does | Runs on |
 | --- | --- | --- |
-| Teacher hub | Assignment builder, send to phones, auto-grading, manual grading of written answers, CSV export | Any laptop with Python 3.9+ |
-| Student phone | Student website: assignments with answer checking, results, offline library, store-and-forward queue | Old Android phone with Termux, data on microSD |
-| Mesh link | Compressed, chunked, acknowledged messages with retries that survive lost packets and reboots | Meshtastic radios, or a built-in simulator |
+| Teacher hub | Assignment builder and editor, open/hide per phone, course pack export, auto-grading, manual grading of written answers, CSV export | Any laptop with Python 3.9+ |
+| Student phone | Stored assignments, student website with answer checking, results, offline library, batched store-and-forward queue | Old Android phone with Termux, data on microSD |
+| Mesh link | Compressed, chunked, acknowledged messages that resend only lost pieces and survive reboots | Meshtastic radios, or a built-in simulator |
 | Library fetcher | Picks the best open content that fits the card (Kiwix offline Wikipedia, Wikibooks, Wikiversity, PhET, Project Gutenberg) in English, Portuguese, or German, and downloads it with resume | Any computer with internet, before deployment |
 
 ## Try it in two minutes (no hardware)
@@ -48,9 +52,11 @@ python3 -m meshlearn demo
 Then open:
 
 - **Student phone:** http://localhost:8080. Enter a name, open "Fractions and plants check-in", answer it, and submit.
-- **Teacher hub:** http://localhost:8000. Watch the submission arrive, grade the written answer, and save. The student's "My results" page updates over the radio.
+- **Teacher hub:** http://localhost:8000. Watch the submission arrive a few seconds later, grade the written answer, and save. The student's "My results" page updates over the radio.
 
-The demo links the two with a simulated radio that drops 20% of packets, so you can see retries working. Change it with `--loss 0.5`.
+On start, the demo plays out a school visit. The phone copies the assignment from the hub over "Wi-Fi", then the hub opens it with a single radio packet. The phone's status page at http://localhost:8080/status counts the radio packets sent.
+
+The simulated radio drops 20% of packets, so you can watch the retries work. Change that with `--loss 0.5`.
 
 ## Running on real hardware
 
@@ -61,12 +67,19 @@ The demo links the two with a simulated radio that drops 20% of packets, so you 
    pip install meshtastic
    python3 -m meshlearn hub --radio-serial /dev/ttyUSB0      # Windows: --radio-serial COM3
    ```
-   Open http://localhost:8000. On the **Phones** page, add each community phone by its radio node id (for example `!a1b2c3d4`). Phones also register themselves the first time they say hello.
+   Open http://localhost:8000. On the **Phones** page, add each community phone by its radio node id (for example `!a1b2c3d4`). Phones also register themselves the first time they check in.
+   Add `--host 0.0.0.0` if phones will copy assignments from this laptop over school Wi-Fi.
 4. **Student phone:** follow [docs/android-setup.md](docs/android-setup.md) to install Termux, put the data on the microSD card, connect the phone to its radio over Wi-Fi, and start:
    ```bash
    python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-host 192.168.43.20
    ```
-5. **Fill the library** before the phone leaves an area with internet:
+5. **Load the assignments** while the phone is at school. Either way puts a copy of every assignment on the phone with no radio traffic:
+   - **School Wi-Fi:** open `http://localhost:8080/status` in the phone's browser and enter the hub's address.
+   - **Memory card:** download the course pack from the hub dashboard and unzip it into the phone's MeshLearn folder, or run:
+     ```bash
+     python3 -m meshlearn pack --out /Volumes/SDCARD/Android/data/com.termux/files/meshlearn
+     ```
+6. **Fill the library** before the phone leaves an area with internet:
    ```bash
    python3 -m meshlearn library --sd-gb 32 --lang pt --dest /Volumes/SDCARD/Android/data/com.termux/files/meshlearn/library --dry-run
    ```
@@ -87,11 +100,30 @@ Run `python3 -m meshlearn library --sd-gb <size> --lang <en|pt|de> --dest <folde
 
 ## How the mesh link works
 
-- **Small packets.** LoRa carries about 230 bytes per packet. Each message is JSON, compressed with zlib, split into 200-byte frames, and tagged with a message id and frame number. The sample five-question assignment is 3 packets.
-- **Nothing is lost.** Every outgoing message is written to SQLite before it is sent. The receiver acknowledges each complete message, and the sender retries with growing gaps (30 s up to 10 min on real radios) until it hears back. If a phone reboots or the link is down for days, the queue picks up where it left off.
-- **No duplicates.** The receiver remembers message ids it has handled and re-acknowledges repeats without acting on them twice.
-- **Integrity.** A CRC32 over each message's content catches anything corrupted in reassembly.
-- **The answer key stays home.** In graded mode the hub strips the answers before sending, and grading happens on the hub. In practice mode the key goes to the phone so students get instant right/wrong feedback.
+### What travels by radio
+
+Assignments live on both the hub and the phone, so the radio mostly carries answers and grades. These counts are packets for a 20-question review completed by 10 students. Each message also gets a one-packet acknowledgement, not counted here.
+
+| Step | Assignment sent by radio each time | With a stored copy and batching |
+| --- | --- | --- |
+| Get the assignment to students | 5 packets | **1 packet** (open message) |
+| 10 students' answers | 20 packets (2 each) | **2 packets** (one batch) |
+| 10 grades back | 10 packets | **1 packet** (one batch) |
+| **Total** | **35 packets** | **4 packets** |
+
+The full assignment travels by radio only when it is new or edited after the phone's copy was loaded. Even then it is 3 packets for this 20-question review, and 2 for the sample assignment.
+
+Moving a due date or hiding an assignment is always 1 packet.
+
+### How it stays reliable
+
+- **Stored copies stay in step.** Every assignment carries a version stamp computed from its content. Phones report their versions when they check in. The hub sends a full copy only when a phone's copy is missing or out of date, including after an edit. If an open message reaches a phone without the right copy, the phone asks for it.
+- **Answers are graded against what the student saw.** Each submission records the version it was written against, and the hub keeps every version.
+- **Small packets.** Each message is compressed with zlib using a shared dictionary of words common in assignments, so short messages compress well. It is then split into 228-byte frames, under Meshtastic's 233-byte limit. Assignments use a compact format with short field names, and defaults are left out.
+- **Only lost pieces are resent.** When a burst ends with pieces missing, the receiver asks for exactly those. If the sender hears nothing, it sends one probe packet instead of the whole message. At 20% packet loss, a 10-packet message costs about 13 transmissions this way, compared with about 90 if the whole message were resent.
+- **Nothing is lost.** Every outgoing message is written to SQLite before it is sent. Retries back off from 30 s up to 10 min on real radios. If a phone reboots or the link is down for days, the queue picks up where it left off.
+- **No duplicates.** The receiver remembers which messages it has handled. It re-acknowledges a repeat without acting on it twice.
+- **The answer key stays home.** In graded mode, the phone's copy has no answers, so nothing on the memory card gives them away, and grading happens on the hub. In practice mode the key is included, so students get instant right/wrong feedback.
 - **Separate from chat.** MeshLearn uses Meshtastic's `PRIVATE_APP` port, so ordinary Meshtastic text messages on the same mesh are unaffected.
 
 ## Accessibility and adaptation built in
@@ -106,12 +138,12 @@ Run `python3 -m meshlearn library --sd-gb <size> --lang <en|pt|de> --dest <folde
 
 ```
 meshlearn/
-  protocol.py        message format: compression, framing, CRC, reassembly
+  protocol.py        message format: dictionary compression, framing, missing-piece reports
   transport.py       simulated radio (UDP) and real Meshtastic radios (USB or Wi-Fi)
-  messenger.py       store-and-forward delivery with acks, retries, de-duplication
-  assignments.py     question types, answer checking, grading
-  hub.py             teacher dashboard
-  phone.py           student website and library browser
+  messenger.py       store-and-forward delivery: acks, selective resend, de-duplication
+  assignments.py     question types, compact format, version stamps, answer checking, grading
+  hub.py             teacher dashboard, open/hide per phone, course pack export
+  phone.py           stored assignments, student website, batching, library browser
   library.py         open-content planner and downloader
   web.py             tiny standard-library web framework
   starter_library/   three short original lessons included on every phone
@@ -126,7 +158,25 @@ docs/hardware.md, docs/android-setup.md
 python3 -m unittest discover -s tests -v
 ```
 
-The 15 tests cover framing and corruption, grading and validation, the library planner, delivery of five messages through 40% simulated packet loss (each delivered exactly once), and a full loop through both websites: teacher sends, student answers, teacher grades, result returns.
+There are 25 tests. They cover:
+
+- framing, corruption, and missing-piece reports;
+- lossless compact format;
+- version stamps;
+- grading and validation;
+- the library planner;
+- delivery through 40% simulated loss, with each message delivered exactly once;
+- selective resend staying under 4× the message size at 30% loss.
+
+End-to-end tests run through both websites:
+
+- radio-only delivery, then grading and results;
+- a Wi-Fi sync followed by a 1-packet open;
+- a memory-card course pack;
+- a phone fetching a copy it was missing;
+- editing an assignment after students answered;
+- three students' work sharing one radio message;
+- library traversal protection.
 
 ## Status and limits
 
@@ -139,7 +189,7 @@ Not yet tested:
 
 - **Real Meshtastic radios.** `MeshtasticTransport` follows the Meshtastic Python API but has not been run against hardware.
 - **Termux on Android.** The steps in the setup guide have not been run on a phone yet.
-- **Airtime and range at the pilot site.** Field testing will set the retry timing and show how many relays a site needs.
+- **Airtime and range at the pilot site.** Field testing will set the retry timing and the submission batch window, which defaults to 120 s. It will also show how many relays a site needs.
 
 Still to build:
 

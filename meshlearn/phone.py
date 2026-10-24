@@ -3,6 +3,11 @@
 Runs on an old Android phone (Termux) with its data on the microSD card. The
 phone turns on its hotspot; students join it with any device and open the
 phone's address in a browser. Nothing needs the internet.
+
+The phone keeps its own copy of every assignment (from a course pack loaded by
+memory card or school Wi-Fi, or sent by radio when new). Students only see the
+ones the teacher has opened. Submissions are batched so several students'
+work shares a few radio packets.
 """
 
 from __future__ import annotations
@@ -11,7 +16,10 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
+import urllib.parse
+import urllib.request
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
@@ -26,10 +34,11 @@ log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS assignments (
-    id TEXT PRIMARY KEY, data TEXT NOT NULL, received REAL NOT NULL
+    id TEXT PRIMARY KEY, version TEXT NOT NULL, data TEXT NOT NULL,
+    open INTEGER NOT NULL DEFAULT 0, due TEXT NOT NULL DEFAULT '', received REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS submissions (
-    sub_id TEXT PRIMARY KEY, assignment_id TEXT NOT NULL, student TEXT NOT NULL,
+    sub_id TEXT PRIMARY KEY, assignment_id TEXT NOT NULL, version TEXT, student TEXT NOT NULL,
     answers TEXT NOT NULL, submitted_at REAL NOT NULL, msg_id INTEGER,
     score REAL, max REAL, complete INTEGER, detail TEXT
 );
@@ -37,6 +46,7 @@ CREATE TABLE IF NOT EXISTS submissions (
 
 VIEWABLE = {".html", ".htm", ".txt", ".pdf", ".epub", ".png", ".jpg", ".jpeg", ".svg", ".mp3", ".mp4", ".webm", ".zim"}
 STARTER_DIR = os.path.join(os.path.dirname(__file__), "starter_library")
+MAX_BATCH = 20
 
 
 def _when(ts: Optional[float]) -> str:
@@ -52,67 +62,168 @@ def _size(num: float) -> str:
 
 
 class Phone:
-    def __init__(self, data_dir: str, hub_id: str, name: str, messenger_factory, kiwix_url: str = ""):
+    def __init__(self, data_dir: str, hub_id: str, name: str, messenger_factory, kiwix_url: str = "",
+                 batch_s: float = 120.0, admin_pin: str = ""):
         os.makedirs(data_dir, exist_ok=True)
         self.data_dir = data_dir
         self.library_dir = os.path.join(data_dir, "library")
+        self.pack_dir = os.path.join(data_dir, "assignments")
         self.hub_id = hub_id
         self.name = name
         self.kiwix_url = kiwix_url.rstrip("/")
+        self.batch_s = batch_s
+        self.admin_pin = admin_pin
         self._install_starter_library()
         self.db = Database(os.path.join(data_dir, "phone.db"), SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
+        self.load_pack_folder()
         self.app = App("phone")
         self._routes()
+        self._flush = threading.Event()
+        self._running = False
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def start(self) -> None:
+        self.messenger.start()
+        self._running = True
+        threading.Thread(target=self._batch_loop, name="batcher", daemon=True).start()
+
+    def stop(self) -> None:
+        self._running = False
+        self._flush.set()
+        self.messenger.stop()
 
     def _install_starter_library(self) -> None:
         target = os.path.join(self.library_dir, "starter")
         if not os.path.isdir(target) and os.path.isdir(STARTER_DIR):
             shutil.copytree(STARTER_DIR, target)
 
+    @property
+    def node_id(self) -> str:
+        return getattr(self.messenger.transport, "node_id", "") or ""
+
+    def inventory(self) -> Dict[str, str]:
+        return {r["id"]: r["version"] for r in self.db.all("SELECT id, version FROM assignments")}
+
     def say_hello(self) -> None:
         usage = shutil.disk_usage(self.data_dir)
         self.messenger.send(self.hub_id, protocol.HELLO, {
-            "name": self.name, "free_mb": usage.free // (1024 * 1024),
-            "library_items": len(self.library_items()), "version": __version__,
+            "n": self.name, "f": usage.free // (1024 * 1024), "l": len(self.library_items()),
+            "sw": __version__, "inv": self.inventory(),
         })
 
-    # -- mesh ---------------------------------------------------------------
+    # -- assignments ----------------------------------------------------------
+
+    def import_assignment(self, packed: dict, open_: Optional[bool] = None, due: Optional[str] = None) -> bool:
+        """Store a packed assignment from the radio or a course pack. Returns True if new or changed."""
+        assignment = asg.unpack(packed)
+        aid, version = assignment.get("id"), packed.get("v") or asg.version_of(assignment)
+        if not aid or not assignment.get("questions"):
+            return False
+        row = self.db.one("SELECT version, open, due FROM assignments WHERE id = ?", (aid,))
+        new_open = (1 if open_ else 0) if open_ is not None else (row["open"] if row else 0)
+        new_due = due if due is not None else (row["due"] if row and row["due"] else assignment.get("due", ""))
+        changed = row is None or row["version"] != version
+        self.db.execute(
+            "INSERT INTO assignments (id, version, data, open, due, received) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET version = excluded.version, data = excluded.data, open = excluded.open, "
+            "due = excluded.due, received = CASE WHEN assignments.version = excluded.version THEN assignments.received ELSE excluded.received END",
+            (aid, version, json.dumps(assignment), new_open, new_due, time.time()),
+        )
+        return changed
+
+    def load_pack_folder(self) -> int:
+        """Load assignments copied onto the memory card (data/assignments/*.json)."""
+        count = 0
+        if not os.path.isdir(self.pack_dir):
+            return 0
+        for fname in sorted(os.listdir(self.pack_dir)):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(self.pack_dir, fname), encoding="utf-8") as fh:
+                    if self.import_assignment(json.load(fh)):
+                        count += 1
+            except (OSError, ValueError, KeyError, IndexError, TypeError):
+                log.warning("skipping unreadable course pack file %s", fname)
+        return count
+
+    def sync_from_hub(self, hub_url: str) -> int:
+        """Copy every assignment from the teacher hub over Wi-Fi (no radio)."""
+        query = urllib.parse.urlencode({"node": self.node_id, "name": self.name})
+        url = hub_url.rstrip("/") + "/api/pack?" + query
+        with urllib.request.urlopen(url, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return sum(1 for packed in data.get("assignments", []) if self.import_assignment(packed))
+
+    def get_assignment(self, aid: str) -> Optional[dict]:
+        row = self.db.one("SELECT data, version, open, due FROM assignments WHERE id = ?", (aid,))
+        if not row:
+            return None
+        assignment = json.loads(row["data"])
+        assignment.update(version=row["version"], open=bool(row["open"]), due=row["due"])
+        return assignment
+
+    # -- mesh -----------------------------------------------------------------
 
     def on_message(self, message: protocol.Message) -> None:
         p = message.payload
         if message.type == protocol.ASSIGN:
-            assignment = p.get("assignment") or {}
-            if assignment.get("id") and assignment.get("questions"):
-                self.db.execute(
-                    "INSERT OR REPLACE INTO assignments (id, data, received) VALUES (?, ?, ?)",
-                    (assignment["id"], json.dumps(assignment), time.time()),
-                )
+            if isinstance(p.get("a"), dict):
+                self.import_assignment(p["a"], open_=bool(p.get("o")), due=p.get("d"))
+        elif message.type == protocol.OPEN:
+            aid, version = str(p.get("a", "")), str(p.get("v", ""))
+            row = self.db.one("SELECT version FROM assignments WHERE id = ?", (aid,))
+            if row and row["version"] == version:
+                self.db.execute("UPDATE assignments SET open = ?, due = ? WHERE id = ?",
+                                (1 if p.get("o") else 0, p.get("d") or "", aid))
+            elif p.get("o"):
+                self.messenger.send(self.hub_id, protocol.NEED, {"a": aid, "v": version})
         elif message.type == protocol.RESULT:
-            self.db.execute(
-                "UPDATE submissions SET score = ?, max = ?, complete = ?, detail = ? WHERE sub_id = ?",
-                (p.get("score"), p.get("max"), 1 if p.get("complete") else 0, json.dumps(p.get("q") or {}), p.get("sub_id")),
-            )
+            for r in p.get("r") or []:
+                self.db.execute(
+                    "UPDATE submissions SET score = ?, max = ?, complete = ?, detail = ? WHERE sub_id = ?",
+                    (r.get("sc"), r.get("mx"), 1 if r.get("ok") else 0, json.dumps(r.get("q") or {}), r.get("id")),
+                )
         else:
             log.info("phone ignoring %s message from %s", message.type, message.src)
 
-    # -- data ---------------------------------------------------------------
-
-    def get_assignment(self, aid: str) -> Optional[dict]:
-        row = self.db.one("SELECT data FROM assignments WHERE id = ?", (aid,))
-        return json.loads(row["data"]) if row else None
-
     def submit(self, assignment: dict, student: str, answers: Dict[str, str]) -> str:
+        """Save a submission now; the batcher sends it with others shortly."""
         sub_id = asg.new_id("s")
-        now = time.time()
-        payload = {"sub_id": sub_id, "assignment_id": assignment["id"], "student": student,
-                   "answers": answers, "submitted_at": now}
-        msg_id = self.messenger.send(self.hub_id, protocol.SUBMIT, payload)
         self.db.execute(
-            "INSERT INTO submissions (sub_id, assignment_id, student, answers, submitted_at, msg_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (sub_id, assignment["id"], student, json.dumps(answers), now, msg_id),
+            "INSERT INTO submissions (sub_id, assignment_id, version, student, answers, submitted_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (sub_id, assignment["id"], assignment.get("version"), student, json.dumps(answers), time.time()),
         )
+        if self.db.one("SELECT COUNT(*) AS n FROM submissions WHERE msg_id IS NULL")["n"] >= MAX_BATCH:
+            self._flush.set()
         return sub_id
+
+    def flush_submissions(self, force: bool = False) -> Optional[int]:
+        """Send waiting submissions as one message once the oldest has waited batch_s."""
+        rows = self.db.all("SELECT * FROM submissions WHERE msg_id IS NULL ORDER BY submitted_at LIMIT ?", (MAX_BATCH,))
+        if not rows:
+            return None
+        if not force and len(rows) < MAX_BATCH and time.time() - rows[0]["submitted_at"] < self.batch_s:
+            return None
+        batch = [{"id": r["sub_id"], "a": r["assignment_id"], "v": r["version"], "u": r["student"],
+                  "x": json.loads(r["answers"]), "t": round(r["submitted_at"])} for r in rows]
+        msg_id = self.messenger.send(self.hub_id, protocol.SUBMIT, {"s": batch})
+        for r in rows:
+            self.db.execute("UPDATE submissions SET msg_id = ? WHERE sub_id = ?", (msg_id, r["sub_id"]))
+        return msg_id
+
+    def _batch_loop(self) -> None:
+        while self._running:
+            try:
+                self.flush_submissions()
+            except Exception:
+                log.exception("sending submissions failed")
+            self._flush.wait(min(1.0, max(self.batch_s / 4, 0.1)))
+            self._flush.clear()
+
+    # -- library --------------------------------------------------------------
 
     def library_items(self) -> List[dict]:
         """Everything on the card: the fetcher's index first, then any other files."""
@@ -142,7 +253,7 @@ class Phone:
                               "collection": folder.capitalize() if folder else "Other", "kind": ext.lstrip(".")})
         return items
 
-    # -- web ----------------------------------------------------------------
+    # -- web ------------------------------------------------------------------
 
     def _nav(self, req: Request) -> str:
         who = req.cookies.get("student")
@@ -165,6 +276,8 @@ class Phone:
         app.add_route("GET", "/library", self.library)
         app.add_route("GET", "/library/files/<path:path>", self.library_file)
         app.add_route("GET", "/status", self.status)
+        app.add_route("POST", "/status/sync", self.status_sync)
+        app.add_route("POST", "/status/reload", self.status_reload)
 
     def home(self, req: Request) -> Response:
         student = req.cookies.get("student")
@@ -177,18 +290,18 @@ class Phone:
                 "<p>Or go straight to the <a href='/library'>library</a>.</p>"
             )
             return Response(self._page(req, "Welcome", body))
-        rows = self.db.all("SELECT data, received FROM assignments ORDER BY received DESC")
+        rows = self.db.all("SELECT id FROM assignments WHERE open = 1 ORDER BY due = '', due, received DESC")
         mine = {r["assignment_id"]: r for r in self.db.all(
             "SELECT assignment_id, MAX(submitted_at) AS at, score, max, complete FROM submissions "
             "WHERE student = ? GROUP BY assignment_id", (student,))}
         cards = ""
         for r in rows:
-            a = json.loads(r["data"])
+            a = self.get_assignment(r["id"])
             sub = mine.get(a["id"])
             if sub is None:
                 state = "<span class='pill'>To do</span>"
             elif sub["score"] is None:
-                state = "<span class='pill warn'>Sent · waiting for grade</span>"
+                state = "<span class='pill warn'>Turned in · waiting for grade</span>"
             else:
                 state = f"<span class='pill good'>Score {sub['score']:g} / {sub['max']:g}</span>"
             due = f" · due {esc(a['due'])}" if a.get("due") else ""
@@ -198,7 +311,7 @@ class Phone:
                 f"{' · practice' if a.get('mode') == 'practice' else ''}</p>{state}</div>"
             )
         if not cards:
-            cards = "<p class='muted'>No assignments on this phone yet. Your teacher will send them over the radio.</p>"
+            cards = "<p class='muted'>No assignments are open right now. Your teacher will open them by radio.</p>"
         body = cards + "<form method='post' action='/logout'><button class='secondary'>Not you? Change name</button></form>"
         return Response(self._page(req, "Your assignments", body))
 
@@ -251,13 +364,18 @@ class Phone:
         parts.append("<button>Check and submit</button></form>")
         return "".join(parts)
 
+    def _open_assignment(self, req: Request):
+        a = self.get_assignment(req.params["aid"])
+        return a if a and a.get("open") else None
+
     def assignment_form(self, req: Request) -> Response:
         student = req.cookies.get("student")
         if not student:
             return redirect("/")
-        a = self.get_assignment(req.params["aid"])
+        a = self._open_assignment(req)
         if a is None:
-            return Response(self._page(req, "Not found", "<p>That assignment is not on this phone.</p>"), status=404)
+            return Response(self._page(req, "Not open", "<p>That assignment is not open right now.</p>"
+                                       "<p><a href='/'>Back to assignments</a></p>"), status=404)
         if a.get("mode") != "practice":
             done = self.db.one("SELECT submitted_at FROM submissions WHERE assignment_id = ? AND student = ?", (a["id"], student))
             if done:
@@ -270,7 +388,7 @@ class Phone:
         student = req.cookies.get("student")
         if not student:
             return redirect("/")
-        a = self.get_assignment(req.params["aid"])
+        a = self._open_assignment(req)
         if a is None:
             return redirect("/")
         raw = {q["id"]: req.form.get(q["id"], "") for q in a["questions"]}
@@ -307,8 +425,9 @@ class Phone:
         out = ""
         for s in rows:
             a = self.get_assignment(s["assignment_id"]) or {"title": s["assignment_id"]}
-            delivery = self.messenger.message_status(s["msg_id"]) if s["msg_id"] else None
-            sent = {"acked": "reached your teacher", "pending": "waiting for the radio", "failed": "could not be sent"}.get(delivery, "saved")
+            delivery = self.messenger.message_status(s["msg_id"])
+            sent = {"acked": "reached your teacher", "pending": "on its way", "failed": "could not be sent"}.get(
+                delivery, "saved, sending soon")
             if s["score"] is None:
                 grade = "Not graded yet"
             elif s["complete"]:
@@ -356,15 +475,63 @@ class Phone:
             return Response(self._page(req, "Not found", "<p>That file is not in the library.</p>"), status=404)
         return file_response(target)
 
-    def status(self, req: Request) -> Response:
+    # -- status and admin -----------------------------------------------------
+
+    def _is_admin(self, req: Request) -> bool:
+        """Course-pack changes come from the phone itself, or anyone with the PIN."""
+        if req.client in ("127.0.0.1", "::1"):
+            return True
+        return bool(self.admin_pin) and req.form.get("pin", "") == self.admin_pin
+
+    def status(self, req: Request, notice: str = "") -> Response:
         usage = shutil.disk_usage(self.data_dir)
         q = self.messenger.status()
+        held = self.db.one("SELECT COUNT(*) AS n, SUM(open) AS o FROM assignments")
+        waiting = self.db.one("SELECT COUNT(*) AS n FROM submissions WHERE msg_id IS NULL")["n"]
+        def pin_field(field_id: str) -> str:
+            if not self.admin_pin:
+                return ""
+            return (f"<label for='{field_id}'>Teacher PIN</label>"
+                    f"<input type='text' id='{field_id}' name='pin' inputmode='numeric'>")
+
         body = (
-            "<div class='grid'>"
-            f"<div class='card'><div class='stat'>{q['pending']}</div>messages waiting for the radio</div>"
-            f"<div class='card'><div class='stat'>{q['acked']}</div>messages delivered</div>"
-            f"<div class='card'><div class='stat'>{_size(usage.free)}</div>free on the card</div>"
-            f"<div class='card'><div class='stat'>{len(self.library_items())}</div>library items</div></div>"
-            f"<p class='muted'>Hub radio: {esc(self.hub_id)} · data folder: {esc(self.data_dir)}</p>"
+            (f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "")
+            + "<div class='grid'>"
+            f"<div class='card'><div class='stat'>{held['n']}</div>assignments stored ({held['o'] or 0} open)</div>"
+            f"<div class='card'><div class='stat'>{waiting}</div>submissions waiting to be batched</div>"
+            f"<div class='card'><div class='stat'>{q['pending']}</div>messages waiting for the radio"
+            f"<div class='muted'>{q['frames_sent']} radio packets sent since start</div></div>"
+            f"<div class='card'><div class='stat'>{_size(usage.free)}</div>free on the card</div></div>"
+            "<h2>Copy assignments from the teacher (no radio)</h2>"
+            "<form method='post' action='/status/sync' class='card'>"
+            "<p>When this phone is on the same Wi-Fi as the teacher's laptop, copy every assignment at once.</p>"
+            "<label for='hub_url'>Teacher hub address</label>"
+            "<input type='text' id='hub_url' name='hub_url' placeholder='http://192.168.1.20:8000' required>"
+            f"{pin_field('pin-sync')}<button>Copy assignments</button></form>"
+            "<form method='post' action='/status/reload' class='card'>"
+            "<p>Copied a course pack onto the memory card? Load it now.</p>"
+            f"{pin_field('pin-reload')}<button class='secondary'>Reload from card</button></form>"
+            f"<p class='muted'>Teacher hub radio: {esc(self.hub_id)} · this phone's radio: {esc(self.node_id)} · "
+            f"data folder: {esc(self.data_dir)}</p>"
         )
         return Response(self._page(req, "Phone status", body))
+
+    def status_sync(self, req: Request) -> Response:
+        if not self._is_admin(req):
+            return self.status(req, notice="Only the teacher can do that (open this page on the phone itself, or enter the PIN).")
+        url = req.form.get("hub_url", "").strip()
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
+        try:
+            count = self.sync_from_hub(url)
+        except Exception as exc:
+            return self.status(req, notice=f"Could not reach the teacher hub at {url}: {exc}")
+        # No radio check-in needed: the hub recorded what this phone copied.
+        return self.status(req, notice=f"Copied from the teacher hub: {count} new or updated assignments.")
+
+    def status_reload(self, req: Request) -> Response:
+        if not self._is_admin(req):
+            return self.status(req, notice="Only the teacher can do that (open this page on the phone itself, or enter the PIN).")
+        count = self.load_pack_folder()
+        self.say_hello()
+        return self.status(req, notice=f"Loaded from the card: {count} new or updated assignments.")

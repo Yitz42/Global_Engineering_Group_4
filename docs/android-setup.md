@@ -67,7 +67,27 @@ python -m meshlearn phone \
 - Students open `http://<phone hotspot address>:8080`.
 - `http://<address>:8080/status` shows how many messages are waiting for the radio and how much space is left on the card.
 
-## 6. Open the big encyclopedias (.zim files)
+## 6. Load the assignments before the phone leaves school
+
+Loading every assignment in advance means the radio later only carries answers, grades, and one-packet "open" messages. There are two ways to do it.
+
+**Over school Wi-Fi**
+
+1. Connect the phone to the same Wi-Fi as the teacher's laptop. The hub must be started with `--host 0.0.0.0`.
+2. On the phone itself, open `http://localhost:8080/status`.
+3. Enter the hub's address, for example `http://192.168.1.20:8000`, and press **Copy assignments**.
+
+To do this from another device instead, start the phone with `--admin-pin 1234` and enter the PIN on the form. Without a PIN, only the phone's own browser can change what is stored.
+
+**By memory card**
+
+1. On the hub dashboard, press **Download course pack**.
+2. Unzip it into the MeshLearn folder on the card, next to `library`. Alternatively, run `python3 -m meshlearn pack --out <that folder>` on the hub laptop.
+3. The phone loads the pack when it starts. You can also press **Reload from card** on its status page.
+
+Assignments stay hidden from students until the teacher opens them from the hub.
+
+## 7. Open the big encyclopedias (.zim files)
 
 Wikipedia and the other Kiwix collections are `.zim` files.
 
@@ -81,7 +101,7 @@ Pass its address so the Library page links straight to it:
 
 If Kiwix and MeshLearn both want the same port, start MeshLearn with `--port 8081`.
 
-## 7. Start automatically after a reboot
+## 8. Start automatically after a reboot
 
 Create `~/.termux/boot/start-meshlearn`:
 

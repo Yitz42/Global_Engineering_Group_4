@@ -23,8 +23,10 @@ that answers are complete and well-formed, and the hub grades them. In
 from __future__ import annotations
 
 import copy
+import json
 import re
 import secrets
+import zlib
 from typing import Dict, List, Optional, Tuple
 
 QUESTION_TYPES = ("choice", "number", "text", "long")
@@ -119,6 +121,82 @@ def normalize_assignment(data: dict) -> dict:
         "mode": mode,
         "questions": questions,
     }
+
+
+# -- compact form for the radio and the course pack ---------------------------
+#
+# Short keys, numeric question types, and defaults left out. Packing is lossless:
+# unpack(pack(x)) == x for any normalized assignment.
+
+_TOP_KEYS = {"id": "i", "title": "T", "subject": "S", "instructions": "I", "due": "D", "mode": "M", "version": "v"}
+_Q_KEYS = {"id": "i", "prompt": "p", "options": "o", "answer": "a", "tolerance": "l", "accept": "c", "points": "s", "max_chars": "m"}
+_TYPE_CODES = {t: n for n, t in enumerate(QUESTION_TYPES)}
+_Q_DEFAULTS = {"points": 1.0, "tolerance": 0.0, "max_chars": 600}
+
+
+def _num(value):
+    return int(value) if isinstance(value, float) and value.is_integer() else value
+
+
+def pack(assignment: dict) -> dict:
+    out = {}
+    for key, short in _TOP_KEYS.items():
+        value = assignment.get(key)
+        if key == "mode":
+            if value == "practice":
+                out[short] = "p"
+        elif value not in (None, ""):
+            out[short] = value
+    questions = []
+    for n, q in enumerate(assignment["questions"], start=1):
+        cq = {"t": _TYPE_CODES[q["type"]]}
+        for key, short in _Q_KEYS.items():
+            if key not in q:
+                continue
+            value = q[key]
+            if key == "id" and value == f"q{n}":
+                continue
+            if key in _Q_DEFAULTS and value == _Q_DEFAULTS[key]:
+                continue
+            cq[short] = _num(value)
+        questions.append(cq)
+    out["Q"] = questions
+    return out
+
+
+def unpack(packed: dict) -> dict:
+    out = {key: packed.get(short, "") for key, short in _TOP_KEYS.items()}
+    out["mode"] = "practice" if packed.get("M") == "p" else "graded"
+    questions = []
+    for n, cq in enumerate(packed.get("Q") or [], start=1):
+        qtype = QUESTION_TYPES[int(cq.get("t", 0))]
+        q = {"id": cq.get("i") or f"q{n}", "type": qtype, "prompt": cq.get("p", ""),
+             "points": float(cq.get("s", _Q_DEFAULTS["points"]))}
+        if "o" in cq:
+            q["options"] = list(cq["o"])
+        if "a" in cq:
+            q["answer"] = int(cq["a"]) if qtype == "choice" else float(cq["a"])
+        if qtype == "number" and "a" in cq:
+            q["tolerance"] = float(cq.get("l", _Q_DEFAULTS["tolerance"]))
+        if "c" in cq:
+            q["accept"] = list(cq["c"])
+        if qtype == "long":
+            q["max_chars"] = int(cq.get("m", _Q_DEFAULTS["max_chars"]))
+        questions.append(q)
+    out["questions"] = questions
+    if not out["version"]:
+        out.pop("version")
+    return out
+
+
+def version_of(assignment: dict) -> str:
+    """Content stamp shared by hub and phone. The due date is left out so it can
+    change with a one-packet OPEN message instead of a full resend."""
+    view = dict(public_view(assignment))
+    for key in ("due", "version"):
+        view.pop(key, None)
+    canonical = json.dumps(pack(view), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return format(zlib.crc32(canonical.encode("utf-8")), "08x")
 
 
 def max_points(assignment: dict) -> float:

@@ -65,13 +65,34 @@ def cmd_hub(args) -> int:
 def cmd_phone(args) -> int:
     transport, retry = _transport(args)
     phone = Phone(args.data, args.hub, args.name,
-                  _messenger_factory(transport, os.path.join(args.data, "outbox.db"), retry), kiwix_url=args.kiwix_url)
-    phone.messenger.start()
+                  _messenger_factory(transport, os.path.join(args.data, "outbox.db"), retry), kiwix_url=args.kiwix_url,
+                  batch_s=args.batch_seconds, admin_pin=args.admin_pin)
+    phone.start()
     phone.say_hello()
     server = phone.app.serve_in_thread(args.host, args.port)
-    print(f"Student site on http://<this phone's hotspot address>:{args.port}  (radio node: {transport.node_id or 'unknown'})")
-    _wait_forever(server.shutdown, phone.messenger.stop)
+    print(f"Student site on http://<this phone's hotspot address>:{args.port}  (radio node: {phone.node_id or 'unknown'})")
+    _wait_forever(server.shutdown, phone.stop)
     return 0
+
+
+def cmd_pack(args) -> int:
+    """Write the hub's course pack to a folder (e.g. on a microSD card in a card reader)."""
+    hub = Hub(os.path.join(args.hub_data, "hub.db"), lambda handler: _NoRadio())
+    out = os.path.join(args.out, "assignments") if os.path.basename(os.path.normpath(args.out)) != "assignments" else args.out
+    os.makedirs(out, exist_ok=True)
+    pack = hub.course_pack()
+    for packed in pack:
+        with open(os.path.join(out, f"{packed['i']}.json"), "w", encoding="utf-8") as fh:
+            json.dump(packed, fh, ensure_ascii=False, indent=1)
+    print(f"Wrote {len(pack)} assignments to {out}. The phone loads them when it starts or on 'Reload from card'.")
+    return 0
+
+
+class _NoRadio:
+    """Stand-in messenger for offline commands that only read the hub database."""
+
+    def status(self):
+        return {"pending": 0, "acked": 0, "failed": 0, "frames_sent": 0}
 
 
 def cmd_demo(args) -> int:
@@ -82,26 +103,31 @@ def cmd_demo(args) -> int:
     hub_t = UdpSimTransport("hub", args.sim_port, {"phone-1": ("127.0.0.1", args.sim_port + 1)}, drop_rate=args.loss)
     phone_t = UdpSimTransport("phone-1", args.sim_port + 1, {"hub": ("127.0.0.1", args.sim_port)}, drop_rate=args.loss)
     hub = Hub(os.path.join(hub_dir, "hub.db"), _messenger_factory(hub_t, os.path.join(hub_dir, "outbox.db"), 2.0))
-    phone = Phone(phone_dir, "hub", "Demo village phone", _messenger_factory(phone_t, os.path.join(phone_dir, "outbox.db"), 2.0))
+    phone = Phone(phone_dir, "hub", "Demo village phone",
+                  _messenger_factory(phone_t, os.path.join(phone_dir, "outbox.db"), 2.0), batch_s=args.batch_seconds)
     hub.messenger.start()
-    phone.messenger.start()
+    phone.start()
     hub.add_phone("phone-1", "Demo village phone")
-    phone.say_hello()
     with open(SAMPLE_ASSIGNMENT, encoding="utf-8") as fh:
         sample = hub.create_assignment(json.load(fh))
-    hub.send_assignment(sample["id"], "phone-1")
     hub_srv = hub.app.serve_in_thread("127.0.0.1", args.hub_port)
     phone_srv = phone.app.serve_in_thread("127.0.0.1", args.phone_port)
+    # Like a phone visiting school: copy every assignment over Wi-Fi, no radio...
+    copied = phone.sync_from_hub(f"http://127.0.0.1:{args.hub_port}")
+    # ...so opening it for students later costs a single radio packet.
+    hub.set_open(sample["id"], "phone-1", True)
     print(f"""
 MeshLearn demo running (simulated radio, {args.loss:.0%} packet loss). Data in {root}
 
   Teacher hub:   http://localhost:{args.hub_port}
   Student phone: http://localhost:{args.phone_port}
 
-A sample assignment is on its way to the phone. Open the student site, enter a
-name, complete it, then watch it arrive on the teacher hub. Ctrl+C to stop.
+The phone copied {copied} assignment over "school Wi-Fi", and the hub has opened
+it with a 1-packet radio message. Open the student site, enter a name, and
+complete it. Submissions are batched for {args.batch_seconds:g} s before going
+by radio. Ctrl+C to stop.
 """)
-    _wait_forever(hub_srv.shutdown, phone_srv.shutdown, hub.messenger.stop, phone.messenger.stop)
+    _wait_forever(hub_srv.shutdown, phone_srv.shutdown, hub.messenger.stop, phone.stop)
     return 0
 
 
@@ -120,6 +146,7 @@ def main(argv=None) -> int:
     d.add_argument("--sim-port", type=int, default=47001)
     d.add_argument("--loss", type=float, default=0.2, help="fraction of radio packets to drop (default 0.2)")
     d.add_argument("--data", help="folder for demo data (default: a temporary folder)")
+    d.add_argument("--batch-seconds", type=float, default=3.0, help="how long the phone collects submissions before sending")
     d.set_defaults(func=cmd_demo)
 
     h = sub.add_parser("hub", help="run the teacher hub")
@@ -136,8 +163,16 @@ def main(argv=None) -> int:
     p.add_argument("--host", default="0.0.0.0", help="address to serve on (0.0.0.0 = every network, incl. the hotspot)")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--kiwix-url", default="", help="where kiwix-serve runs, e.g. http://127.0.0.1:8090, to open .zim files")
+    p.add_argument("--batch-seconds", type=float, default=120.0,
+                   help="collect submissions this long so several share radio packets (default 120)")
+    p.add_argument("--admin-pin", default="", help="PIN that lets a teacher load assignments from another device")
     _add_radio_args(p, "phone-1", 47002)
     p.set_defaults(func=cmd_phone)
+
+    pk = sub.add_parser("pack", help="write the course pack (every assignment) to a folder or memory card")
+    pk.add_argument("--hub-data", default="hub-data", help="the hub's data folder")
+    pk.add_argument("--out", required=True, help="the phone's MeshLearn folder on the card, e.g. /Volumes/SDCARD/.../meshlearn")
+    pk.set_defaults(func=cmd_pack)
 
     lib = sub.add_parser("library", help="download open content sized to an SD card")
     lib.add_argument("--sd-gb", type=float, required=True, help="card size printed on the label, in GB")
