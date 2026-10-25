@@ -21,9 +21,11 @@ from urllib.parse import urlencode
 
 from . import assignments as asg
 from . import catalog as cat
+from . import courses as crs
 from . import library
 from . import protocol
 from .db import Database
+from .hubpages import HubPages
 from .messenger import Messenger
 from .web import App, Request, Response, esc, json_response, page, redirect
 
@@ -52,6 +54,9 @@ CREATE TABLE IF NOT EXISTS submissions (
     grade TEXT, manual TEXT NOT NULL DEFAULT '{}', result_msg_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS courses (
+    id TEXT PRIMARY KEY, data TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, updated REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS library_selection (key TEXT PRIMARY KEY, item TEXT NOT NULL, added REAL NOT NULL);
 """
 
@@ -66,14 +71,92 @@ def _when(ts: Optional[float]) -> str:
     return time.strftime("%b %d, %H:%M", time.localtime(ts)) if ts else "never"
 
 
-class Hub:
+class Hub(HubPages):
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
         self.catalog = cat.Catalog(os.path.join(os.path.dirname(os.path.abspath(db_path)), "catalog.json"))
         self.download_job: Optional[cat.DownloadJob] = None
-        self.app = App("hub")
+        self._migrate()
+        self.load_course_file()
+        self.app = App("hub", max_body=32 * 1024 * 1024)  # learning-data files can be large
         self._routes()
+        self._page_routes()
+
+    def _migrate(self) -> None:
+        """Columns added after the first release; older hub databases get them here."""
+        for sql in ("ALTER TABLE submissions ADD COLUMN duration REAL",
+                    "ALTER TABLE submissions ADD COLUMN source TEXT NOT NULL DEFAULT 'radio'"):
+            try:
+                self.db.execute(sql)
+            except Exception:
+                pass  # already there
+
+    # -- courses --------------------------------------------------------------
+
+    def load_course_file(self, path: str = crs.COURSE_FILE) -> int:
+        """Add the starter courses from the course file. Courses changed on the hub keep the
+        hub's version; ones still as the file had them follow the file."""
+        try:
+            file_courses = crs.load_file(path)
+        except (OSError, ValueError) as exc:
+            log.warning("could not read course file %s: %s", path, exc)
+            return 0
+        count = 0
+        for position, course in enumerate(file_courses):
+            row = self.db.one("SELECT source FROM courses WHERE id = ?", (course["id"],))
+            if row and row["source"] == "hub":
+                continue
+            self.db.execute(
+                "INSERT INTO courses (id, data, source, position, updated) VALUES (?, ?, 'file', ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data = excluded.data, position = excluded.position, updated = excluded.updated",
+                (course["id"], json.dumps(course), position, time.time()),
+            )
+            count += 1
+        return count
+
+    def courses(self, include_other: bool = False) -> List[dict]:
+        rows = self.db.all("SELECT data, source FROM courses ORDER BY position, id")
+        out = [dict(json.loads(r["data"]), source=r["source"]) for r in rows]
+        if include_other:
+            known = {c["id"] for c in out}
+            if any(json.loads(r["data"]).get("course", "") not in known for r in self.db.all("SELECT data FROM assignments")):
+                out.append(dict(crs.OTHER, source="hub"))
+        return out
+
+    def get_course(self, course_id: str) -> Optional[dict]:
+        row = self.db.one("SELECT data, source FROM courses WHERE id = ?", (course_id,))
+        return dict(json.loads(row["data"]), source=row["source"]) if row else None
+
+    def save_course(self, data: dict) -> dict:
+        course = crs.normalize_course(data)
+        existing = self.db.one("SELECT position FROM courses WHERE id = ?", (course["id"],))
+        position = existing["position"] if existing else (self.db.one("SELECT COALESCE(MAX(position), -1) + 1 AS p FROM courses")["p"])
+        self.db.execute(
+            "INSERT INTO courses (id, data, source, position, updated) VALUES (?, ?, 'hub', ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET data = excluded.data, source = 'hub', updated = excluded.updated",
+            (course["id"], json.dumps(course), position, time.time()),
+        )
+        return course
+
+    def assignments_in(self, course_id: str, unit_id: Optional[str] = None) -> List[dict]:
+        out = []
+        known = {c["id"] for c in self.courses()}
+        for r in self.db.all("SELECT data FROM assignments ORDER BY created"):
+            a = json.loads(r["data"])
+            course = a.get("course", "") if a.get("course", "") in known else ""
+            if course == course_id and (unit_id is None or a.get("unit", "") == unit_id):
+                out.append(a)
+        return out
+
+    def _placement(self, assignment: dict) -> str:
+        course = self.get_course(assignment.get("course", ""))
+        if not course:
+            return ""
+        unit = crs.unit_of(course, assignment.get("unit", ""))
+        if not unit:
+            return course["title"]
+        return f"{course['title']} · Unit {crs.unit_number(course, unit['id'])}: {unit['title']}"
 
     # -- assignments ----------------------------------------------------------
 
@@ -108,18 +191,31 @@ class Hub:
     def packed_for_phone(self, aid: str) -> dict:
         """The phone's copy: answer key removed (unless practice), compact, version-stamped."""
         assignment = self.get_assignment(aid)
-        packed = asg.pack(asg.public_view(assignment))
+        view = asg.public_view(assignment)
+        course = self.get_course(assignment.get("course", ""))
+        if course:  # titles travel with the assignment, so radio-only phones can show the course
+            view["course_title"] = course["title"]
+            unit = crs.unit_of(course, assignment.get("unit", ""))
+            if unit:
+                view["unit_title"] = unit["title"]
+                view["unit_no"] = crs.unit_number(course, unit["id"])
+        packed = asg.pack(view)
         packed["v"] = self.current_version(aid)
         return packed
 
     def course_pack(self) -> List[dict]:
         return [self.packed_for_phone(r["id"]) for r in self.db.all("SELECT id FROM assignments ORDER BY created")]
 
+    def course_list_for_phones(self) -> List[dict]:
+        return [{k: v for k, v in c.items() if k != "source"} for c in self.courses()]
+
     def course_pack_zip(self) -> bytes:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for packed in self.course_pack():
                 zf.writestr(f"assignments/{packed['i']}.json", json.dumps(packed, ensure_ascii=False, indent=1))
+            zf.writestr("assignments/courses.json", json.dumps({"courses": self.course_list_for_phones()},
+                                                               ensure_ascii=False, indent=1))
             zf.writestr("assignments/README.txt",
                         "Copy this 'assignments' folder into the phone's MeshLearn data folder on the microSD card,\n"
                         "next to the 'library' folder. The phone loads it when it starts or when you press\n"
@@ -232,11 +328,13 @@ class Hub:
                 sub_id = str(s.get("id", ""))[:40]
                 if not sub_id:
                     continue
+                duration = s.get("d")
                 self.db.execute(
-                    "INSERT OR IGNORE INTO submissions (sub_id, assignment_id, version, student, phone, answers, submitted_at, received_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO submissions (sub_id, assignment_id, version, student, phone, answers, submitted_at, "
+                    "received_at, duration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (sub_id, str(s.get("a", ""))[:20], str(s.get("v", ""))[:16], str(s.get("u", "?"))[:60], src,
-                     json.dumps(s.get("x") or {}), s.get("t"), time.time()),
+                     json.dumps(s.get("x") or {}), s.get("t"), time.time(),
+                     float(duration) if isinstance(duration, (int, float)) and duration > 0 else None),
                 )
                 grade = self.grade_submission(sub_id)
                 if grade:
@@ -249,8 +347,8 @@ class Hub:
     # -- web ------------------------------------------------------------------
 
     def _nav(self) -> str:
-        return ("<a href='/'>Dashboard</a><a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a>"
-                "<a href='/library'>Card library</a>")
+        return ("<a href='/'>Home</a><a href='/courses'>Courses</a><a href='/comprehension'>Comprehension</a>"
+                "<a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a><a href='/library'>Card library</a>")
 
     def _page(self, title: str, body: str) -> str:
         return page(title, body, self._nav(), site="MeshLearn Teacher Hub")
@@ -306,10 +404,11 @@ class Hub:
         if rows:
             items = "".join(
                 f"<tr><td><a href='/assignments/{esc(r['id'])}'>{esc(json.loads(r['data'])['title'])}</a></td>"
-                f"<td>{esc(json.loads(r['data']).get('subject') or '')}</td><td>{r['subs']}</td><td>{r['to_grade']}</td></tr>"
+                f"<td>{esc(self._placement(json.loads(r['data'])) or json.loads(r['data']).get('subject') or '')}</td>"
+                f"<td>{r['subs']}</td><td>{r['to_grade']}</td></tr>"
                 for r in rows
             )
-            table = f"<table><tr><th>Assignment</th><th>Subject</th><th>Submissions</th><th>To grade</th></tr>{items}</table>"
+            table = f"<table><tr><th>Assignment</th><th>Course and unit</th><th>Submissions</th><th>To grade</th></tr>{items}</table>"
         else:
             table = "<p class='muted'>No assignments yet. <a href='/assignments/new'>Create the first one</a>.</p>"
         phone_list = "".join(
@@ -325,11 +424,19 @@ class Hub:
             "<p><strong>By memory card:</strong> download the course pack and unzip it into the phone's MeshLearn folder.</p>"
             "<a class='button secondary' href='/pack.zip'>Download course pack (zip)</a></div>"
         )
-        body = f"{stats}<h2>Assignments</h2>{table}{pack}<h2>Student phones</h2><ul>{phone_list}</ul>"
-        return Response(self._page("Dashboard", body))
+        courses = "<h2>Courses</h2>" + self._course_cards(self.comprehension_records())
+        body = (f"{stats}{courses}<h2>Latest assignments</h2>{table}{pack}<h2>Student phones</h2><ul>{phone_list}</ul>"
+                + self.learning_data_panel())
+        return Response(self._page("Home", body))
+
+    def _builder(self, edit_id: str, preset_course: str = "", preset_unit: str = "") -> str:
+        courses = [{"id": c["id"], "title": c["title"], "units": c["units"]} for c in self.courses() if not c.get("comingSoon")]
+        return (BUILDER_HTML.replace("__EDIT_ID__", esc(edit_id))
+                .replace("__COURSES__", json.dumps(courses).replace("</", "<\\/"))
+                .replace("__PRESET__", json.dumps({"course": preset_course, "unit": preset_unit}).replace("</", "<\\/")))
 
     def new_assignment(self, req: Request) -> Response:
-        return Response(self._page("New assignment", BUILDER_HTML.replace("__EDIT_ID__", "")))
+        return Response(self._page("New assignment", self._builder("", req.query.get("course", ""), req.query.get("unit", ""))))
 
     def edit_assignment(self, req: Request) -> Response:
         aid = req.params["aid"]
@@ -338,7 +445,7 @@ class Hub:
         note = ("<p class='warn'>Changing questions creates a new version. Phones that already hold this assignment "
                 "will need the full copy again (sent automatically to phones where it is open). Changing only the "
                 "due date costs one packet per phone.</p>")
-        return Response(self._page("Edit assignment", note + BUILDER_HTML.replace("__EDIT_ID__", esc(aid))))
+        return Response(self._page("Edit assignment", note + self._builder(aid)))
 
     def api_create(self, req: Request) -> Response:
         try:
@@ -367,7 +474,7 @@ class Hub:
             self.db.execute("INSERT INTO phones (node_id, name, last_seen) VALUES (?, ?, ?) "
                             "ON CONFLICT(node_id) DO UPDATE SET last_seen = excluded.last_seen", (node, name, time.time()))
             self.record_inventory(node, {p["i"]: p["v"] for p in pack}, complete=False)
-        return json_response({"assignments": pack})
+        return json_response({"assignments": pack, "courses": self.course_list_for_phones()})
 
     def pack_zip(self, req: Request) -> Response:
         return Response(self.course_pack_zip(), content_type="application/zip",
@@ -426,7 +533,7 @@ class Hub:
             )
         questions = "".join(f"<li>{esc(q['prompt'])} <span class='muted'>({q['type']}, {q['points']:g} pt)</span></li>"
                             for q in assignment["questions"])
-        meta = [assignment.get("subject") or "", f"{assignment['mode']} mode",
+        meta = [self._placement(assignment) or assignment.get("subject") or "", f"{assignment['mode']} mode",
                 f"due {assignment['due']}" if assignment.get("due") else "", f"version {version}"]
         body = (
             f"<p class='muted'>{esc(' · '.join(m for m in meta if m))}</p>"
@@ -918,7 +1025,11 @@ BUILDER_HTML = """
 advance; opening it for students then costs one radio packet.</p>
 <form id="builder" class="card" novalidate>
   <label for="title">Title</label><input type="text" id="title" required maxlength="120">
-  <label for="subject">Subject</label><input type="text" id="subject" maxlength="60">
+  <div class="grid">
+    <div><label for="course">Course</label><select id="course"></select></div>
+    <div><label for="unit">Unit</label><select id="unit"></select></div>
+  </div>
+  <label for="subject">Topic (optional)</label><input type="text" id="subject" maxlength="60">
   <label for="due">Due date</label><input type="date" id="due">
   <label for="instructions">Instructions for students</label><textarea id="instructions" maxlength="2000"></textarea>
   <label for="mode">Mode</label>
@@ -938,6 +1049,20 @@ advance; opening it for students then costs one radio packet.</p>
 </form>
 <script>
 const EDIT_ID = "__EDIT_ID__";
+const COURSES = __COURSES__;
+const PRESET = __PRESET__;
+const courseSel = document.getElementById('course'), unitSel = document.getElementById('unit');
+courseSel.add(new Option('No course', ''));
+COURSES.forEach(c => courseSel.add(new Option(c.title, c.id)));  // Option() sets text, so titles can't inject HTML
+function fillUnits(selected) {
+  const c = COURSES.find(c => c.id === courseSel.value);
+  unitSel.length = 0;
+  unitSel.add(new Option('No unit', ''));
+  if (c) c.units.forEach((u, i) => unitSel.add(new Option(`Unit ${i + 1}: ${u.title}`, u.id)));
+  if (selected) unitSel.value = selected;
+}
+courseSel.addEventListener('change', () => fillUnits());
+courseSel.value = PRESET.course || ''; fillUnits(PRESET.unit);
 const box = document.getElementById('questions');
 let n = 0;
 const labels = {choice: 'Multiple choice', number: 'Number', text: 'Short answer', long: 'Written response (you grade it)'};
@@ -991,7 +1116,7 @@ document.getElementById('builder').addEventListener('submit', async e => {
     return q;
   });
   const body = {title: val('title'), subject: val('subject'), due: val('due'), instructions: val('instructions'),
-                mode: val('mode'), questions};
+                mode: val('mode'), course: val('course'), unit: val('unit'), questions};
   if (EDIT_ID) body.id = EDIT_ID;
   const res = await fetch('/api/assignments', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   const data = await res.json();
@@ -1001,6 +1126,7 @@ document.getElementById('builder').addEventListener('submit', async e => {
 if (EDIT_ID) {
   fetch('/api/assignments/' + EDIT_ID).then(r => r.json()).then(a => {
     ['title', 'subject', 'due', 'instructions', 'mode'].forEach(k => setv(k, a[k]));
+    courseSel.value = a.course || ''; fillUnits(a.unit || '');
     a.questions.forEach(q => addQuestion(q.type, q));
   });
 } else {

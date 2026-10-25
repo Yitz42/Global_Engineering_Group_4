@@ -25,6 +25,8 @@ from urllib.parse import quote
 
 from . import __version__
 from . import assignments as asg
+from . import comprehension as cmp
+from . import courses as crs
 from . import protocol
 from .db import Database
 from .messenger import Messenger
@@ -42,7 +44,12 @@ CREATE TABLE IF NOT EXISTS submissions (
     answers TEXT NOT NULL, submitted_at REAL NOT NULL, msg_id INTEGER,
     score REAL, max REAL, complete INTEGER, detail TEXT
 );
+CREATE TABLE IF NOT EXISTS courses (id TEXT PRIMARY KEY, data TEXT NOT NULL, position INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS opens (
+    student TEXT NOT NULL, aid TEXT NOT NULL, opened_at REAL NOT NULL, PRIMARY KEY (student, aid)
+);
 """
+MAX_OPEN_S = 6 * 3600  # an assignment opened longer ago than this: timing unknown
 
 VIEWABLE = {".html", ".htm", ".txt", ".pdf", ".epub", ".png", ".jpg", ".jpeg", ".svg", ".mp3", ".mp4", ".webm", ".zim"}
 STARTER_DIR = os.path.join(os.path.dirname(__file__), "starter_library")
@@ -75,6 +82,10 @@ class Phone:
         self.admin_pin = admin_pin
         self._install_starter_library()
         self.db = Database(os.path.join(data_dir, "phone.db"), SCHEMA)
+        try:  # added after the first release
+            self.db.execute("ALTER TABLE submissions ADD COLUMN duration REAL")
+        except Exception:
+            pass
         self.messenger: Messenger = messenger_factory(self.on_message)
         self.load_pack_folder()
         self.app = App("phone")
@@ -133,13 +144,32 @@ class Phone:
         )
         return changed
 
+    def import_courses(self, courses: List[dict]) -> int:
+        count = 0
+        for position, c in enumerate(courses or []):
+            try:
+                course = crs.normalize_course(c)
+            except crs.CourseError:
+                continue
+            self.db.execute("INSERT OR REPLACE INTO courses (id, data, position) VALUES (?, ?, ?)",
+                            (course["id"], json.dumps(course), position))
+            count += 1
+        return count
+
     def load_pack_folder(self) -> int:
         """Load assignments copied onto the memory card (data/assignments/*.json)."""
         count = 0
         if not os.path.isdir(self.pack_dir):
             return 0
+        courses_file = os.path.join(self.pack_dir, "courses.json")
+        if os.path.exists(courses_file):
+            try:
+                with open(courses_file, encoding="utf-8") as fh:
+                    self.import_courses(json.load(fh).get("courses", []))
+            except (OSError, ValueError):
+                log.warning("skipping unreadable courses.json in the course pack")
         for fname in sorted(os.listdir(self.pack_dir)):
-            if not fname.endswith(".json"):
+            if not fname.endswith(".json") or fname == "courses.json":
                 continue
             try:
                 with open(os.path.join(self.pack_dir, fname), encoding="utf-8") as fh:
@@ -155,6 +185,7 @@ class Phone:
         url = hub_url.rstrip("/") + "/api/pack?" + query
         with urllib.request.urlopen(url, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+        self.import_courses(data.get("courses", []))
         return sum(1 for packed in data.get("assignments", []) if self.import_assignment(packed))
 
     def get_assignment(self, aid: str) -> Optional[dict]:
@@ -189,13 +220,23 @@ class Phone:
         else:
             log.info("phone ignoring %s message from %s", message.type, message.src)
 
-    def submit(self, assignment: dict, student: str, answers: Dict[str, str]) -> str:
+    def opened(self, student: str, aid: str) -> None:
+        """Remember when a student opened an assignment, to time their work."""
+        self.db.execute("INSERT OR REPLACE INTO opens (student, aid, opened_at) VALUES (?, ?, ?)", (student, aid, time.time()))
+
+    def submit(self, assignment: dict, student: str, answers: Dict[str, str], duration: Optional[float] = None) -> str:
         """Save a submission now; the batcher sends it with others shortly."""
         sub_id = asg.new_id("s")
+        if duration is None:
+            row = self.db.one("SELECT opened_at FROM opens WHERE student = ? AND aid = ?", (student, assignment["id"]))
+            if row and 0 <= time.time() - row["opened_at"] < MAX_OPEN_S:
+                duration = max(1.0, round(time.time() - row["opened_at"], 1))  # under a second still counts
         self.db.execute(
-            "INSERT INTO submissions (sub_id, assignment_id, version, student, answers, submitted_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (sub_id, assignment["id"], assignment.get("version"), student, json.dumps(answers), time.time()),
+            "INSERT INTO submissions (sub_id, assignment_id, version, student, answers, submitted_at, duration) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sub_id, assignment["id"], assignment.get("version"), student, json.dumps(answers), time.time(), duration),
         )
+        self.db.execute("DELETE FROM opens WHERE student = ? AND aid = ?", (student, assignment["id"]))
         if self.db.one("SELECT COUNT(*) AS n FROM submissions WHERE msg_id IS NULL")["n"] >= MAX_BATCH:
             self._flush.set()
         return sub_id
@@ -207,8 +248,13 @@ class Phone:
             return None
         if not force and len(rows) < MAX_BATCH and time.time() - rows[0]["submitted_at"] < self.batch_s:
             return None
-        batch = [{"id": r["sub_id"], "a": r["assignment_id"], "v": r["version"], "u": r["student"],
-                  "x": json.loads(r["answers"]), "t": round(r["submitted_at"])} for r in rows]
+        batch = []
+        for r in rows:
+            item = {"id": r["sub_id"], "a": r["assignment_id"], "v": r["version"], "u": r["student"],
+                    "x": json.loads(r["answers"]), "t": round(r["submitted_at"])}
+            if r["duration"]:
+                item["d"] = round(r["duration"])
+            batch.append(item)
         msg_id = self.messenger.send(self.hub_id, protocol.SUBMIT, {"s": batch})
         for r in rows:
             self.db.execute("UPDATE submissions SET msg_id = ? WHERE sub_id = ?", (msg_id, r["sub_id"]))
@@ -257,7 +303,7 @@ class Phone:
 
     def _nav(self, req: Request) -> str:
         who = req.cookies.get("student")
-        out = "<a href='/'>Assignments</a><a href='/library'>Library</a>"
+        out = "<a href='/'>Courses</a><a href='/library'>Library</a>"
         if who:
             out += f"<a href='/results'>My results</a><span class='muted'>Hi, {esc(who)}</span>"
         return out
@@ -270,6 +316,7 @@ class Phone:
         app.add_route("GET", "/", self.home)
         app.add_route("POST", "/login", self.login)
         app.add_route("POST", "/logout", self.logout)
+        app.add_route("GET", "/c/<cid>", self.course_page)
         app.add_route("GET", "/a/<aid>", self.assignment_form)
         app.add_route("POST", "/a/<aid>", self.assignment_submit)
         app.add_route("GET", "/results", self.results)
@@ -278,6 +325,84 @@ class Phone:
         app.add_route("GET", "/status", self.status)
         app.add_route("POST", "/status/sync", self.status_sync)
         app.add_route("POST", "/status/reload", self.status_reload)
+
+    # -- courses and progress ---------------------------------------------------
+
+    def course_tree(self) -> List[dict]:
+        """Courses with their units: from the course pack, plus any the phone only knows
+        from assignments that came by radio, plus 'Other assignments'."""
+        tree = [json.loads(r["data"]) for r in self.db.all("SELECT data FROM courses ORDER BY position")]
+        known = {c["id"]: c for c in tree}
+        loose = False
+        for r in self.db.all("SELECT data FROM assignments"):
+            a = json.loads(r["data"])
+            cid = a.get("course", "")
+            if not cid:
+                loose = True
+                continue
+            course = known.get(cid)
+            if course is None:
+                course = known[cid] = {"id": cid, "title": a.get("course_title") or cid, "description": "", "units": []}
+                tree.append(course)
+            uid = a.get("unit", "")
+            if uid and not crs.unit_of(course, uid):
+                course["units"].append({"id": uid, "title": a.get("unit_title") or uid, "_no": a.get("unit_no", "")})
+        for course in tree:
+            if any("_no" in u for u in course["units"]):
+                course["units"].sort(key=lambda u: int(u.get("_no") or 999))
+        if loose:
+            tree.append(dict(crs.OTHER))
+        return tree
+
+    def _assignments_in(self, course_id: str, open_only: bool = True) -> List[dict]:
+        rows = self.db.all("SELECT id FROM assignments" + (" WHERE open = 1" if open_only else "")
+                           + " ORDER BY due = '', due, received DESC")
+        known = {c["id"] for c in self.course_tree()}
+        out = []
+        for r in rows:
+            a = self.get_assignment(r["id"])
+            cid = a.get("course", "") if a.get("course", "") in known else ""
+            if cid == course_id:
+                out.append(a)
+        return out
+
+    def my_records(self, student: str) -> List[dict]:
+        """This student's graded work, for comprehension.py."""
+        records = []
+        for s in self.db.all("SELECT * FROM submissions WHERE student = ? AND score IS NOT NULL ORDER BY submitted_at",
+                             (student,)):
+            a = self.get_assignment(s["assignment_id"])
+            if not a:
+                continue
+            records.append({"student": student, "aid": a["id"], "course": a.get("course", ""), "unit": a.get("unit", ""),
+                            "mode": a.get("mode", "graded"), "at": s["submitted_at"], "duration": s["duration"],
+                            "questions": a["questions"], "answers": json.loads(s["answers"]),
+                            "scores": json.loads(s["detail"] or "{}")})
+        return records
+
+    @staticmethod
+    def _level(level: str, score) -> str:
+        cls = {"Strong": "good", "Good": "good", "Developing": "warn", "Needs work": "bad"}.get(level, "")
+        return f"<span class='pill {cls}'>{esc(level)}{'' if score is None else f' · {score}%'}</span>"
+
+    def _assignment_card(self, a: dict, sub) -> str:
+        if sub is None:
+            state = "<span class='pill'>To do</span>"
+        elif sub["score"] is None:
+            state = "<span class='pill warn'>Turned in · waiting for grade</span>"
+        elif not sub["complete"]:
+            state = f"<span class='pill warn'>{sub['score']:g} / {sub['max']:g} so far · teacher still grading</span>"
+        else:
+            state = f"<span class='pill good'>Score {sub['score']:g} / {sub['max']:g}</span>"
+        due = f" · due {esc(a['due'])}" if a.get("due") else ""
+        return (f"<div class='card'><h3 style='margin:0 0 4px'><a href='/a/{esc(a['id'])}'>{esc(a['title'])}</a></h3>"
+                f"<p class='muted' style='margin:0 0 8px'>{len(a['questions'])} questions{due}"
+                f"{' · practice' if a.get('mode') == 'practice' else ''}</p>{state}</div>")
+
+    def _my_latest(self, student: str) -> dict:
+        return {r["assignment_id"]: r for r in self.db.all(
+            "SELECT assignment_id, MAX(submitted_at) AS at, score, max, complete FROM submissions "
+            "WHERE student = ? GROUP BY assignment_id", (student,))}
 
     def home(self, req: Request) -> Response:
         student = req.cookies.get("student")
@@ -290,30 +415,64 @@ class Phone:
                 "<p>Or go straight to the <a href='/library'>library</a>.</p>"
             )
             return Response(self._page(req, "Welcome", body))
-        rows = self.db.all("SELECT id FROM assignments WHERE open = 1 ORDER BY due = '', due, received DESC")
-        mine = {r["assignment_id"]: r for r in self.db.all(
-            "SELECT assignment_id, MAX(submitted_at) AS at, score, max, complete FROM submissions "
-            "WHERE student = ? GROUP BY assignment_id", (student,))}
-        cards = ""
-        for r in rows:
-            a = self.get_assignment(r["id"])
-            sub = mine.get(a["id"])
-            if sub is None:
-                state = "<span class='pill'>To do</span>"
-            elif sub["score"] is None:
-                state = "<span class='pill warn'>Turned in · waiting for grade</span>"
-            else:
-                state = f"<span class='pill good'>Score {sub['score']:g} / {sub['max']:g}</span>"
-            due = f" · due {esc(a['due'])}" if a.get("due") else ""
+        mine = self._my_latest(student)
+        records = self.my_records(student)
+        cards, todo = "", []
+        for course in self.course_tree():
+            open_items = self._assignments_in(course["id"])
+            if course["id"] == "" and not open_items:
+                continue
+            todo += [a for a in open_items if a["id"] not in mine]
+            if course.get("comingSoon"):
+                cards += (f"<div class='card' style='opacity:.6'><h2 style='margin-top:0'>{esc(course['title'])}</h2>"
+                          f"<p class='muted'>{esc(course.get('description', ''))}</p><span class='pill'>Coming later</span></div>")
+                continue
+            summary = cmp.summarize(records, course)
+            left = sum(1 for a in open_items if a["id"] not in mine)
             cards += (
-                f"<div class='card'><h2 style='margin-top:0'><a href='/a/{esc(a['id'])}'>{esc(a['title'])}</a></h2>"
-                f"<p class='muted'>{esc(a.get('subject') or '')}{due} · {len(a['questions'])} questions"
-                f"{' · practice' if a.get('mode') == 'practice' else ''}</p>{state}</div>"
+                f"<div class='card'><h2 style='margin-top:0'><a href='/c/{esc(course['id']) or '_other'}'>{esc(course['title'])}</a></h2>"
+                f"<p class='muted'>{esc(course.get('description', ''))}</p>"
+                f"<p>{len(open_items)} open · {left} to do</p>{self._level(summary['level'], summary['score'])}</div>"
             )
-        if not cards:
-            cards = "<p class='muted'>No assignments are open right now. Your teacher will open them by radio.</p>"
-        body = cards + "<form method='post' action='/logout'><button class='secondary'>Not you? Change name</button></form>"
-        return Response(self._page(req, "Your assignments", body))
+        todo_html = ""
+        if todo:
+            todo_html = ("<h2>To do</h2>" + "".join(self._assignment_card(a, None) for a in todo[:5]))
+        body = (todo_html + "<h2>Your courses</h2>"
+                + (f"<div class='grid'>{cards}</div>" if cards else
+                   "<p class='muted'>No courses yet. Your teacher will send them.</p>")
+                + "<form method='post' action='/logout'><button class='secondary'>Not you? Change name</button></form>")
+        return Response(self._page(req, f"Hi, {student}", body))
+
+    def course_page(self, req: Request) -> Response:
+        student = req.cookies.get("student")
+        if not student:
+            return redirect("/")
+        cid = "" if req.params["cid"] == "_other" else req.params["cid"]
+        course = next((c for c in self.course_tree() if c["id"] == cid), None)
+        if course is None:
+            return Response(self._page(req, "Not found", "<p>That course is not on this phone.</p>"), status=404)
+        mine = self._my_latest(student)
+        summary = cmp.summarize(self.my_records(student), course)
+        by_unit = {u["id"]: u for u in summary["units"]}
+        items = self._assignments_in(cid)
+        sections = ""
+        for n, unit in enumerate(course["units"], start=1):
+            in_unit = [a for a in items if a.get("unit", "") == unit["id"]]
+            u = by_unit.get(unit["id"], {"level": "Not started", "score": None})
+            reading = (f"<a href='/library?q={quote(unit.get('read') or unit['title'])}'>Find readings in the library</a>")
+            sections += (
+                f"<h2>Unit {n}: {esc(unit['title'])} {self._level(u['level'], u['score'])}</h2>"
+                + ("".join(self._assignment_card(a, mine.get(a["id"])) for a in in_unit)
+                   or "<p class='muted'>Nothing open in this unit right now.</p>")
+                + f"<p>{reading}</p>"
+            )
+        loose = [a for a in items if a.get("unit", "") not in {u["id"] for u in course["units"]}]
+        if loose:
+            sections += ("<h2>Assignments</h2>" if not course["units"] else "<h2>Other assignments</h2>") + "".join(
+                self._assignment_card(a, mine.get(a["id"])) for a in loose)
+        body = (f"<p class='muted'>{esc(course.get('description', ''))}</p>"
+                f"<p>Your level in this course: {self._level(summary['level'], summary['score'])}</p>" + sections)
+        return Response(self._page(req, course["title"], body))
 
     def login(self, req: Request) -> Response:
         name = " ".join(req.form.get("student", "").split())[:40]
@@ -382,6 +541,7 @@ class Phone:
                 body = (f"<p>You already turned this in on {_when(done['submitted_at'])}.</p>"
                         "<p><a href='/results'>See your results</a></p>")
                 return Response(self._page(req, a["title"], body))
+        self.opened(student, a["id"])
         return Response(self._page(req, a["title"], self._render_form(req, a, {}, {})))
 
     def assignment_submit(self, req: Request) -> Response:
@@ -435,8 +595,20 @@ class Phone:
             else:
                 grade = f"{s['score']:g} / {s['max']:g} so far (teacher still grading)"
             out += f"<tr><td>{esc(a['title'])}</td><td>{_when(s['submitted_at'])}</td><td>{sent}</td><td>{grade}</td></tr>"
-        body = (f"<table><tr><th>Assignment</th><th>Turned in</th><th>Delivery</th><th>Grade</th></tr>{out}</table>"
-                if out else "<p class='muted'>Nothing turned in yet.</p>")
+        records = self.my_records(student)
+        progress = ""
+        for course in self.course_tree():
+            summary = cmp.summarize(records, course)
+            if not summary["answered"]:
+                continue
+            units = "".join(f"<li>Unit {u['number']}: {esc(u['title'])} {self._level(u['level'], u['score'])}</li>"
+                            for u in summary["units"] if u["answered"])
+            progress += (f"<div class='card'><h3 style='margin-top:0'>{esc(course['title'])} "
+                         f"{self._level(summary['level'], summary['score'])}</h3><ul>{units}</ul></div>")
+        body = (("<h2>How you are doing</h2>" + progress if progress else "")
+                + "<h2>Everything you turned in</h2>"
+                + (f"<table><tr><th>Assignment</th><th>Turned in</th><th>Delivery</th><th>Grade</th></tr>{out}</table>"
+                   if out else "<p class='muted'>Nothing turned in yet.</p>"))
         return Response(self._page(req, "My results", body))
 
     def library(self, req: Request) -> Response:

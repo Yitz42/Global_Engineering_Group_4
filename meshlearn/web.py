@@ -90,8 +90,9 @@ Handler = Callable[[Request], Response]
 
 
 class App:
-    def __init__(self, name: str):
+    def __init__(self, name: str, max_body: int = MAX_BODY_BYTES):
         self.name = name
+        self.max_body = max_body
         self._routes: List[Tuple[str, re.Pattern, Handler]] = []
         self._server: Optional[ThreadingHTTPServer] = None
 
@@ -137,7 +138,7 @@ class App:
             def _handle(self):
                 parsed = urlparse(self.path)
                 length = int(self.headers.get("Content-Length") or 0)
-                if length > MAX_BODY_BYTES:
+                if length > app.max_body:
                     self.send_error(413, "Request too large")
                     return
                 body = self.rfile.read(length) if length else b""

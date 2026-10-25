@@ -4,6 +4,8 @@
   "subject": "Math and Science",
   "due": "2026-11-06",
   "mode": "graded",
+  "course": "math",
+  "unit": "fractions",
   "instructions": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
   "questions": [
     {"id": "q1", "type": "choice", "prompt": "Which fraction is the same as 1/2?", "options": ["2/3", "3/6", "1/4", "2/5"], "answer": 1, "points": 1},

@@ -34,8 +34,8 @@ flowchart LR
 
 | Piece | What it does | Runs on |
 | --- | --- | --- |
-| Teacher hub | Assignment builder and editor, open/hide per phone, course pack export, auto-grading, manual grading of written answers, CSV export, card library browser | Any laptop with Python 3.9+ |
-| Student phone | Stored assignments, student website with answer checking, results, offline library, batched store-and-forward queue | Old Android phone with Termux, data on microSD |
+| Teacher hub | Courses with numbered units, assignment builder and editor, open/hide per phone, course pack export, auto-grading, manual grading of written answers, comprehension by student and unit, learning-data export/import, CSV export, card library browser | Any laptop with Python 3.9+ |
+| Student phone | Stored assignments, student website organized by course and unit with the student's own levels, answer checking, timing, results, offline library, batched store-and-forward queue | Old Android phone with Termux, data on microSD |
 | Mesh link | Compressed, chunked, acknowledged messages that resend only lost pieces and survive reboots | Meshtastic radios, or a built-in simulator |
 | Library fetcher | Picks the best open content that fits the card (Kiwix offline Wikipedia, Wikibooks, Wikiversity, PhET, Project Gutenberg) in English, Portuguese, or German, and downloads it with resume | Any computer with internet, before deployment |
 
@@ -84,6 +84,54 @@ The simulated radio drops 20% of packets, so you can watch the retries work. Cha
    python3 -m meshlearn library --sd-gb 32 --lang pt --dest /Volumes/SDCARD/Android/data/com.termux/files/meshlearn/library --dry-run
    ```
    Drop `--dry-run` to download. Run it again to resume an interrupted download. To download what was chosen on the hub page, use `--from-hub hub-data` in place of `--sd-gb`.
+
+## How the work is organized
+
+MeshLearn follows the organization of the team's **Engineering Mechanics Sandbox**: courses, numbered units, comprehension worked out quietly from every answer, and one learning-data file.
+
+### Courses and units
+
+Every assignment belongs to a unit of a course, for example *Mathematics · Unit 1: Numbers and fractions*.
+
+- **Starter courses** come from [`meshlearn/courses.json`](meshlearn/courses.json): Mathematics, Science, and Reading and writing, plus Engineering mechanics marked "Coming later". The team edits this file.
+- **Teacher changes win.** On the hub's **Courses** page, teachers add courses, rename or add units, and say what each unit's "Find readings" link should search the library for. Once a course is changed on the hub, the hub keeps its version even if the file changes. Untouched courses follow the file.
+- **What students see.** Students get course cards with their own level, then the course's numbered units with that unit's open assignments, a link to readings in the library, and their level in the unit. Unbuilt courses show as "Coming later".
+- **Course names reach every phone.** Course and unit titles travel inside each assignment, so a phone that only ever hears from the hub by radio still shows the courses. Phones loaded with a course pack also get each course's description and empty units.
+
+### Comprehension
+
+The hub's **Comprehension** page scores every student in every unit and course from their graded answers, using the sandbox's rules:
+
+| | |
+| --- | --- |
+| Graded assignment | Points earned ÷ points possible, per question |
+| Practice assignment | 1.0 right first time, 0.6 right on the second try, 0.3 later, 0 never right |
+| Unit | Average of the student's 20 most recent scored questions in it |
+| Course | Average of its units that have answers |
+| Levels | Strong 85%+, Good 65%+, Developing 40%+, Needs work below 40%; fewer than 3 answers is "Just started" |
+
+**Where the mistakes are.** Every answer that lost marks is sorted into an area:
+
+- **Calculation:** sign flipped, place value off by 10, 100 or 1000, rounded too far, fraction upside down.
+- **Understanding:** wrong multiple-choice option.
+- **Recall:** wrong word or fact.
+- **Explaining:** written answer below half marks.
+
+**How long it took.** The phone times each assignment from opening it to submitting. That gives signals that are worth a look but never proof:
+
+- **rushing:** fast and wrong;
+- **very fast and right:** outside help?
+- **much slower than expected:** stuck?
+
+Students see their own levels on their course cards and on **My results**.
+
+### Learning data
+
+The hub home page's **Learning data** panel exports everything in one anonymous JSON file. That covers courses, every assignment version with its answer key, and every submission with answers, scores, mistake kinds, timing and pace signal.
+
+- **Pseudonyms, not names.** Student and phone names are replaced by pseudonyms, from a secret that never leaves the hub, so the same student always gets the same pseudonym.
+- **Built to stay readable.** The file has a format name, a version, an `encoding` field and a dictionary of its fields, so it can still be read as MeshLearn changes.
+- **Import only adds.** Importing another hub's file adds its data, skips submissions already present and never deletes anything, so the team can pool results from several schools.
 
 ## Choosing what goes on the card
 
@@ -185,8 +233,11 @@ meshlearn/
   transport.py       simulated radio (UDP) and real Meshtastic radios (USB or Wi-Fi)
   messenger.py       store-and-forward delivery: acks, selective resend, de-duplication
   assignments.py     question types, compact format, version stamps, answer checking, grading
+  courses.py         courses and numbered units; courses.json holds the starter courses
+  comprehension.py   scores per unit and course, mistake kinds, timing signals (sandbox rules)
   hub.py             teacher dashboard, open/hide per phone, course pack export
-  phone.py           stored assignments, student website, batching, library browser
+  hubpages.py        hub pages for courses, comprehension and learning data (export / import)
+  phone.py           stored assignments, student website by course, timing, batching, library browser
   library.py         open-content planner and downloader
   catalog.py         full Kiwix catalog: education rating, card budget, background copy to card
   web.py             tiny standard-library web framework
@@ -202,7 +253,7 @@ docs/hardware.md, docs/android-setup.md
 python3 -m unittest discover -s tests -v
 ```
 
-There are 37 tests. They cover:
+There are 49 tests. They cover:
 
 - framing, corruption, and missing-piece reports;
 - lossless compact format;
@@ -212,6 +263,9 @@ There are 37 tests. They cover:
 - delivery through 40% simulated loss, with each message delivered exactly once;
 - selective resend staying under 4× the message size at 30% loss;
 - catalog parsing, education rating, and age ranges;
+- starter courses and hub edits winning over the file;
+- comprehension scoring for graded and practice work, levels, mistake kinds and timing signals;
+- learning-data export with no real names, and import that skips doubles;
 - starter sets that fit the card;
 - copying chosen collections onto a card from a local test server.
 
@@ -223,6 +277,8 @@ End-to-end tests run through both websites:
 - a phone fetching a copy it was missing;
 - editing an assignment after students answered;
 - three students' work sharing one radio message;
+- a student's course cards, unit pages, timing and levels;
+- the hub's course, comprehension and learning-data pages;
 - library traversal protection.
 
 ## Status and limits

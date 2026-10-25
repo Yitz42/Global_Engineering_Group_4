@@ -1,0 +1,45 @@
+{
+  "_about": "Starter courses shown on the teacher hub and student phones. Each course has numbered units; assignments belong to a unit. Teachers can add and change courses on the hub; the hub copy wins after a change. Ids must stay the same once in use: rename the title, not the id. 'read' is what the unit's 'Find readings' link searches for in the phone's library. 'comingSoon' shows the course greyed out.",
+  "courses": [
+    {
+      "id": "math",
+      "title": "Mathematics",
+      "description": "Numbers, fractions, measurement and data: the maths used every day.",
+      "units": [
+        {"id": "fractions", "title": "Numbers and fractions", "read": "fractions"},
+        {"id": "measurement", "title": "Measurement and geometry", "read": "geometry"},
+        {"id": "algebra", "title": "Patterns and algebra", "read": "algebra"},
+        {"id": "data", "title": "Data and statistics", "read": "statistics"}
+      ]
+    },
+    {
+      "id": "science",
+      "title": "Science",
+      "description": "Living things, the Earth and its weather, and energy and forces.",
+      "units": [
+        {"id": "living", "title": "Living things", "read": "photosynthesis"},
+        {"id": "earth", "title": "Earth, water and weather", "read": "water cycle"},
+        {"id": "energy", "title": "Energy and forces", "read": "energy"},
+        {"id": "space", "title": "Earth and space", "read": "solar system"}
+      ]
+    },
+    {
+      "id": "literacy",
+      "title": "Reading and writing",
+      "description": "Reading for meaning and writing clearly.",
+      "units": [
+        {"id": "reading", "title": "Reading for meaning", "read": "books"},
+        {"id": "writing", "title": "Writing clearly", "read": "writing"}
+      ]
+    },
+    {
+      "id": "mechanics",
+      "title": "Engineering mechanics",
+      "description": "Forces, moments and equilibrium, from the Engineering Mechanics Sandbox.",
+      "comingSoon": true,
+      "units": [
+        {"id": "statics", "title": "Statics"}
+      ]
+    }
+  ]
+}

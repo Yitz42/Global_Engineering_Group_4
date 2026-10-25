@@ -21,7 +21,7 @@ import zipfile
 from http.cookiejar import CookieJar
 
 from meshlearn import assignments as asg
-from meshlearn import catalog, library, protocol
+from meshlearn import catalog, comprehension, courses, library, protocol
 from meshlearn.hub import Hub
 from meshlearn.messenger import Messenger
 from meshlearn.phone import Phone
@@ -550,8 +550,204 @@ class LibraryLanguageTests(unittest.TestCase):
 
 
 class _QuietRadio:
+    """Stands in for the messenger where a test needs no radio."""
+
+    def __init__(self):
+        self.sent = []
+
     def status(self):
         return {"pending": 0, "acked": 0, "failed": 0, "frames_sent": 0}
+
+    def send(self, dest, msg_type, payload):
+        self.sent.append((dest, msg_type, payload))
+        return len(self.sent)
+
+    def message_status(self, msg_id):
+        return "acked"
+
+
+def submit_via_radio(hub, student, answers, duration=None, phone="phone-1", aid="a-fractions1", version=None, t=None):
+    item = {"id": asg.new_id("s"), "a": aid, "v": version or hub.current_version(aid), "u": student, "x": answers,
+            "t": t or time.time()}
+    if duration:
+        item["d"] = duration
+    hub.on_message(protocol.Message(1, protocol.SUBMIT, {"s": [item]}, src=phone))
+    return item["id"]
+
+
+class CourseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+
+    def test_starter_courses_load_from_the_file(self):
+        ids = [c["id"] for c in self.hub.courses()]
+        self.assertEqual(ids[:3], ["math", "science", "literacy"])
+        self.assertTrue(self.hub.get_course("mechanics")["comingSoon"])
+        self.assertEqual(courses.unit_number(self.hub.get_course("math"), "measurement"), "2")
+
+    def test_file_changes_flow_unless_the_hub_changed_the_course(self):
+        path = os.path.join(self.tmp, "courses.json")
+        with open(path, "w") as fh:
+            json.dump({"courses": [{"id": "math", "title": "Maths (new name)", "units": ["Numbers"]},
+                                   {"id": "science", "title": "Science 2", "units": []}]}, fh)
+        self.hub.save_course(dict(self.hub.get_course("science"), title="Our science"))
+        self.hub.load_course_file(path)
+        self.assertEqual(self.hub.get_course("math")["title"], "Maths (new name)")
+        self.assertEqual(self.hub.get_course("science")["title"], "Our science")  # hub's edit kept
+
+    def test_course_pages_and_builder(self):
+        port = free_port()
+        server = self.hub.app.serve_in_thread("127.0.0.1", port)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{port}"
+        body = urllib.parse.urlencode({"title": "Digital skills", "units": "Using a phone\nStaying safe online"}).encode()
+        page = urllib.request.urlopen(f"{url}/courses", body).read().decode()
+        self.assertIn("Unit 2: Staying safe online", page)
+        course = self.hub.get_course("digital-skills")
+        self.assertEqual([u["id"] for u in course["units"]], ["using-a-phone", "staying-safe-online"])
+        self.hub.create_assignment(load_sample())
+        self.assertIn("Mathematics · Unit 1: Numbers and fractions", urllib.request.urlopen(f"{url}/assignments/a-fractions1").read().decode())
+        builder = urllib.request.urlopen(f"{url}/assignments/new?course=math&unit=algebra").read().decode()
+        self.assertIn('"course": "math", "unit": "algebra"', builder)
+        self.assertIn("Fractions and plants check-in", urllib.request.urlopen(f"{url}/courses/math").read().decode())
+        packed = self.hub.packed_for_phone("a-fractions1")
+        self.assertEqual((packed["Ct"], packed["Ut"], packed["Un"]), ("Mathematics", "Numbers and fractions", "1"))
+
+
+class ComprehensionTests(unittest.TestCase):
+    def setUp(self):
+        self.a = asg.normalize_assignment(load_sample())
+
+    def record(self, student, scores, answers=None, mode="graded", at=1.0, duration=None):
+        return {"student": student, "aid": self.a["id"], "course": "math", "unit": "fractions", "mode": mode, "at": at,
+                "duration": duration, "questions": self.a["questions"], "answers": answers or {}, "scores": scores}
+
+    def test_levels_follow_the_sandbox(self):
+        self.assertEqual(comprehension.level_of(None, 0), "Not started")
+        self.assertEqual(comprehension.level_of(90, 2), "Just started")
+        self.assertEqual([comprehension.level_of(s, 5) for s in (90, 70, 50, 10)], ["Strong", "Good", "Developing", "Needs work"])
+
+    def test_graded_and_practice_scoring(self):
+        graded = comprehension.question_scores([self.record("Ana", {"q1": 1, "q2": 0, "q3": 1, "q4": 1, "q5": 1.5})])
+        self.assertEqual([round(q["score"], 2) for q in graded], [1, 0, 1, 1, 0.5])
+        tries = [self.record("Bo", {"q1": 0, "q2": 0, "q3": 1, "q4": 0, "q5": None}, mode="practice", at=1),
+                 self.record("Bo", {"q1": 1, "q2": 0, "q3": 1, "q4": 0, "q5": None}, mode="practice", at=2),
+                 self.record("Bo", {"q1": 1, "q2": 1, "q3": 1, "q4": 0, "q5": None}, mode="practice", at=3)]
+        by_q = {q["qid"]: q["score"] for q in comprehension.question_scores(tries)}
+        self.assertEqual(by_q, {"q1": 0.6, "q2": 0.3, "q3": 1.0, "q4": 0.0})  # q5 never graded: left out
+
+    def test_mistake_kinds(self):
+        q = {"id": "n", "type": "number", "answer": 0.75, "tolerance": 0.001, "points": 1}
+        self.assertEqual(comprehension.diagnose(q, "-0.75", 0), "sign")
+        self.assertEqual(comprehension.diagnose(q, "7.5", 0), "place")
+        self.assertEqual(comprehension.diagnose(q, "0.76", 0), "rounding")
+        self.assertEqual(comprehension.diagnose(q, "4/3", 0), "inverted")
+        self.assertEqual(comprehension.diagnose(q, "2", 0), "unexplained")
+        self.assertIsNone(comprehension.diagnose(q, "3/4", 1))
+        self.assertEqual(comprehension.diagnose({"id": "c", "type": "choice", "points": 1}, "0", 0), "concept")
+        self.assertEqual(comprehension.diagnose({"id": "l", "type": "long", "points": 4}, "x", 1), "explaining")
+        self.assertIsNone(comprehension.diagnose({"id": "l", "type": "long", "points": 4}, "x", 3))
+
+    def test_pace_signals(self):
+        wrong = {"q1": 0, "q2": 0, "q3": 0, "q4": 0, "q5": 0}
+        right = {"q1": 1, "q2": 1, "q3": 1, "q4": 1, "q5": 3}
+        self.assertEqual(comprehension.pace(self.record("A", wrong, duration=20)), "rushing")
+        self.assertEqual(comprehension.pace(self.record("A", right, duration=20)), "fast_right")
+        self.assertEqual(comprehension.pace(self.record("A", right, duration=3000)), "slow")
+        self.assertIsNone(comprehension.pace(self.record("A", right, duration=300)))
+        self.assertIsNone(comprehension.pace(self.record("A", right, duration=None)))
+
+    def test_summary_by_unit_and_student(self):
+        course = {"id": "math", "units": [{"id": "fractions", "title": "Fractions"}, {"id": "data", "title": "Data"}]}
+        recs = [self.record("Ana", {"q1": 1, "q2": 1, "q3": 1, "q4": 1, "q5": 3}),
+                self.record("Bo", {"q1": 0, "q2": 0, "q3": 1, "q4": 0, "q5": 0}, answers={"q2": "-0.75"}, duration=15)]
+        s = comprehension.summarize(recs, course)
+        self.assertEqual(s["students"]["Ana"]["units"][0]["level"], "Strong")
+        self.assertEqual(s["students"]["Bo"]["units"][0]["level"], "Needs work")
+        self.assertEqual(s["units"][1]["level"], "Not started")
+        self.assertEqual(s["mistakes"]["kinds"]["sign"], 1)
+        self.assertEqual(s["pace"], {"rushing": 1})
+
+
+class LearningDataTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        self.hub.create_assignment(load_sample())
+        submit_via_radio(self.hub, "Ana Souza", GOOD_ANSWERS, duration=240)
+        submit_via_radio(self.hub, "Bo", {"q1": "0", "q2": "7.5", "q3": "sun", "q4": "0", "q5": "?"}, duration=12)
+
+    def test_export_is_anonymous_and_complete(self):
+        data = self.hub.learning_record()
+        text = json.dumps(data)
+        self.assertEqual((data["format"], data["version"], data["encoding"]), ("meshlearn-learning-record", 1, "none"))
+        self.assertNotIn("Ana Souza", text)
+        self.assertNotIn("phone-1", text)
+        self.assertEqual(len(data["submissions"]), 2)
+        bo = next(s for s in data["submissions"] if s["duration_s"] == 12)
+        self.assertEqual(bo["mistakes"]["q2"], "place")
+        self.assertEqual(bo["pace"], "rushing")
+        self.assertEqual(self.hub.pseudonym("Ana Souza"), self.hub.pseudonym("Ana Souza"))
+        self.assertIn("submissions.student", data["dictionary"])
+
+    def test_import_adds_and_skips_doubles(self):
+        data = self.hub.learning_record()
+        other = Hub(os.path.join(self.tmp, "other.db"), lambda h: _QuietRadio())
+        self.assertEqual(other.import_learning_record(data)["submissions"], 2)
+        again = other.import_learning_record(data)
+        self.assertEqual((again["submissions"], again["skipped"]), (0, 2))
+        summary = other.course_summary(other.get_course("math"))
+        self.assertEqual(len(summary["students"]), 2)
+        self.assertTrue(all(name.startswith("s-") for name in summary["students"]))
+        with self.assertRaises(ValueError):
+            other.import_learning_record({"format": "something-else"})
+
+    def test_hub_pages_show_comprehension_and_data_panel(self):
+        port = free_port()
+        server = self.hub.app.serve_in_thread("127.0.0.1", port)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{port}"
+        page = urllib.request.urlopen(f"{url}/comprehension/math").read().decode()
+        self.assertIn("Ana Souza", page)
+        self.assertIn("rushing (fast and wrong)", page)
+        self.assertIn("Calculation", page)
+        home = urllib.request.urlopen(url).read().decode()
+        self.assertIn("Export all data", home)
+        self.assertIn("Mathematics", home)
+        exported = json.loads(urllib.request.urlopen(f"{url}/data/export.json").read())
+        self.assertEqual(len(exported["submissions"]), 2)
+
+
+class PhoneCourseTests(EndToEndBase):
+    LOSS = 0.0
+
+    def test_course_cards_unit_pages_timing_and_levels(self):
+        aid = self.hub.create_assignment(load_sample())["id"]
+        self.phone.sync_from_hub(f"http://127.0.0.1:{self.hport}")
+        self.hub.set_open(aid, "phone-1", True)
+        self.assertTrue(wait_for(self.phone_open(aid)))
+        self.post(self.pport, "/login", {"student": "Ana"})
+        home = self.get(self.pport, "/")
+        self.assertIn("Your courses", home)
+        self.assertIn("/c/math", home)
+        self.assertIn("Coming later", home)  # Engineering mechanics, from the course file
+        course = self.get(self.pport, "/c/math")
+        self.assertIn("Unit 1: Numbers and fractions", course)
+        self.assertIn("Find readings in the library", course)
+        self.get(self.pport, f"/a/{aid}")
+        time.sleep(1.1)
+        self.post(self.pport, f"/a/{aid}", GOOD_ANSWERS)
+        self.assertGreaterEqual(self.phone.db.one("SELECT duration FROM submissions")["duration"], 1)
+        self.assertTrue(wait_for(lambda: self.hub.db.one("SELECT duration FROM submissions WHERE student = 'Ana'")))
+        self.assertGreaterEqual(self.hub.db.one("SELECT duration FROM submissions WHERE student = 'Ana'")["duration"], 1)
+        sid = self.hub.db.one("SELECT sub_id FROM submissions")["sub_id"]
+        self.post(self.hport, f"/submissions/{sid}/grade", {"m_q5": "3"})
+        self.assertTrue(wait_for(lambda: self.phone.db.one("SELECT complete FROM submissions")["complete"] == 1))
+        self.assertIn("How you are doing", self.get(self.pport, "/results"))
+        self.assertIn("Strong · 100%", self.get(self.pport, "/c/math"))
 
 
 if __name__ == "__main__":

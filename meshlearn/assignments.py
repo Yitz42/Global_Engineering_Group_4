@@ -116,6 +116,8 @@ def normalize_assignment(data: dict) -> dict:
         "id": _clean_str(data.get("id"), 20) or new_id("a"),
         "title": title,
         "subject": _clean_str(data.get("subject"), 60),
+        "course": _clean_str(data.get("course"), 24),
+        "unit": _clean_str(data.get("unit"), 24),
         "instructions": _clean_str(data.get("instructions"), 2000),
         "due": _clean_str(data.get("due"), 10),
         "mode": mode,
@@ -128,7 +130,10 @@ def normalize_assignment(data: dict) -> dict:
 # Short keys, numeric question types, and defaults left out. Packing is lossless:
 # unpack(pack(x)) == x for any normalized assignment.
 
-_TOP_KEYS = {"id": "i", "title": "T", "subject": "S", "instructions": "I", "due": "D", "mode": "M", "version": "v"}
+_TOP_KEYS = {"id": "i", "title": "T", "subject": "S", "instructions": "I", "due": "D", "mode": "M", "version": "v",
+             "course": "C", "unit": "U", "course_title": "Ct", "unit_title": "Ut", "unit_no": "Un"}
+# Filled in by the hub for the phone's copy only; left out of unpacked assignments when empty.
+_OPTIONAL_TOP = ("version", "course_title", "unit_title", "unit_no")
 _Q_KEYS = {"id": "i", "prompt": "p", "options": "o", "answer": "a", "tolerance": "l", "accept": "c", "points": "s", "max_chars": "m"}
 _TYPE_CODES = {t: n for n, t in enumerate(QUESTION_TYPES)}
 _Q_DEFAULTS = {"points": 1.0, "tolerance": 0.0, "max_chars": 600}
@@ -184,8 +189,9 @@ def unpack(packed: dict) -> dict:
             q["max_chars"] = int(cq.get("m", _Q_DEFAULTS["max_chars"]))
         questions.append(q)
     out["questions"] = questions
-    if not out["version"]:
-        out.pop("version")
+    for key in _OPTIONAL_TOP:
+        if not out[key]:
+            out.pop(key)
     return out
 
 
@@ -193,7 +199,7 @@ def version_of(assignment: dict) -> str:
     """Content stamp shared by hub and phone. The due date is left out so it can
     change with a one-packet OPEN message instead of a full resend."""
     view = dict(public_view(assignment))
-    for key in ("due", "version"):
+    for key in ("due", "version", "course_title", "unit_title", "unit_no"):
         view.pop(key, None)
     canonical = json.dumps(pack(view), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return format(zlib.crc32(canonical.encode("utf-8")), "08x")
