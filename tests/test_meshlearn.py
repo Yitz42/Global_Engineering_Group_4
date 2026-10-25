@@ -175,6 +175,48 @@ class MessengerTests(unittest.TestCase):
         self.assertLess(ma.frames_sent, 4 * n, f"{ma.frames_sent} frames for a {n}-frame message")
 
 
+class _InstantLink:
+    """A radio where frames arrive instantly, inside the sender's own send() call, so
+    replies come back while a burst is still going out. Drops the first copy of chosen frames."""
+
+    def __init__(self, node_id, drop_first=()):
+        self.node_id = node_id
+        self.peer = None
+        self.handler = None
+        self.drop_first = set(drop_first)
+
+    def start(self, handler):
+        self.handler = handler
+
+    def send(self, frame, dest):
+        seq = protocol.parse_header(frame).seq
+        if seq in self.drop_first:
+            self.drop_first.discard(seq)
+            return
+        self.peer.handler(frame, self.node_id)
+
+    def close(self):
+        pass
+
+
+class SelectiveResendRaceTests(unittest.TestCase):
+    def test_nack_arriving_mid_burst_is_not_lost(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        a, b = _InstantLink("a", drop_first={1, 3}), _InstantLink("b")
+        a.peer, b.peer = b, a
+        got = []
+        # A long retry time: if the NACK were lost, delivery would take far longer than this test waits.
+        ma = Messenger(a, os.path.join(tmp, "a.db"), lambda m: None, retry_s=60, max_retry_s=60)
+        mb = Messenger(b, os.path.join(tmp, "b.db"), got.append, retry_s=60, max_retry_s=60)
+        ma.start(), mb.start()
+        self.addCleanup(ma.stop)
+        self.addCleanup(mb.stop)
+        msg = ma.send("b", protocol.SUBMIT, {"blob": os.urandom(900).hex()})
+        self.assertTrue(wait_for(lambda: ma.message_status(msg) == "acked", 5))
+        self.assertEqual(len(got), 1)
+
+
 class LibraryPlanTests(unittest.TestCase):
     def pkg(self, key, *sizes):
         p = library.Package(key, key, "x")

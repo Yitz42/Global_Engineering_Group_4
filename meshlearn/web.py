@@ -194,6 +194,7 @@ header{background:var(--card);border-bottom:1px solid var(--line);padding:12px 1
 header strong{font-size:18px;margin-right:auto}
 header a{color:var(--accent);text-decoration:none;font-weight:600}
 main{max-width:860px;margin:0 auto;padding:16px}
+main.wide{max-width:1160px}
 h1{font-size:26px;line-height:1.25;margin:8px 0 16px}
 h2{font-size:20px;margin:24px 0 8px}
 a{color:var(--accent)}
@@ -212,17 +213,17 @@ button.secondary,.button.secondary{background:transparent;color:var(--accent);bo
 table{width:100%;border-collapse:collapse;margin:8px 0}
 th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 .error{color:var(--bad);font-weight:600;margin:4px 0}
-.pill{display:inline-block;padding:2px 10px;border-radius:99px;border:1px solid var(--line);font-size:14px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.pill{display:inline-block;padding:2px 10px;border-radius:99px;border:1px solid var(--line);font-size:14px;white-space:nowrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:12px}
 .stat{font-size:28px;font-weight:700}
 """
 
 
-def page(title: str, body: str, nav: str = "", site: str = "MeshLearn") -> str:
+def page(title: str, body: str, nav: str = "", site: str = "MeshLearn", wide: bool = False) -> str:
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{esc(title)} · {esc(site)}</title><style>{CSS}</style></head>"
         f"<body><header><strong>{esc(site)}</strong>{nav}</header>"
-        f"<main id='main'><h1>{esc(title)}</h1>{body}</main></body></html>"
+        f"<main id='main'{' class=wide' if wide else ''}><h1>{esc(title)}</h1>{body}</main></body></html>"
     )

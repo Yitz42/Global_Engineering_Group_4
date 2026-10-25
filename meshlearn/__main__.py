@@ -117,6 +117,19 @@ def cmd_demo(args) -> int:
     copied = phone.sync_from_hub(f"http://127.0.0.1:{args.hub_port}")
     # ...so opening it for students later costs a single radio packet.
     hub.set_open(sample["id"], "phone-1", True)
+    if args.showcase:
+        from . import showcase
+        print("Filling the demo with a full school (this takes about a minute)…")
+        counts = showcase.seed(hub, phone)
+        try:
+            if not hub.catalog.entries:
+                hub.catalog.refresh()
+            for item in hub.catalog.suggest("en", hub.library_budget(), hub.student_ages()):
+                hub.select_item(item)
+        except Exception as exc:  # offline: the Card library page offers to download the list later
+            print(f"  (Card library list not downloaded: {exc})")
+        print(f"  {counts['assignments']} assignments, {counts['students']} students, {counts['submissions']} submissions, "
+              f"{counts['graded_by_teacher']} written answers graded.")
     print(f"""
 MeshLearn demo running (simulated radio, {args.loss:.0%} packet loss). Data in {root}
 
@@ -127,7 +140,10 @@ The phone copied {copied} assignment over "school Wi-Fi", and the hub has opened
 it with a 1-packet radio message. Open the student site, enter a name, and
 complete it. Submissions are batched for {args.batch_seconds:g} s before going
 by radio. Ctrl+C to stop.
-""")
+""" + ("""
+Showcase: on the student site, type the name Lena, Ana, Bruno, Kofi or Mateus to see
+a student who already has work and grades. Every name and answer is made up.
+""" if args.showcase else ""))
     _wait_forever(hub_srv.shutdown, phone_srv.shutdown, hub.messenger.stop, phone.stop)
     return 0
 
@@ -184,6 +200,8 @@ def main(argv=None) -> int:
     d.add_argument("--loss", type=float, default=0.2, help="fraction of radio packets to drop (default 0.2)")
     d.add_argument("--data", help="folder for demo data (default: a temporary folder)")
     d.add_argument("--batch-seconds", type=float, default=3.0, help="how long the phone collects submissions before sending")
+    d.add_argument("--showcase", action="store_true",
+                   help="fill the demo with a realistic school: courses, 13 students, graded work, comprehension")
     d.set_defaults(func=cmd_demo)
 
     h = sub.add_parser("hub", help="run the teacher hub")

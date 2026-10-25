@@ -351,7 +351,7 @@ class Hub(HubPages):
                 "<a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a><a href='/library'>Card library</a>")
 
     def _page(self, title: str, body: str) -> str:
-        return page(title, body, self._nav(), site="MeshLearn Teacher Hub")
+        return page(title, body, self._nav(), site="MeshLearn Teacher Hub", wide=True)  # used on a laptop
 
     def _routes(self) -> None:
         app = self.app

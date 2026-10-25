@@ -160,11 +160,8 @@ class Messenger:
                     burst[-1] = protocol.set_end(burst[-1])      # only what was asked for
             else:
                 burst = [frames[-1]]                             # probe: one packet
-            try:
-                for frame in burst:
-                    self._transmit(frame, dest)
-            except Exception:
-                log.exception("send to %s failed", dest)
+            # Record the attempt BEFORE transmitting: on a fast link the receiver's NACK can
+            # arrive while the burst is still going out, and it must not be overwritten.
             attempts += 1
             delay = min(self.retry_s * (2 ** min(attempts - 1, 10)), self.max_retry_s)
             status = "failed" if attempts >= self.max_attempts else "pending"
@@ -175,6 +172,11 @@ class Messenger:
                     (attempts, time.time() + delay, status, msg_id),
                 )
                 self._db.commit()
+            try:
+                for frame in burst:
+                    self._transmit(frame, dest)
+            except Exception:
+                log.exception("send to %s failed", dest)
 
     def _send_control(self, msg_type: str, payload: dict, dest: str) -> None:
         """ACK/NACK: fire and forget (a lost one is covered by the sender's probe)."""

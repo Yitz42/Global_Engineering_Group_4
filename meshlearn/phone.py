@@ -396,7 +396,7 @@ class Phone:
             state = f"<span class='pill good'>Score {sub['score']:g} / {sub['max']:g}</span>"
         due = f" · due {esc(a['due'])}" if a.get("due") else ""
         return (f"<div class='card'><h3 style='margin:0 0 4px'><a href='/a/{esc(a['id'])}'>{esc(a['title'])}</a></h3>"
-                f"<p class='muted' style='margin:0 0 8px'>{len(a['questions'])} questions{due}"
+                f"<p class='muted' style='margin:0 0 8px'>{len(a['questions'])} question{'' if len(a['questions']) == 1 else 's'}{due}"
                 f"{' · practice' if a.get('mode') == 'practice' else ''}</p>{state}</div>")
 
     def _my_latest(self, student: str) -> dict:

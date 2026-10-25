@@ -58,6 +58,14 @@ On start, the demo plays out a school visit. The phone copies the assignment fro
 
 The simulated radio drops 20% of packets, so you can watch the retries work. Change that with `--loss 0.5`.
 
+**To see a fully set-up school,** run `python3 -m meshlearn demo --showcase`. It fills the demo with three weeks of made-up work:
+
+- nine assignments across Mathematics, Science, and Reading and writing;
+- three community phones and 13 students of different abilities;
+- graded work and practice tries, a few written answers waiting for the teacher, and the odd student rushing.
+
+The five students on the demo phone (Lena, Ana, Bruno, Kofi, Mateus) send their work through the simulated radio. Type one of those names on the student site to see their courses, levels and grades.
+
 ## Running on real hardware
 
 1. **Get radios.** See [docs/hardware.md](docs/hardware.md) for recommended boards, antennas, power, and the right frequency band for the US, Brazil, Germany, and Kenya.
@@ -237,6 +245,7 @@ meshlearn/
   comprehension.py   scores per unit and course, mistake kinds, timing signals (sandbox rules)
   hub.py             teacher dashboard, open/hide per phone, course pack export
   hubpages.py        hub pages for courses, comprehension and learning data (export / import)
+  showcase.py        a realistic made-up school for demos (demo --showcase)
   phone.py           stored assignments, student website by course, timing, batching, library browser
   library.py         open-content planner and downloader
   catalog.py         full Kiwix catalog: education rating, card budget, background copy to card
@@ -253,7 +262,7 @@ docs/hardware.md, docs/android-setup.md
 python3 -m unittest discover -s tests -v
 ```
 
-There are 49 tests. They cover:
+There are 50 tests. They cover:
 
 - framing, corruption, and missing-piece reports;
 - lossless compact format;
@@ -261,7 +270,7 @@ There are 49 tests. They cover:
 - grading and validation;
 - the library planner;
 - delivery through 40% simulated loss, with each message delivered exactly once;
-- selective resend staying under 4× the message size at 30% loss;
+- selective resend staying under 4× the message size at 30% loss, and a missing-pieces reply that arrives mid-burst not being lost;
 - catalog parsing, education rating, and age ranges;
 - starter courses and hub edits winning over the file;
 - comprehension scoring for graded and practice work, levels, mistake kinds and timing signals;
