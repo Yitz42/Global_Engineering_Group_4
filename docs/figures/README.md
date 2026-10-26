@@ -1,0 +1,21 @@
+# Report figures
+
+Compact PNGs for the team report, at 2× resolution so they stay sharp when printed.
+Each one reads well at half a page wide or more. The screens come from
+`python -m meshlearn demo --showcase`. Every student name and answer in them is made up.
+
+| File | Suggested caption | Alt text |
+|---|---|---|
+| `fig-system-overview.png` | **Figure 1.** MeshLearn system overview. Lessons and the offline library go to the village phone ahead of time, on the microSD card or over school Wi-Fi. Afterwards the LoRa radio carries only answers and grades. | Diagram. A school box holds the teacher hub laptop and a USB LoRa radio. A dashed LoRa link runs through an optional solar relay to a village box. The village box holds a Wi-Fi LoRa radio and an old Android phone, which serves a student phone, a tablet and a shared laptop over its hotspot. A note lists the radio traffic: opening an assignment is 1 packet, a batch of answers is 1–2 packets, a batch of grades is 1 packet. |
+| `fig-radio-packets.png` | **Figure 2.** Radio packets for one class cycle (a 20-question review, 10 students). Sending the assignment every time takes 35 packets. Keeping copies on both ends and batching takes 4. | Horizontal stacked bar chart. Sending the assignment by radio every time takes 5 packets for the assignment, 20 for answers and 10 for grades: 35 in all. MeshLearn takes 1 open message, 2 packets of answers and 1 of grades: 4 in all. |
+| `fig-hub-home.png` | **Figure 3.** Teacher hub home page: totals, radio status, and each course's class level with timing signals. | Screenshot of the teacher hub home page. Tiles show assignments, submissions received, submissions waiting for grading, and radio messages waiting to send. Course cards for Mathematics, Science and Reading and writing each show a level badge, a progress bar and timing notes such as "much slower than expected". Engineering mechanics is greyed out as coming later. |
+| `fig-comprehension.png` | **Figure 4.** Comprehension view for one course. Each student's level per unit is the average of their 20 most recent scored questions, and timing patterns are flagged for a closer look. | Screenshot of a table. One row per student plus a whole-class row. Columns: course level, four units, and timing. Badges are colour-coded Strong, Good, Developing, Needs work or Not started, each with a percentage. A few students have timing notes such as "much slower than expected (stuck?)". |
+| `fig-grading.png` | **Figure 5.** Grading a submission. Number, choice and short answers are marked automatically. The teacher scores only the written response, and the result goes back to the phone by radio. | Screenshot of one student's rainfall assignment. Three automatically marked answers show points in green or red. A written answer about why rainfall matters to farmers has an empty points box out of 3. A button reads "Save grades and send result to phone". |
+| `fig-card-library.png` | **Figure 6.** Card library. The teacher picks open content for the phone's microSD card. Collections that suit the students' ages and are educational are listed first, and the total must fit the card. | Screenshot of the card library page. Fields set card size (32 GB), space kept free (2 GB) and language (English), with checkboxes for age groups (12–14 and 15–18 ticked). A bar shows 23.22 GB chosen of 27.76 GB available. Below are the chosen collections with sizes and age ranges: PhET simulations, Vikidia, classic novels, Wikibooks, Wikiversity and Wikipedia. |
+| `fig-student-phone.png` | **Figure 7.** The student website served by the village phone: the home page, a course with its units, and an assignment. It runs in any browser on the phone's hotspot, with no internet. | Three phone screens side by side. The first greets the student and lists the assignments they still have to do. The second shows a course page with numbered units and the student's level in each. The third shows an assignment about measuring the school garden, with boxes for number answers. |
+
+## Regenerating
+
+The figures are built from screenshots of a running showcase demo, taken with headless
+Chrome. Keep the same layout if a screen changes, and update the alt text when the
+content does.

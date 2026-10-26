@@ -90,15 +90,30 @@ STUDENTS = [
 ]
 WRONG_WORDS = {"chlorophyll": ["sunlight", "water", "leaf juice"], "precipitation": ["evaporation", "clouds", "weather"],
                "drink me": ["eat me", "open me", "poison"]}
-LONG_ANSWERS = [
-    "Count my steps along each side, then measure one step with a stick I know the length of.",
-    "Farmers need rain for the maize and beans to grow. Too little and the crops dry out, too much and the river floods the fields.",
-    "Without light the plant cannot make sugar, so it has no energy to grow strong and green.",
-    "The rain soaks into the ground and collects deep under the soil, and the well reaches down to it.",
-    "I would feel scared but also curious, because everything is strange and I would want to know where the rabbit is going.",
-    "Dear friend, today I woke early, fetched water from the well, walked to school and helped my mother in the garden.",
-    "I am not sure.",
-]
+LONG_ANSWERS = {  # written question -> made-up answers that fit it
+    "Describe one way fractions are used in your home or community.": [
+        "When we share a loaf of bread between four of us, each person gets one quarter.",
+        "At the market a half kilo of beans costs half the price of a whole kilo."],
+    "How could you measure the garden if you had no tape measure?": [
+        "Count my steps along each side, then measure one step with a stick I know the length of.",
+        "Use a rope with knots one metre apart and count the knots along each side."],
+    "Why does rainfall matter to farmers here?": [
+        "Farmers need rain for the maize and beans to grow. Too little and the crops dry out, too much and the river floods the fields.",
+        "The rain fills the river and the wells. In the dry months farmers must carry water to the fields."],
+    "Why does a plant kept in a dark cupboard grow weak?": [
+        "Without light the plant cannot make sugar, so it has no energy to grow strong and green.",
+        "Plants make their food with sunlight. In the dark it uses up its food and gets pale and thin."],
+    "Where does the water in your village well come from?": [
+        "The rain soaks into the ground and collects deep under the soil, and the well reaches down to it.",
+        "From rain that sinks into the ground and moves slowly through the rocks to the well."],
+    "How would you feel if you were Alice? Explain why.": [
+        "I would feel scared but also curious, because everything is strange and I would want to know where the rabbit is going.",
+        "Confused, because she keeps changing size and nothing makes sense, but excited too."],
+    "Write a letter to a pen friend in another country about a day in your village.": [
+        "Dear friend, today I woke early, fetched water from the well, walked to school and helped my mother in the garden.",
+        "Dear friend, on market day the whole village goes to town. I sold tomatoes with my aunt and we came home by bus."],
+}
+NOT_SURE = "I am not sure."
 
 
 def _answer(q: dict, right: bool, rng: random.Random) -> str:
@@ -121,7 +136,8 @@ def _answer(q: dict, right: bool, rng: random.Random) -> str:
         return f"{round(want + rng.choice([-7, -3, 4, 9]), 2):g}"
     if q["type"] == "text":
         return q["accept"][0] if right else rng.choice(WRONG_WORDS.get(q["accept"][0], ["I don't know"]))
-    return rng.choice(LONG_ANSWERS[:-1]) if right else rng.choice(LONG_ANSWERS)
+    fitting = LONG_ANSWERS.get(q["prompt"], [NOT_SURE])
+    return rng.choice(fitting) if right or rng.random() < 0.6 else NOT_SURE
 
 
 def _expected_s(a: dict) -> float:
@@ -216,7 +232,7 @@ def seed(hub, phone, log: Callable[[str], None] = print, wait_s: float = 60.0) -
         manual = {}
         for q in a["questions"]:
             if q["type"] == "long":
-                quality = 0.25 if given.get(q["id"]) == LONG_ANSWERS[-1] else min(1.0, ability + rng.uniform(-0.15, 0.15))
+                quality = 0.25 if given.get(q["id"]) == NOT_SURE else min(1.0, ability + rng.uniform(-0.15, 0.15))
                 manual[q["id"]] = round(q["points"] * quality * 2) / 2
         hub.grade_submission(sub_id, manual)
         node = hub.db.one("SELECT phone FROM submissions WHERE sub_id = ?", (sub_id,))["phone"]

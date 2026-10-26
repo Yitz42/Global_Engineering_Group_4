@@ -102,7 +102,8 @@ class HubPages:
             count = len(self.assignments_in(c["id"]))
             soon = c.get("comingSoon")
             pace = summary["pace"]
-            flags = "".join(f" <span class='pill warn'>{n} {esc(cmp.PACE_LABELS[k])}</span>" for k, n in pace.items())
+            flags = "".join(f"<div class='warn' style='font-size:15px'>{n}× {esc(cmp.PACE_LABELS[k])}</div>"
+                            for k, n in pace.items())  # lines, not pills: long labels must wrap in narrow cards
             cards += (
                 f"<div class='card'{' style=opacity:.6' if soon else ''}>"
                 f"<h2 style='margin-top:0'><a href='{link}{esc(c['id']) or '_other'}'>{esc(c['title'])}</a></h2>"
@@ -110,7 +111,7 @@ class HubPages:
                 + ("<span class='pill'>Coming later</span>" if soon else
                    f"<p>{len(c['units'])} units · {count} assignment{'' if count == 1 else 's'}</p>"
                    f"{_level_pill(summary['level'], summary['score'])}{_bar(summary['score'])}"
-                   f"<p class='muted'>{summary['answered'] or 'No'} answers scored{flags}</p>")
+                   f"<p class='muted' style='margin-bottom:4px'>{summary['answered'] or 'No'} answers scored</p>{flags}")
                 + "</div>"
             )
         return f"<div class='grid'>{cards}</div>"
