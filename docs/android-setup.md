@@ -1,5 +1,7 @@
 # Setting up the community phone
 
+> **New:** there is now an Android app for the phone ([android/README.md](../android/README.md)) that talks to the radio over Bluetooth, which Python in Termux cannot. The Termux steps below still work for the student site with a Wi-Fi radio.
+
 > **Status:** these steps follow Termux's documented behaviour but have not yet been run end to end on a phone for this project. Note anything that differs and update this page.
 
 The phone does three jobs:

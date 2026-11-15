@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An open book under a radio arc: offline learning over the mesh. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#1F5FBF" android:pathData="M24,0a24,24 0,1 1,0 48a24,24 0,1 1,0 -48z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M10,20c5,-1 10,0 13,2v16c-3,-2 -8,-3 -13,-2z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M38,20c-5,-1 -10,0 -13,2v16c3,-2 8,-3 13,-2z" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="2.5" android:strokeLineCap="round"
+        android:pathData="M16,13c5,-4 11,-4 16,0" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="2.5" android:strokeLineCap="round"
+        android:pathData="M20,16.5c2.5,-1.8 5.5,-1.8 8,0" />
+</vector>
