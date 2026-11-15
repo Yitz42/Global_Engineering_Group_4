@@ -321,6 +321,11 @@ class MainActivity : Activity() {
             .setOnDismissListener { runCatching { scanner.stopScan(callback) } }
             .create()
         dialog.show()
+        if (Build.VERSION.SDK_INT < 31) {
+            // Android 7-11 only report Bluetooth scan results while Location is switched on.
+            Toast.makeText(this, "No radio showing? Turn on Location in the quick settings: this Android version needs it to scan.",
+                Toast.LENGTH_LONG).show()
+        }
         ui.postDelayed({ runCatching { scanner.stopScan(callback) } }, 15_000)
     }
 

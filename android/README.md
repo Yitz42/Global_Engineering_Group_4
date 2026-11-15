@@ -52,6 +52,10 @@ Install `meshtastic` first (as in `requirements-radio.txt`) to include its proto
   assignments from a Python hub, keeps its data on the (emulated) memory card, and the setup screen
   and in-app browser lay out correctly edge to edge.
 
+- Android 7 compatibility, checked statically: every platform call newer than Android 7.0 (API 24)
+  sits behind a version check, and lint checks `core` too (`checkDependencies`). This caught one real
+  crash: `java.util.Base64` (Android 8+) in the shared dictionary, now hex.
+
 ## Not yet tested
 
 - On a real Android phone and with real radios over Bluetooth: the Bluetooth code follows Meshtastic's

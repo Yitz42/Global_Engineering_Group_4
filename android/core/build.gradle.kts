@@ -1,6 +1,7 @@
 plugins {
     id("org.jetbrains.kotlin.jvm")
     `java-library`
+    id("com.android.lint")   // lets the app's lint check this code against the oldest supported Android
 }
 
 java {

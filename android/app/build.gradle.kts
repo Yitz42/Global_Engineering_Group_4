@@ -25,6 +25,11 @@ android {
         }
     }
 
+    lint {
+        // Also check core's code against minSdk: it runs on the phone too.
+        checkDependencies = true
+    }
+
     packaging {
         resources {
             excludes += setOf("META-INF/LICENSE*", "META-INF/NOTICE*")
