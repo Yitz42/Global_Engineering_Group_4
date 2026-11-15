@@ -6,7 +6,7 @@ Each one reads well at half a page wide or more. The screens come from
 
 | File | Suggested caption | Alt text |
 |---|---|---|
-| `fig-system-overview.png` | **Figure 1.** MeshLearn system overview. Lessons and the offline library go to the village phone ahead of time, on the microSD card or over school Wi-Fi. Afterwards the LoRa radio carries only answers and grades. | Diagram. A school box holds the teacher hub laptop and a USB LoRa radio. A dashed LoRa link runs through an optional solar relay to a village box. The village box holds a Wi-Fi LoRa radio and an old Android phone, which serves a student phone, a tablet and a shared laptop over its hotspot. A note lists the radio traffic: opening an assignment is 1 packet, a batch of answers is 1–2 packets, a batch of grades is 1 packet. |
+| `fig-system-overview.png` | **Figure 1.** MeshLearn system overview. Lessons and the offline library go to the village phone ahead of time, on the microSD card or over school Wi-Fi. Afterwards the LoRa radio carries only answers and grades. The phone reaches its radio over Bluetooth and serves students over its Wi-Fi hotspot. | Diagram. A school box holds the teacher hub laptop and a USB LoRa radio. A dashed LoRa link runs through an optional solar relay to a village box. The village box holds a LoRa radio linked to an old Android phone by Bluetooth; the phone serves a student phone, a tablet and a shared laptop over its Wi-Fi hotspot. A note lists the radio traffic: opening an assignment is 1 packet, a batch of answers is 1–2 packets, a batch of grades is 1 packet. |
 | `fig-radio-packets.png` | **Figure 2.** Radio packets for one class cycle (a 20-question review, 10 students). Sending the assignment every time takes 35 packets. Keeping copies on both ends and batching takes 4. | Horizontal stacked bar chart. Sending the assignment by radio every time takes 5 packets for the assignment, 20 for answers and 10 for grades: 35 in all. MeshLearn takes 1 open message, 2 packets of answers and 1 of grades: 4 in all. |
 | `fig-hub-home.png` | **Figure 3.** Teacher hub home page: totals, radio status, and each course's class level with timing signals. | Screenshot of the teacher hub home page. Tiles show assignments, submissions received, submissions waiting for grading, and radio messages waiting to send. Course cards for Mathematics, Science and Reading and writing each show a level badge, a progress bar and timing notes such as "much slower than expected". Engineering mechanics is greyed out as coming later. |
 | `fig-comprehension.png` | **Figure 4.** Comprehension view for one course. Each student's level per unit is the average of their 20 most recent scored questions, and timing patterns are flagged for a closer look. | Screenshot of a table. One row per student plus a whole-class row. Columns: course level, four units, and timing. Badges are colour-coded Strong, Good, Developing, Needs work or Not started, each with a percentage. A few students have timing notes such as "much slower than expected (stuck?)". |
@@ -16,6 +16,7 @@ Each one reads well at half a page wide or more. The screens come from
 
 ## Regenerating
 
-The figures are built from screenshots of a running showcase demo, taken with headless
-Chrome. Keep the same layout if a screen changes, and update the alt text when the
-content does.
+Figures 3–7 are screenshots of a running showcase demo, taken with headless Chrome.
+Figure 1 is drawn by `make_system_figure.py` (`python3 docs/figures/make_system_figure.py docs/figures`,
+needs Google Chrome). Keep the same layout if a screen changes, and update the alt text when
+the content does.
