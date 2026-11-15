@@ -1,0 +1,534 @@
+{
+ "messages": [
+  {
+   "type": "h",
+   "payload": {
+    "n": "North village",
+    "f": 1234,
+    "l": 3,
+    "sw": "0.1.0",
+    "inv": {
+     "a1b2c3": "deadbeef"
+    }
+   },
+   "msg_id": 268435456,
+   "frames": [
+    "pyEQAAAAAAF4+Xk+E8qLVsoASecBmX7A5J2hUJaZkwNM4UDpNKBZRsYm4EgAhm9xOVCNgZ6hngEolPLKQAYmGiYZJYO8mgJMUkmpqWlKQLcBALwEFz0="
+   ]
+  },
+  {
+   "type": "o",
+   "payload": {
+    "a": "a1b2c3",
+    "v": "0badf00d",
+    "o": 1,
+    "d": "2026-11-20"
+   },
+   "msg_id": 268435457,
+   "frames": [
+    "pyEQAAABAAF4+Xk+E8pDNsYwySjZGCptkJSYkmZgkIJppqGhrpEB0GAApd0N2A=="
+   ]
+  },
+  {
+   "type": "k",
+   "payload": {
+    "id": 305419896
+   },
+   "msg_id": 268435458,
+   "frames": [
+    "pyEQAAACAAF4+Xk+E8qLVsoGSYNcYGxgamJoaWFpVhsLAEE4BbQ="
+   ]
+  },
+  {
+   "type": "x",
+   "payload": {
+    "id": 305419896,
+    "m": [
+     0,
+     2
+    ]
+   },
+   "msg_id": 268435459,
+   "frames": [
+    "pyEQAAADAAF4+Xk+E8qLBrpfB+ICYwNTE0NLC0szoAOAzjLQMQJaAwCEZAge"
+   ]
+  },
+  {
+   "type": "r",
+   "payload": {
+    "r": [
+     {
+      "id": "s01",
+      "sc": 2.5,
+      "mx": 4.0,
+      "ok": 1,
+      "q": {
+       "q1": 1.0,
+       "q2": null
+      }
+     }
+    ]
+   },
+   "msg_id": 268435460,
+   "frames": [
+    "pyEQAAAEAAF4+Xk+E8rD4g4DQ6hLjPRMIW4x0cPmGpAgyD15pTk5YCcBAOuMFEs="
+   ]
+  },
+  {
+   "type": "s",
+   "payload": {
+    "s": [
+     {
+      "id": "s1a2b3c4",
+      "a": "a1b2c3",
+      "v": "0badf00d",
+      "u": "Lena Müller",
+      "x": {
+       "q1": "2",
+       "q2": "3,5"
+      },
+      "t": 1763200000,
+      "d": 95
+     }
+    ]
+   },
+   "msg_id": 268435461,
+   "frames": [
+    "pyEQAAAFAAF4+Xk+E8rD4lPDRKMk42QTmIcNk4ySjaGaDJISU9IMDFKgvvdJzUtU8D28JycntQglJIxgQWGsYwrztbmZsZEBCIDdZ2kK8gQAVp0g9w=="
+   ]
+  },
+  {
+   "type": "a",
+   "payload": {
+    "a": {
+     "i": "a1b2c3",
+     "T": "Fractions and plants check-in",
+     "S": "Math and Science",
+     "I": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
+     "D": "2026-11-06",
+     "v": "0aea2444",
+     "C": "math",
+     "U": "fractions",
+     "Q": [
+      {
+       "t": 0,
+       "p": "Which fraction is the same as 1/2?",
+       "o": [
+        "2/3",
+        "3/6",
+        "1/4",
+        "2/5"
+       ]
+      },
+      {
+       "t": 1,
+       "p": "What is 1/4 + 1/2? Give your answer as a decimal or a fraction."
+      },
+      {
+       "t": 2,
+       "p": "What is the green substance in leaves that captures light?"
+      },
+      {
+       "t": 0,
+       "p": "Which gas do plants release during photosynthesis?",
+       "o": [
+        "Carbon dioxide",
+        "Oxygen",
+        "Nitrogen"
+       ]
+      },
+      {
+       "t": 3,
+       "p": "Describe one way fractions are used in your home or community.",
+       "s": 3,
+       "m": 500
+      }
+     ]
+    },
+    "o": 1,
+    "d": ""
+   },
+   "msg_id": 268435462,
+   "frames": [
+    "pyAQAAAGAAJ4+Xk+E8qVVbtygzAQ/BXGDUViXsYp3Lggky5JkckHHEIDGgfEIMiYv8+eLGkcx006aU66x2p39Sec14XYueCLo6WB4hpPbkhFnLZqcKC+0tzZ8IdQchDSgWw5FocEB8uwmowSJrbHY6a4S9nTSVplxP/h4iOfHKIRgjZRxV3ZxGapezUn16+c59vsyc2dkaSiLEtsK2x7tI/lJ5ZehPwQ9ykcZOoEaaiHGZkoT4ujp3eRMnq7lOvlKZcp0n3g6Q3PcSB6sNcvurKyde6GvBT8AG5G",
+    "pyEQAAAGAQKhfLK5IwnXUjuxlwID+AJeg/H8kvQtOYpTgsZ5AWAX+zn6RL+mbFG50f5tJon7cJtmmdTQRmOnZ23WgS1ImTB1RVPN9qX0WTXMgffz2krmyJuaJ83LG6k+e1O3vkRrmA5jw3nxMzTcvEWk08AZEISvIXECh1Q2h32WQRDX3AftfwCIj+P8"
+   ]
+  }
+ ],
+ "assignments": [
+  {
+   "assignment": {
+    "id": "a1b2c3",
+    "title": "Fractions and plants check-in",
+    "subject": "Math and Science",
+    "course": "math",
+    "unit": "fractions",
+    "instructions": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
+    "due": "2026-11-06",
+    "mode": "graded",
+    "questions": [
+     {
+      "id": "q1",
+      "type": "choice",
+      "prompt": "Which fraction is the same as 1/2?",
+      "points": 1.0,
+      "options": [
+       "2/3",
+       "3/6",
+       "1/4",
+       "2/5"
+      ],
+      "answer": 1
+     },
+     {
+      "id": "q2",
+      "type": "number",
+      "prompt": "What is 1/4 + 1/2? Give your answer as a decimal or a fraction.",
+      "points": 1.0,
+      "answer": 0.75,
+      "tolerance": 0.001
+     },
+     {
+      "id": "q3",
+      "type": "text",
+      "prompt": "What is the green substance in leaves that captures light?",
+      "points": 1.0,
+      "accept": [
+       "chlorophyll",
+       "clorofila",
+       "Chlorophyll"
+      ]
+     },
+     {
+      "id": "q4",
+      "type": "choice",
+      "prompt": "Which gas do plants release during photosynthesis?",
+      "points": 1.0,
+      "options": [
+       "Carbon dioxide",
+       "Oxygen",
+       "Nitrogen"
+      ],
+      "answer": 1
+     },
+     {
+      "id": "q5",
+      "type": "long",
+      "prompt": "Describe one way fractions are used in your home or community.",
+      "points": 3.0,
+      "max_chars": 500
+     }
+    ]
+   },
+   "packed": {
+    "i": "a1b2c3",
+    "T": "Fractions and plants check-in",
+    "S": "Math and Science",
+    "I": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
+    "D": "2026-11-06",
+    "C": "math",
+    "U": "fractions",
+    "Q": [
+     {
+      "t": 0,
+      "p": "Which fraction is the same as 1/2?",
+      "o": [
+       "2/3",
+       "3/6",
+       "1/4",
+       "2/5"
+      ],
+      "a": 1
+     },
+     {
+      "t": 1,
+      "p": "What is 1/4 + 1/2? Give your answer as a decimal or a fraction.",
+      "a": 0.75,
+      "l": 0.001
+     },
+     {
+      "t": 2,
+      "p": "What is the green substance in leaves that captures light?",
+      "c": [
+       "chlorophyll",
+       "clorofila",
+       "Chlorophyll"
+      ]
+     },
+     {
+      "t": 0,
+      "p": "Which gas do plants release during photosynthesis?",
+      "o": [
+       "Carbon dioxide",
+       "Oxygen",
+       "Nitrogen"
+      ],
+      "a": 1
+     },
+     {
+      "t": 3,
+      "p": "Describe one way fractions are used in your home or community.",
+      "s": 3,
+      "m": 500
+     }
+    ]
+   },
+   "version": "0aea2444"
+  },
+  {
+   "assignment": {
+    "id": "a1b2c3",
+    "title": "Fractions and plants check-in",
+    "subject": "Math and Science",
+    "course": "math",
+    "unit": "fractions",
+    "instructions": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
+    "due": "2026-11-06",
+    "mode": "graded",
+    "questions": [
+     {
+      "id": "q1",
+      "type": "choice",
+      "prompt": "Which fraction is the same as 1/2?",
+      "points": 1.0,
+      "options": [
+       "2/3",
+       "3/6",
+       "1/4",
+       "2/5"
+      ]
+     },
+     {
+      "id": "q2",
+      "type": "number",
+      "prompt": "What is 1/4 + 1/2? Give your answer as a decimal or a fraction.",
+      "points": 1.0
+     },
+     {
+      "id": "q3",
+      "type": "text",
+      "prompt": "What is the green substance in leaves that captures light?",
+      "points": 1.0
+     },
+     {
+      "id": "q4",
+      "type": "choice",
+      "prompt": "Which gas do plants release during photosynthesis?",
+      "points": 1.0,
+      "options": [
+       "Carbon dioxide",
+       "Oxygen",
+       "Nitrogen"
+      ]
+     },
+     {
+      "id": "q5",
+      "type": "long",
+      "prompt": "Describe one way fractions are used in your home or community.",
+      "points": 3.0,
+      "max_chars": 500
+     }
+    ]
+   },
+   "packed": {
+    "i": "a1b2c3",
+    "T": "Fractions and plants check-in",
+    "S": "Math and Science",
+    "I": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
+    "D": "2026-11-06",
+    "C": "math",
+    "U": "fractions",
+    "Q": [
+     {
+      "t": 0,
+      "p": "Which fraction is the same as 1/2?",
+      "o": [
+       "2/3",
+       "3/6",
+       "1/4",
+       "2/5"
+      ]
+     },
+     {
+      "t": 1,
+      "p": "What is 1/4 + 1/2? Give your answer as a decimal or a fraction."
+     },
+     {
+      "t": 2,
+      "p": "What is the green substance in leaves that captures light?"
+     },
+     {
+      "t": 0,
+      "p": "Which gas do plants release during photosynthesis?",
+      "o": [
+       "Carbon dioxide",
+       "Oxygen",
+       "Nitrogen"
+      ]
+     },
+     {
+      "t": 3,
+      "p": "Describe one way fractions are used in your home or community.",
+      "s": 3,
+      "m": 500
+     }
+    ]
+   },
+   "version": "0aea2444"
+  },
+  {
+   "assignment": {
+    "id": "a1b2c3",
+    "title": "Fractions and plants check-in",
+    "subject": "Math and Science",
+    "course": "math",
+    "unit": "fractions",
+    "instructions": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
+    "due": "2026-11-06",
+    "mode": "practice",
+    "questions": [
+     {
+      "id": "q1",
+      "type": "choice",
+      "prompt": "Which fraction is the same as 1/2?",
+      "points": 1.0,
+      "options": [
+       "2/3",
+       "3/6",
+       "1/4",
+       "2/5"
+      ],
+      "answer": 1
+     },
+     {
+      "id": "q2",
+      "type": "number",
+      "prompt": "What is 1/4 + 1/2? Give your answer as a decimal or a fraction.",
+      "points": 1.0,
+      "answer": 0.75,
+      "tolerance": 0.001
+     },
+     {
+      "id": "q3",
+      "type": "text",
+      "prompt": "What is the green substance in leaves that captures light?",
+      "points": 1.0,
+      "accept": [
+       "chlorophyll",
+       "clorofila",
+       "Chlorophyll"
+      ]
+     },
+     {
+      "id": "q4",
+      "type": "choice",
+      "prompt": "Which gas do plants release during photosynthesis?",
+      "points": 1.0,
+      "options": [
+       "Carbon dioxide",
+       "Oxygen",
+       "Nitrogen"
+      ],
+      "answer": 1
+     },
+     {
+      "id": "q5",
+      "type": "long",
+      "prompt": "Describe one way fractions are used in your home or community.",
+      "points": 3.0,
+      "max_chars": 500
+     }
+    ]
+   },
+   "packed": {
+    "i": "a1b2c3",
+    "T": "Fractions and plants check-in",
+    "S": "Math and Science",
+    "I": "Read 'Fractions: the basics' and 'How plants make food' in the Library first. Answer every question, then press Check and submit.",
+    "D": "2026-11-06",
+    "M": "p",
+    "C": "math",
+    "U": "fractions",
+    "Q": [
+     {
+      "t": 0,
+      "p": "Which fraction is the same as 1/2?",
+      "o": [
+       "2/3",
+       "3/6",
+       "1/4",
+       "2/5"
+      ],
+      "a": 1
+     },
+     {
+      "t": 1,
+      "p": "What is 1/4 + 1/2? Give your answer as a decimal or a fraction.",
+      "a": 0.75,
+      "l": 0.001
+     },
+     {
+      "t": 2,
+      "p": "What is the green substance in leaves that captures light?",
+      "c": [
+       "chlorophyll",
+       "clorofila",
+       "Chlorophyll"
+      ]
+     },
+     {
+      "t": 0,
+      "p": "Which gas do plants release during photosynthesis?",
+      "o": [
+       "Carbon dioxide",
+       "Oxygen",
+       "Nitrogen"
+      ],
+      "a": 1
+     },
+     {
+      "t": 3,
+      "p": "Describe one way fractions are used in your home or community.",
+      "s": 3,
+      "m": 500
+     }
+    ]
+   },
+   "version": "9e4b990a"
+  }
+ ],
+ "parse_number": {
+  "3.5": 3.5,
+  "3,5": 3.5,
+  "1/2": 0.5,
+  " 12 ": 12.0,
+  "-4": -4.0,
+  "1e3": 1000.0,
+  ".5": 0.5,
+  "abc": null,
+  "1/0": null,
+  "2/": null,
+  "": null,
+  "+7,25": 7.25
+ },
+ "float_repr": {
+  "1.0": 1.0,
+  "0.5": 0.5,
+  "0.1": 0.1,
+  "2.25": 2.25,
+  "1e-05": 1e-05,
+  "123456789.0": 123456789.0,
+  "1e+16": 1e+16,
+  "1.5e+16": 1.5e+16,
+  "-0.75": -0.75,
+  "0.0003": 0.0003
+ },
+ "zdict_len": 903,
+ "meshtastic": {
+  "payload": "pyEAAAAHAAF4+Xk+E8qLVsoGSYNcAHQXAB0KBAg=",
+  "to_radio": "CjQV1MOyoRgDIiIIgAISHachAAAABwABePl5PhPKi1bKBkmDXAB0FwAdCgQINQQDAgFIAlAB",
+  "from_radio": "EjUNRDMiERXUw7KhGAMiIgiAAhIdpyEAAAAHAAF4+Xk+E8qLVsoGSYNcAHQXAB0KBAhFAADIQA==",
+  "my_info": "GgYI1IfLjQo=",
+  "want_config": "GCo="
+ }
+}

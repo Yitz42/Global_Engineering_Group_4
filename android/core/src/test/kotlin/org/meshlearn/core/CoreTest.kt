@@ -1,0 +1,218 @@
+package org.meshlearn.core
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+import java.nio.file.Files
+import java.util.Base64
+import java.util.Random
+import java.util.concurrent.ConcurrentHashMap
+
+/** The Kotlin phone must read and write exactly what the Python code does (vectors from gen_kotlin_shared.py). */
+class CoreTest {
+    private val vectors: Map<String, Any?> =
+        Json.parse(javaClass.getResource("/vectors.json")!!.readText()).asMap()!!
+
+    private fun canon(v: Any?) = Json.dumps(v, sortKeys = true)
+
+    @Test fun zdictMatchesPython() {
+        assertEquals((vectors["zdict_len"] as Number).toInt(), Zdict.BYTES.size)
+    }
+
+    @Test fun readsPythonFrames() {
+        for (m in vectors["messages"].asList()!!.map { it.asMap()!! }) {
+            val asm = Assembler()
+            var got: Message? = null
+            for (f in m["frames"].asList()!!) got = asm.add(Base64.getDecoder().decode(f as String), "hub").message ?: got
+            assertNotNull("message ${m["type"]} did not assemble", got)
+            assertEquals(m["type"], got!!.type)
+            assertEquals((m["msg_id"] as Number).toLong(), got.msgId)
+            assertEquals(canon(m["payload"]), canon(got.payload))
+        }
+    }
+
+    @Test fun roundTripsOwnFramesAndKeepsHeaderLayout() {
+        for (m in vectors["messages"].asList()!!.map { it.asMap()!! }) {
+            val payload = m["payload"].asMap()!!
+            val id = (m["msg_id"] as Number).toLong()
+            val (_, frames) = Protocol.encode(m["type"] as String, payload, id)
+            val python = m["frames"].asList()!!.map { Base64.getDecoder().decode(it as String) }
+            // Header: magic, version|END on the last frame only, id, seq, total.
+            frames.forEachIndexed { seq, f ->
+                assertEquals(0xA7, f[0].toInt() and 0xFF)
+                assertEquals((2 shl 4) or (if (seq == frames.size - 1) 1 else 0), f[1].toInt() and 0xFF)
+                assertEquals(seq, f[6].toInt() and 0xFF)
+                assertEquals(frames.size, f[7].toInt() and 0xFF)
+                assertTrue(f.size <= Protocol.MAX_FRAME_BYTES)
+            }
+            assertEquals(python[0].copyOfRange(0, 6).toList(), frames[0].copyOfRange(0, 6).toList())
+            val asm = Assembler()
+            var got: Message? = null
+            for (f in frames) got = asm.add(f, "phone").message ?: got
+            assertEquals(canon(payload), canon(got!!.payload))
+        }
+    }
+
+    @Test fun nackListsMissingPieces() {
+        val big = vectors["messages"].asList()!!.map { it.asMap()!! }.first { it["type"] == "a" }
+        val frames = big["frames"].asList()!!.map { Base64.getDecoder().decode(it as String) }
+        assertTrue("sample assignment should need several frames", frames.size >= 2)
+        val asm = Assembler()
+        val result = asm.add(frames.last(), "hub")
+        assertEquals((0 until frames.size - 1).toList(), result.missing)
+    }
+
+    @Test fun assignmentsMatchPython() {
+        for (v in vectors["assignments"].asList()!!.map { it.asMap()!! }) {
+            val a = v["assignment"].asMap()!!
+            assertEquals(canon(v["packed"]), canon(Assignments.pack(a)))
+            assertEquals(v["version"], Assignments.versionOf(a))
+            val unpacked = Assignments.unpack(Assignments.pack(a))
+            assertEquals(v["version"], Assignments.versionOf(unpacked))
+        }
+    }
+
+    @Test fun parsesNumbersLikePython() {
+        for ((text, want) in vectors["parse_number"].asMap()!!) {
+            assertEquals("parse_number($text)", (want as? Number)?.toDouble(), Assignments.parseNumber(text))
+        }
+    }
+
+    @Test fun formatsFloatsLikePython() {
+        for ((repr, value) in vectors["float_repr"].asMap()!!) assertEquals(repr, Json.pyFloatRepr((value as Number).toDouble()))
+        assertEquals("3", Html.g(3.0)); assertEquals("2.5", Html.g(2.5)); assertEquals("0.333333", Html.g(1.0 / 3))
+    }
+
+    @Test fun validatesAndGradesPractice() {
+        val a = vectors["assignments"].asList()!!.map { it.asMap()!! }[2]["assignment"].asMap()!!
+        val (answers, errors) = Assignments.validateAnswers(a, mapOf("q1" to "1", "q2" to "3/4", "q3" to "  Chlorophyll. ", "q4" to "9", "q5" to ""))
+        assertEquals(setOf("q4", "q5"), errors.keys)
+        assertEquals("3/4", answers["q2"])
+        val fb = Assignments.practiceFeedback(a, mapOf("q1" to "1", "q2" to "0,75", "q3" to "chlorophyll", "q4" to "0", "q5" to "x"))
+        assertEquals(mapOf("q1" to true, "q2" to true, "q3" to true, "q4" to false, "q5" to null), fb)
+    }
+
+    // -- messenger and phone over a lossy in-memory link ---------------------------------------
+
+    private class Link(val dropRate: Double, seed: Long) {
+        val handlers = ConcurrentHashMap<String, FrameHandler>()
+        val rng = Random(seed)
+        fun node(id: String) = object : Transport {
+            override val nodeId = id
+            override fun start(onFrame: FrameHandler) { handlers[id] = onFrame }
+            override fun send(frame: ByteArray, dest: String) {
+                if (synchronized(rng) { rng.nextDouble() } < dropRate) return
+                val h = handlers[dest] ?: return
+                Thread { h(frame, id) }.start()
+            }
+        }
+    }
+
+    private fun tmp(): File = Files.createTempDirectory("meshlearn-test").toFile()
+    private fun db(dir: File, name: String, schema: String = "") = JdbcDb(File(dir, name).path, schema)
+
+    private fun waitFor(timeoutMs: Long = 20_000, cond: () -> Boolean) {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (!cond()) {
+            if (System.currentTimeMillis() > end) throw AssertionError("timed out")
+            Thread.sleep(50)
+        }
+    }
+
+    @Test fun messengerDeliversOverLossyLink() {
+        val link = Link(0.3, 7)
+        val dir = tmp()
+        val received = ArrayList<Message>()
+        val a = Messenger(link.node("hub"), db(dir, "a.db"), {}, retryS = 0.2, maxRetryS = 1.0)
+        val b = Messenger(link.node("phone-1"), db(dir, "b.db"), { synchronized(received) { received.add(it) } }, retryS = 0.2, maxRetryS = 1.0)
+        a.start(); b.start()
+        val big = vectors["messages"].asList()!!.map { it.asMap()!! }.first { it["type"] == "a" }["payload"].asMap()!!
+        val id = a.send("phone-1", Protocol.ASSIGN, big)
+        waitFor { a.messageStatus(id) == "acked" && synchronized(received) { received.isNotEmpty() } }
+        assertEquals(1, received.size)
+        assertEquals(canon(big), canon(received[0].payload))
+        a.stop(); b.stop()
+    }
+
+    @Test fun phoneFlowMatchesHubExpectations() {
+        val link = Link(0.0, 1)
+        val dir = tmp()
+        val hubGot = ArrayList<Message>()
+        val hub = Messenger(link.node("hub"), db(dir, "hub.db"), { synchronized(hubGot) { hubGot.add(it) } }, retryS = 0.5)
+        val phone = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        hub.start(); phone.start()
+
+        // A graded assignment arrives by radio, then the teacher opens it with one OPEN packet.
+        val v = vectors["assignments"].asList()!!.map { it.asMap()!! }[1]
+        val packed = LinkedHashMap(v["packed"].asMap()!!).apply { put("v", v["version"]) }
+        hub.send("phone-1", Protocol.ASSIGN, mapOf("a" to packed, "o" to 0, "d" to ""))
+        waitFor { phone.getAssignment("a1b2c3") != null }
+        assertEquals(false, phone.getAssignment("a1b2c3")!!["open"])
+        hub.send("phone-1", Protocol.OPEN, mapOf("a" to "a1b2c3", "v" to v["version"], "o" to 1, "d" to "2026-12-01"))
+        waitFor { phone.getAssignment("a1b2c3")!!["open"] == true }
+
+        // A student logs in and turns it in through the web pages.
+        fun req(method: String, path: String, body: String = "", cookie: String = "") = Request(method, path, emptyMap(),
+            mapOf("cookie" to cookie), body.toByteArray(), "192.168.43.10")
+        val login = phone.app.dispatch(req("POST", "/login", "student=Lena%20M%C3%BCller"))
+        assertEquals(303, login.status)
+        val cookie = login.headers["Set-Cookie"]!!.substringBefore(";")
+        assertTrue(String(phone.app.dispatch(req("GET", "/", cookie = cookie)).body).contains("Fractions and plants"))
+        val form = phone.app.dispatch(req("GET", "/a/a1b2c3", cookie = cookie))
+        assertEquals(200, form.status)
+        val bad = phone.app.dispatch(req("POST", "/a/a1b2c3", "q1=1", cookie))
+        assertEquals(400, bad.status)
+        val ok = phone.app.dispatch(req("POST", "/a/a1b2c3", "q1=1&q2=3%2C5&q3=chlorophyll&q4=1&q5=We+share+pizza", cookie))
+        assertEquals(200, ok.status)
+
+        waitFor { synchronized(hubGot) { hubGot.any { it.type == Protocol.SUBMIT } } }
+        val sub = hubGot.first { it.type == Protocol.SUBMIT }.payload["s"].asList()!![0].asMap()!!
+        assertEquals("a1b2c3", sub["a"]); assertEquals(v["version"], sub["v"]); assertEquals("Lena Müller", sub["u"])
+        assertEquals("3,5", sub["x"].asMap()!!["q2"])
+        assertTrue(sub["d"] is Long)
+
+        // The hub's grades come back and show on the results page.
+        hub.send("phone-1", Protocol.RESULT, mapOf("r" to listOf(mapOf("id" to sub["id"], "sc" to 4.0, "mx" to 7.0, "ok" to 0,
+            "q" to mapOf("q1" to 1.0, "q2" to 0.0, "q3" to 1.0, "q4" to 1.0, "q5" to null)))))
+        waitFor { String(phone.app.dispatch(req("GET", "/results", cookie = cookie)).body).contains("4 / 7 so far") }
+
+        // Library: the starter pages are installed and served; paths can't escape the folder.
+        val lib = String(phone.app.dispatch(req("GET", "/library")).body)
+        assertTrue(lib.contains("Fractions"))
+        assertEquals(200, phone.app.dispatch(req("GET", "/library/files/starter/fractions.html")).status)
+        assertEquals(404, phone.app.dispatch(req("GET", "/library/files/../phone.db")).status)
+        // Admin actions need the phone itself or the PIN.
+        assertTrue(String(phone.app.dispatch(req("POST", "/status/reload")).body).contains("Only the teacher"))
+        phone.stop(); hub.stop()
+    }
+
+    @Test fun meshtasticPacketsRoundTrip() {
+        val frame = byteArrayOf(1, 2, 3, -1)
+        val toRadio = MeshtasticProto.toRadioPacket(frame, "!a1b2c3d4", channel = 3, hopLimit = 2, packetId = 0x01020304)
+        // A FromRadio carrying the same MeshPacket (field 2 instead of 1) must parse back.
+        val fromRadio = toRadio.copyOf().also { it[0] = 0x12 }
+        val parsed = MeshtasticProto.parseFromRadio(fromRadio) as MeshtasticProto.FromRadio.Packet
+        assertEquals(0xa1b2c3d4L, parsed.to)
+        assertEquals(3, parsed.channel)
+        assertEquals(256, parsed.portnum)
+        assertEquals(frame.toList(), parsed.payload.toList())
+        assertEquals("!a1b2c3d4", MeshtasticProto.nodeIdOf(0xa1b2c3d4L))
+        val pyVectors = vectors["meshtastic"].asMap()
+        if (pyVectors != null) {   // present when generated with the meshtastic package installed
+            val dec = Base64.getDecoder()
+            assertEquals(pyVectors["to_radio"], Base64.getEncoder().encodeToString(
+                MeshtasticProto.toRadioPacket(dec.decode(pyVectors["payload"] as String), "!a1b2c3d4", 3, 2, true, 0x01020304)))
+            val info = MeshtasticProto.parseFromRadio(dec.decode(pyVectors["my_info"] as String)) as MeshtasticProto.FromRadio.MyInfo
+            assertEquals(0xa1b2c3d4L, info.nodeNum)
+            val pkt = MeshtasticProto.parseFromRadio(dec.decode(pyVectors["from_radio"] as String)) as MeshtasticProto.FromRadio.Packet
+            assertEquals(0x11223344L, pkt.from)
+            assertEquals(pyVectors["payload"], Base64.getEncoder().encodeToString(pkt.payload))
+            assertEquals(MeshtasticProto.wantConfig(42).toList(), dec.decode(pyVectors["want_config"] as String).toList())
+        }
+        assertNull(null)
+    }
+}
