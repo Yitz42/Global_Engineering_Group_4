@@ -23,6 +23,7 @@ SAMPLE_ASSIGNMENT = os.path.join(os.path.dirname(__file__), "sample_assignment.j
 
 def _add_radio_args(p: argparse.ArgumentParser, default_node: str, default_port: int) -> None:
     g = p.add_argument_group("radio link (pick one)")
+    g.add_argument("--radio-ble", metavar="NAME", help="real Meshtastic radio over Bluetooth: its name (e.g. Meshtastic_a8a2) or address")
     g.add_argument("--radio-serial", metavar="DEVICE", help="real Meshtastic radio on USB, e.g. /dev/ttyUSB0 or COM3")
     g.add_argument("--radio-host", metavar="IP", help="real Meshtastic radio over Wi-Fi (TCP), e.g. 192.168.43.20")
     g.add_argument("--radio-channel", type=int, default=0, metavar="INDEX",
@@ -36,8 +37,8 @@ def _add_radio_args(p: argparse.ArgumentParser, default_node: str, default_port:
 
 
 def _transport(args):
-    if args.radio_serial or args.radio_host:
-        return MeshtasticTransport(device=args.radio_serial, host=args.radio_host,
+    if args.radio_ble or args.radio_serial or args.radio_host:
+        return MeshtasticTransport(device=args.radio_serial, host=args.radio_host, ble=args.radio_ble,
                                    channel=args.radio_channel, hop_limit=args.radio_hops), 30.0
     return UdpSimTransport(args.sim_node, args.sim_port, parse_peers(args.sim_peer), drop_rate=args.sim_loss), 3.0
 

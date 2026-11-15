@@ -4,7 +4,7 @@
   optional packet loss and delay, so the whole system can be demoed without
   hardware.
 * MeshtasticTransport: real LoRa radios running Meshtastic firmware, reached
-  over USB serial or Wi-Fi (TCP). Requires `pip install meshtastic`.
+  over Bluetooth, USB serial or Wi-Fi (TCP). Requires `pip install meshtastic`.
 """
 
 from __future__ import annotations
@@ -136,8 +136,9 @@ class UdpSimTransport(Transport):
 class MeshtasticTransport(Transport):
     """Real LoRa radios running Meshtastic firmware.
 
-    Connect with `device="/dev/ttyUSB0"` (USB serial) or `host="192.168.43.20"`
-    (a Wi-Fi-enabled node, e.g. one joined to the phone's hotspot). Frames go
+    Connect with `ble="Meshtastic_a8a2"` (Bluetooth name or address: how the
+    student phone reaches its radio), `device="/dev/ttyUSB0"` (USB serial: how
+    the hub laptop does) or `host="192.168.43.20"` (a Wi-Fi node). Frames go
     on Meshtastic's PRIVATE_APP port, so normal chat traffic is untouched.
     Node ids are Meshtastic ids such as "!a1b2c3d4".
 
@@ -151,7 +152,7 @@ class MeshtasticTransport(Transport):
     """
 
     def __init__(self, device: Optional[str] = None, host: Optional[str] = None, min_interval_s: float = 3.0,
-                 channel: int = 0, hop_limit: Optional[int] = None):
+                 channel: int = 0, hop_limit: Optional[int] = None, ble: Optional[str] = None):
         try:
             from pubsub import pub  # installed with meshtastic
             try:
@@ -167,7 +168,9 @@ class MeshtasticTransport(Transport):
         self._pacer = _Pacer(min_interval_s)
         self.channel = channel
         self.hop_limit = hop_limit
-        if host:
+        if ble:
+            self._iface = _ble_interface()(ble)
+        elif host:
             from meshtastic.tcp_interface import TCPInterface
             self._iface = TCPInterface(hostname=host)
         else:
@@ -204,4 +207,28 @@ class MeshtasticTransport(Transport):
             self._pub.unsubscribe(self._receive, "meshtastic.receive")
         except Exception:
             pass
-        self._iface.close()
+        # Disconnecting over Bluetooth can hang forever, so don't wait more than a few seconds.
+        closer = threading.Thread(target=self._iface.close, name="radio-close", daemon=True)
+        closer.start()
+        closer.join(timeout=5)
+
+
+def _ble_interface():
+    """Meshtastic's BLEInterface, with one write to the radio at a time.
+
+    The library writes from several threads (its reader sends a heartbeat when
+    it connects, a timer sends more). On macOS, Bluetooth tracks one pending
+    write per characteristic, so when two overlap one never completes. If that
+    one belonged to the reader thread, nothing is ever received again, though
+    the radio keeps saying it has data. Found on the bench with meshtastic 2.7.
+    """
+    from meshtastic.ble_interface import BLEInterface
+
+    class SerializedBLEInterface(BLEInterface):
+        _write_lock = threading.Lock()
+
+        def _sendToRadioImpl(self, toRadio):
+            with self._write_lock:
+                super()._sendToRadioImpl(toRadio)
+
+    return SerializedBLEInterface

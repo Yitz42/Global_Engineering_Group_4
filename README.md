@@ -20,7 +20,7 @@ flowchart LR
   R1 <-. "LoRa mesh, several km<br/>(relays extend range)" .-> RL((Solar relay<br/>optional))
   RL <-. LoRa .-> R2
   subgraph Home["Community or household"]
-    R2((LoRa node<br/>Wi-Fi))
+    R2((LoRa node<br/>Bluetooth))
     P[Old Android phone<br/>microSD: library + assignments<br/>runs hotspot + MeshLearn site]
     S1[Student phone]
     S2[Student tablet]
@@ -77,9 +77,9 @@ The five students on the demo phone (Lena, Ana, Bruno, Kofi, Mateus) send their 
    ```
    Open http://localhost:8000. On the **Phones** page, add each community phone by its radio node id (for example `!a1b2c3d4`). Phones also register themselves the first time they check in.
    Add `--host 0.0.0.0` if phones will copy assignments from this laptop over school Wi-Fi.
-4. **Student phone:** follow [docs/android-setup.md](docs/android-setup.md) to install Termux, put the data on the microSD card, connect the phone to its radio over Wi-Fi, and start:
+4. **Student phone:** follow [docs/android-setup.md](docs/android-setup.md) to install Termux, put the data on the microSD card, pair the phone with its radio over Bluetooth, and start:
    ```bash
-   python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-host 192.168.43.20 --radio-channel 3
+   python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-ble Meshtastic_e023 --radio-channel 3
    ```
 5. **Load the assignments** while the phone is at school. Either way puts a copy of every assignment on the phone with no radio traffic:
    - **School Wi-Fi:** open `http://localhost:8080/status` in the phone's browser and enter the hub's address.
@@ -238,7 +238,7 @@ Moving a due date or hiding an assignment is always 1 packet.
 ```
 meshlearn/
   protocol.py        message format: dictionary compression, framing, missing-piece reports
-  transport.py       simulated radio (UDP) and real Meshtastic radios (USB or Wi-Fi)
+  transport.py       simulated radio (UDP) and real Meshtastic radios (Bluetooth, USB or Wi-Fi)
   messenger.py       store-and-forward delivery: acks, selective resend, de-duplication
   radiotest.py       bench test for two real radios on one computer (radio-test)
   assignments.py     question types, compact format, version stamps, answer checking, grading
@@ -296,12 +296,12 @@ End-to-end tests run through both websites:
 Tested:
 
 - Everything above, on Python 3.9 on macOS, using the simulated radio.
-- **Real Meshtastic radios on a desk.** A RAK4631 and a Wio Tracker L1, 1 m apart, ran the hub and phone through a full cycle with no resends. See the [bench test](docs/hardware.md#7-bench-test-with-two-radios).
+- **Real Meshtastic radios on a desk.** A RAK4631 and a Wio Tracker L1, 1 m apart, ran the hub and phone through a full cycle with no resends, with the phone's radio on USB and then on Bluetooth (from a Mac). See the [bench test](docs/hardware.md#7-bench-test-with-two-radios).
 - The library fetcher's live lookups against the Kiwix catalog and Project Gutenberg, and a real download.
 
 Not yet tested:
 
-- **Radios over Wi-Fi.** The phone talks to its radio over Wi-Fi (`--radio-host`); the bench test used USB only.
+- **Bluetooth from the Android phone.** Bluetooth worked from a Mac. Python running in Termux probably can't reach Bluetooth at all, because the library MeshLearn uses (bleak) has no Termux support. The phone app may need to be packaged as a real Android app; see [docs/android-setup.md](docs/android-setup.md#4-turn-on-the-hotspot-and-pair-the-radio).
 - **Termux on Android.** The steps in the setup guide have not been run on a phone yet.
 - **Airtime and range at the pilot site.** Field testing will set the retry timing and the submission batch window, which defaults to 120 s. It will also show how many relays a site needs.
 

@@ -21,8 +21,8 @@ Meshtastic on these ISM bands does not need an amateur (ham) radio license. A ha
 
 | Role | Recommended board | Why | Rough price |
 | --- | --- | --- | --- |
-| **Phone's radio** (needs Wi-Fi so the phone can reach it) | **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262) | Cheap, Wi-Fi built in, small screen, USB-C. Joins the phone's hotspot so MeshLearn talks to it over Wi-Fi. | US$20–25 |
-| Phone's radio, battery-friendly alternative | **LILYGO T-Beam** (SX1262 version) | Wi-Fi, holder for a single 18650 cell, GPS for mapping coverage during field tests. | US$35–45 |
+| **Phone's radio** (pairs with the phone over Bluetooth) | **Seeed Wio Tracker L1** or **RAK WisBlock (RAK4631)** | Low-power nRF52 chip, so it runs for days on a small battery. The Tracker L1 has a screen, which shows the Bluetooth pairing PIN. Both passed the bench test. | US$25–40 |
+| Phone's radio, budget alternative | **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262) | Cheap, small screen, USB-C. Uses more power than the nRF52 boards. Also has Wi-Fi, if the phone ends up reaching its radio that way. | US$20–25 |
 | **Teacher hub radio** (USB to laptop) | Heltec V3 or **RAK WisBlock Meshtastic Starter Kit** (RAK4631) | Any Meshtastic board works over USB. The RAK kit uses very little power. | US$20–35 |
 | **Relay** (on a roof or pole between school and homes) | **RAK WisBlock (RAK4631)** in a weatherproof box with a small solar panel and battery | The nRF52 chip sips power, so a small panel can run it indefinitely. Set its Meshtastic role to `ROUTER`. | US$60–100 with enclosure, panel, battery |
 
@@ -70,7 +70,7 @@ Any Android phone that meets these will do; donated or second-hand phones are id
    meshtastic --port /dev/ttyUSB1 --ch-index 3 --ch-set psk base64:<the psk>
    ```
    Then start the hub and phone with `--radio-channel 3` (the slot number).
-4. **Phone's radio:** under Network, turn on Wi-Fi and enter the phone hotspot's name and password. Note the IP address the radio gets (shown on the Heltec screen or in the Meshtastic app). On ESP32 boards Bluetooth switches off while Wi-Fi is on; LoRa keeps working.
+4. **Phone's radio:** leave Bluetooth on (the default). Pair it with the phone, typing the PIN shown on the radio's screen, and note its Bluetooth name (for example `Meshtastic_e023`). The phone connects with `--radio-ble <that name>`. Make sure the Meshtastic app on that phone is closed: a radio accepts one Bluetooth connection at a time.
 5. **Relay:** set Device role to `ROUTER`.
 6. Write down each radio's node id (looks like `!a1b2c3d4`). The hub needs the phone radio's id, and the phone needs the hub radio's id.
 
@@ -96,9 +96,12 @@ Results on 2026-11-15, with a RAK4631 (firmware 2.7.26) and a Seeed Wio Tracker 
 
 The real hub and phone then ran a full cycle over the same radios. A new assignment reached the student site in 5.7 s, a student's answers reached the hub 7 s after they pressed Submit (5 s of that was the phone's batching wait), and the grade was back on the student site 7 s after the teacher saved it.
 
+The same cycle with the phone's radio on Bluetooth (the Tracker L1, paired with a Mac, powered from a charger) took 5.0 s, 8.0 s and 7.1 s, every message confirmed on the first try.
+
 What the test found:
 
 - **Packets over 219 bytes never arrive.** Meshtastic advertises 233 bytes, but current firmware reserves room for encryption and silently drops anything larger. MeshLearn now uses 219-byte frames; with 228-byte frames every multi-packet message failed.
-- **RAK4631 and Wio Tracker L1 have no Wi-Fi.** They work well as the hub's radio (USB) or a relay, but the phone's radio needs Wi-Fi, so use a Heltec V3 or T-Beam there.
+- **Bluetooth stalled until MeshLearn sent one write at a time.** The Meshtastic library writes to the radio from several threads. When two writes overlapped, macOS lost one, and the library stopped receiving for good, though sending still worked. MeshLearn now queues its writes.
+- **On a Mac, start Bluetooth runs from Terminal.** macOS stops any program that uses Bluetooth unless the app it was started from has Bluetooth permission (System Settings → Privacy & Security → Bluetooth). Terminal asks the first time.
 
 Still to measure: range outdoors, and timing with relays in between.

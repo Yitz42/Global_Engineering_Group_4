@@ -6,7 +6,7 @@ The phone does three jobs:
 
 - runs a Wi-Fi hotspot that students join;
 - runs the MeshLearn student site with its data on the microSD card;
-- talks to its LoRa radio, which has joined the same hotspot.
+- talks to its LoRa radio over Bluetooth.
 
 ## 1. Install Termux
 
@@ -40,11 +40,13 @@ To fill the library from a computer, put the card in a card reader. Then run the
 
 **Warning:** uninstalling Termux deletes this folder, library included.
 
-## 4. Turn on the hotspot and connect the radio
+## 4. Turn on the hotspot and pair the radio
+
+> **Open problem:** Python in Termux probably can't use Bluetooth, because bleak, the library MeshLearn uses, has no Termux support. The `--radio-ble` option worked from a Mac on the bench. Possible ways forward: package the phone side as an Android app (bleak supports Android through python-for-android), connect the radio by USB-OTG cable, or use a Wi-Fi radio with `--radio-host`. Test this on a real phone first.
 
 1. Turn on the phone's Wi-Fi hotspot. Set a password you can share with students.
-2. Connect the radio to the hotspot, following [hardware.md](hardware.md), step 6.
-3. Find the radio's IP address (on its screen or in the Meshtastic app), for example `192.168.43.20`.
+2. Pair the phone with its radio in Android's Bluetooth settings. Type the PIN shown on the radio's screen (radios without a screen use 123456 if set to a fixed PIN).
+3. Note the radio's Bluetooth name, for example `Meshtastic_e023` (it is the radio's short name and four characters of its address).
 4. Find the phone's own hotspot address, which students will type into their browsers:
    ```bash
    ip -4 addr | grep inet
@@ -60,7 +62,8 @@ python -m meshlearn phone \
   --data ~/storage/external-1/meshlearn \
   --hub '!a1b2c3d4' \
   --name "North village" \
-  --radio-host 192.168.43.20
+  --radio-ble Meshtastic_e023 \
+  --radio-channel 3
 ```
 
 - `--hub` is the teacher hub radio's node id.
@@ -109,7 +112,7 @@ Create `~/.termux/boot/start-meshlearn`:
 #!/data/data/com.termux/files/usr/bin/sh
 termux-wake-lock
 cd ~/meshlearn-app
-python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-host 192.168.43.20 >> ~/meshlearn.log 2>&1
+python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-ble Meshtastic_e023 --radio-channel 3 >> ~/meshlearn.log 2>&1
 ```
 
 Then run `chmod +x ~/.termux/boot/start-meshlearn` and open the Termux:Boot app once.
