@@ -291,14 +291,31 @@ class Phone(
 
     // -- web ------------------------------------------------------------------
 
+    /** Big tabs; the one for this page is highlighted. */
     private fun nav(req: Request): String {
         val who = req.cookies["student"]
-        var out = "<a href='/'>Courses</a><a href='/library'>Library</a>"
-        if (!who.isNullOrEmpty()) out += "<a href='/results'>My results</a><span class='muted'>Hi, ${esc(who)}</span>"
-        return out
+        val section = when {
+            req.path.startsWith("/library") -> "/library"
+            req.path.startsWith("/results") -> "/results"
+            req.path == "/" || req.path.startsWith("/c/") || req.path.startsWith("/a/") -> "/"
+            else -> ""
+        }
+        val tabs = mutableListOf("/" to "Home", "/library" to "Library")
+        if (!who.isNullOrEmpty()) tabs.add("/results" to "My results")
+        return "<nav class='tabs'>" + tabs.joinToString("") { (href, label) ->
+            "<a href='$href'${if (href == section) " aria-current='page'" else ""}>$label</a>"
+        } + "</nav>"
     }
 
-    private fun page(req: Request, title: String, body: String) = Html.page(title, body, nav(req), site = "MeshLearn · $name")
+    private fun page(req: Request, title: String, body: String): String {
+        val who = req.cookies["student"]
+        val site = "MeshLearn · $name"
+        val html = Html.page(title, body, nav(req), site = site, extraCss = Html.STUDENT_CSS)
+        // The student's name sits on the right of the header line, so they can see who is signed in.
+        return if (who.isNullOrEmpty()) html
+        else html.replaceFirst("<header><strong>${esc(site)}</strong>",
+            "<header><strong><span>${esc(site)}</span><span class='who'>${esc(who)}</span></strong>")
+    }
 
     private fun routes() {
         app.add("GET", "/", ::home)
@@ -382,19 +399,26 @@ class Phone(
 
     private fun questionCount(a: Map<String, Any?>) = Assignments.questions(a).size
 
-    private fun assignmentCard(a: Map<String, Any?>, sub: Row?): String {
-        val state = when {
-            sub == null -> "<span class='pill'>To do</span>"
-            sub["score"] == null -> "<span class='pill warn'>Turned in · waiting for grade</span>"
+    /** One assignment as a card that opens it: what it is, when it is due, and what to do next. */
+    private fun assignmentCard(a: Map<String, Any?>, sub: Row?, courseTitle: String = ""): String {
+        val practice = a["mode"] == "practice"
+        val (state, action) = when {
+            sub == null -> "" to (if (practice) "Practice" else "Start")
+            practice -> "<span class='pill good'>Practiced</span>" to "Practice again"
+            sub["score"] == null -> "<span class='pill warn'>Turned in · waiting for grade</span>" to ""
             (sub.long("complete") ?: 0L) == 0L ->
-                "<span class='pill warn'>${g(sub.double("score"))} / ${g(sub.double("max"))} so far · teacher still grading</span>"
-            else -> "<span class='pill good'>Score ${g(sub.double("score"))} / ${g(sub.double("max"))}</span>"
+                "<span class='pill warn'>${g(sub.double("score"))} / ${g(sub.double("max"))} so far · teacher still grading</span>" to ""
+            else -> "<span class='pill good'>Score ${g(sub.double("score"))} / ${g(sub.double("max"))}</span>" to ""
         }
-        val due = if (truthy(a["due"])) " · due ${esc(a["due"])}" else ""
-        val n = questionCount(a)
-        return "<div class='card'><h3 style='margin:0 0 4px'><a href='/a/${esc(a["id"])}'>${esc(a["title"])}</a></h3>" +
-            "<p class='muted' style='margin:0 0 8px'>$n question${if (n == 1) "" else "s"}$due" +
-            "${if (a["mode"] == "practice") " · practice" else ""}</p>$state</div>"
+        val qs = Assignments.questions(a)
+        val n = qs.size
+        val meta = listOfNotNull(courseTitle.ifEmpty { null }, "$n question${if (n == 1) "" else "s"}", Html.minutesFor(qs),
+            if (practice) "practice" else null).joinToString(" · ")
+        val (dueText, dueCls) = Html.dueLabel(a["due"]?.toString(), turnedIn = sub != null)
+        val due = if (dueText.isNotEmpty()) "<p class='due $dueCls'>${esc(dueText)}</p>" else ""
+        val go = if (action.isNotEmpty()) "<span class='button go'>${esc(action)}</span>" else ""
+        return "<a class='card task' href='/a/${esc(a["id"])}'><h3>${esc(a["title"])}</h3>" +
+            "<p class='meta'>${esc(meta)}</p>$due$state$go</a>"
     }
 
     private fun myLatest(student: String): Map<String, Row> = db.all(
@@ -406,35 +430,46 @@ class Phone(
     fun home(req: Request): Response {
         val student = student(req)
         if (student == null) {
-            val body = "<div class='card'><p>Welcome! Type your name so your teacher knows whose work this is.</p>" +
-                "<form method='post' action='/login'><label for='student'>Your name</label>" +
+            val body = "<p class='lead'>Type your name so your teacher knows whose work this is.</p>" +
+                "<form method='post' action='/login' class='card'><label for='student'>Your name</label>" +
                 "<input type='text' id='student' name='student' maxlength='40' autocomplete='name' required>" +
-                "<button>Start</button></form></div>" +
-                "<p>Or go straight to the <a href='/library'>library</a>.</p>"
+                "<button class='big'>Start</button></form>" +
+                "<p>Just want to read? Open the <a href='/library'>library</a>.</p>"
             return Response(page(req, "Welcome", body))
         }
         val mine = myLatest(student)
         val records = myRecords(student)
         val cards = StringBuilder()
-        val todo = ArrayList<Map<String, Any?>>()
+        val todo = ArrayList<Pair<Map<String, Any?>, String>>()
         for (course in courseTree()) {
             val openItems = assignmentsIn(course["id"].toString())
             if (course["id"] == "" && openItems.isEmpty()) continue
-            todo += openItems.filter { it["id"] !in mine }
+            todo += openItems.filter { it["id"] !in mine }.map { it to course["title"].toString() }
             if (truthy(course["comingSoon"])) {
                 cards.append("<div class='card' style='opacity:.6'><h2 style='margin-top:0'>${esc(course["title"])}</h2>" +
                     "<p class='muted'>${esc(course["description"] ?: "")}</p><span class='pill'>Coming later</span></div>")
                 continue
             }
             val summary = Comprehension.summarize(records, course)
-            val left = openItems.count { it["id"] !in mine }
+            val done = openItems.count { it["id"] in mine }
             val href = esc(course["id"]).ifEmpty { "_other" }
-            cards.append("<div class='card'><h2 style='margin-top:0'><a href='/c/$href'>${esc(course["title"])}</a></h2>" +
-                "<p class='muted'>${esc(course["description"] ?: "")}</p>" +
-                "<p>${openItems.size} open · $left to do</p>${level(summary.level, summary.score)}</div>")
+            val progress = if (openItems.isEmpty()) "<p class='meta'>Nothing to do here right now.</p>" else {
+                val pct = done * 100 / openItems.size
+                "<div class='bar' role='img' aria-label='$done of ${openItems.size} done'><span style='width:$pct%'></span></div>" +
+                    "<p class='meta'>$done of ${openItems.size} done</p>"
+            }
+            cards.append("<a class='card' href='/c/$href'><h2>${esc(course["title"])}</h2>" +
+                "<p class='muted'>${esc(course["description"] ?: "")}</p>$progress${level(summary.level, summary.score)}</a>")
         }
-        val todoHtml = if (todo.isNotEmpty()) "<h2>To do</h2>" + todo.take(5).joinToString("") { assignmentCard(it, null) } else ""
-        val body = todoHtml + "<h2>Your courses</h2>" +
+        val lead = when (todo.size) {
+            0 -> "You're all caught up. Nice work!"
+            1 -> "You have 1 assignment to do."
+            else -> "You have ${todo.size} assignments to do."
+        }
+        val todoHtml = if (todo.isEmpty()) "" else "<h2>To do</h2>" +
+            todo.take(5).joinToString("") { (a, course) -> assignmentCard(a, null, course) } +
+            (if (todo.size > 5) "<p class='meta'>${todo.size - 5} more in your courses below.</p>" else "")
+        val body = "<p class='lead'>$lead</p>" + todoHtml + "<h2>Your courses</h2>" +
             (if (cards.isNotEmpty()) "<div class='grid'>$cards</div>" else "<p class='muted'>No courses yet. Your teacher will send them.</p>") +
             "<form method='post' action='/logout'><button class='secondary'>Not you? Change name</button></form>"
         return Response(page(req, "Hi, $student", body))
@@ -457,7 +492,7 @@ class Phone(
             val read = (unit["read"]?.toString()?.ifEmpty { null } ?: unit["title"].toString())
             sections.append("<h2>Unit ${i + 1}: ${esc(unit["title"])} ${level(u?.level ?: "Not started", u?.score)}</h2>" +
                 (inUnit.joinToString("") { assignmentCard(it, mine[it["id"]]) }.ifEmpty { "<p class='muted'>Nothing open in this unit right now.</p>" }) +
-                "<p><a href='/library?q=${quote(read)}'>Find readings in the library</a></p>")
+                "<p><a class='button secondary' href='/library?q=${quote(read)}'>Find readings in the library</a></p>")
         }
         val unitIds = units.map { it["id"] }.toSet()
         val loose = items.filter { (it["unit"] ?: "") !in unitIds }
@@ -478,47 +513,62 @@ class Phone(
 
     fun logout(req: Request): Response = Response.redirect("/").setCookie("student", "", maxAge = 0)
 
-    private fun renderForm(a: Map<String, Any?>, values: Map<String, String>, errors: Map<String, String>): String {
+    /**
+     * The assignment as a list of question cards, with big choices, a character count on written
+     * answers, and a bar at the bottom saying how many are answered. Answers are kept in the browser
+     * while the student works (ASSIGNMENT_JS), keyed by student and assignment.
+     */
+    private fun renderForm(a: Map<String, Any?>, student: String, values: Map<String, String>, errors: Map<String, String>): String {
         val parts = StringBuilder()
+        val qs = Assignments.questions(a)
+        val n = qs.size
         if (truthy(a["instructions"])) parts.append("<div class='card'><p>${esc(a["instructions"])}</p></div>")
+        parts.append("<p class='meta'>$n question${if (n == 1) "" else "s"} · ${Html.minutesFor(qs)}. " +
+            "Your answers are kept on this phone while you work.</p>")
         if (errors.isNotEmpty()) {
             parts.append("<p class='error' role='alert'>Please fix ${errors.size} answer${if (errors.size > 1) "s" else ""} below.</p>")
         }
-        parts.append("<form method='post' action='/a/${esc(a["id"])}' novalidate>")
-        Assignments.questions(a).forEachIndexed { idx, q ->
+        parts.append("<form id='aform' method='post' action='/a/${esc(a["id"])}' data-key='${esc(student + "|" + a["id"])}' novalidate>")
+        qs.forEachIndexed { idx, q ->
             val i = idx + 1
             val qid = esc(q["id"])
             val value = values[q["id"].toString()] ?: ""
             val err = errors[q["id"].toString()]
             val errHtml = if (err != null) "<p class='error' id='$qid-err'>${esc(err)}</p>" else ""
             val described = if (err != null) " aria-describedby='$qid-err' aria-invalid='true'" else ""
-            val pts = " <span class='muted'>(${g((q["points"] as? Number)?.toDouble() ?: 1.0)} pt)</span>"
+            val points = (q["points"] as? Number)?.toDouble() ?: 1.0
+            val legend = "<legend><span class='qnum'>Question $i of $n · ${g(points)} point${if (points == 1.0) "" else "s"}</span>" +
+                "${esc(q["prompt"])}</legend>"
+            val cls = if (err != null) "q bad" else "q"
             when (q["type"]) {
                 "choice" -> {
                     val opts = (q["options"].asList() ?: emptyList()).mapIndexed { j, opt ->
-                        "<label class='option'><input type='radio' name='$qid' value='$j'" +
-                            "${if (value == j.toString()) " checked" else ""}$described> ${esc(opt)}</label>"
+                        val on = value == j.toString()
+                        "<label class='option${if (on) " on" else ""}'><input type='radio' name='$qid' value='$j'" +
+                            "${if (on) " checked" else ""}$described> ${esc(opt)}</label>"
                     }.joinToString("")
-                    parts.append("<fieldset><legend>$i. ${esc(q["prompt"])}$pts</legend>$errHtml$opts</fieldset>")
+                    parts.append("<fieldset class='$cls'>$legend$errHtml$opts</fieldset>")
                 }
                 "long" -> {
                     val limit = (q["max_chars"] as? Number)?.toLong() ?: 600L
-                    parts.append("<fieldset><legend>$i. ${esc(q["prompt"])}$pts</legend>$errHtml" +
-                        "<label for='$qid'>Your answer (up to $limit characters)</label>" +
-                        "<textarea id='$qid' name='$qid' maxlength='$limit'$described>${esc(value)}</textarea></fieldset>")
+                    parts.append("<fieldset class='$cls'>$legend$errHtml" +
+                        "<label for='$qid'>Write your answer (up to $limit characters)</label>" +
+                        "<textarea id='$qid' name='$qid' maxlength='$limit'$described>${esc(value)}</textarea>" +
+                        "<p class='counter' id='$qid-count' aria-live='polite'>${value.length} / $limit</p></fieldset>")
                 }
                 else -> {
                     val number = q["type"] == "number"
                     val mode = if (number) " inputmode='decimal'" else ""
                     val hint = if (number) "A number, like 12, 3.5, 3,5 or 1/2" else "Short answer"
-                    parts.append("<fieldset><legend>$i. ${esc(q["prompt"])}$pts</legend>$errHtml" +
+                    parts.append("<fieldset class='$cls'>$legend$errHtml" +
                         "<label for='$qid'>$hint</label>" +
                         "<input type='text' id='$qid' name='$qid' value='${esc(value)}' maxlength='${Assignments.MAX_TEXT_CHARS}'$mode$described>" +
                         "</fieldset>")
                 }
             }
         }
-        parts.append("<button>Check and submit</button></form>")
+        parts.append("<div class='submitbar'><p class='meta' id='answered' aria-live='polite'>$n question${if (n == 1) "" else "s"}</p>" +
+            "<button class='big'>Check and submit</button></div></form><script>${Html.ASSIGNMENT_JS}</script>")
         return parts.toString()
     }
 
@@ -532,13 +582,14 @@ class Phone(
         if (a["mode"] != "practice") {
             val done = db.one("SELECT submitted_at FROM submissions WHERE assignment_id = ? AND student = ?", a["id"], student)
             if (done != null) {
-                val body = "<p>You already turned this in on ${Html.whenText(done.double("submitted_at"))}.</p>" +
-                    "<p><a href='/results'>See your results</a></p>"
+                val body = "<div class='card'><p>You already turned this in on ${Html.whenText(done.double("submitted_at"))}.</p></div>" +
+                    "<a class='button big' href='/results'>See your results</a>" +
+                    "<a class='button big secondary' href='/'>Back to Home</a>"
                 return Response(page(req, a["title"].toString(), body))
             }
         }
         opened(student, a["id"].toString())
-        return Response(page(req, a["title"].toString(), renderForm(a, emptyMap(), emptyMap())))
+        return Response(page(req, a["title"].toString(), renderForm(a, student, emptyMap(), emptyMap())))
     }
 
     fun assignmentSubmit(req: Request): Response {
@@ -546,12 +597,14 @@ class Phone(
         val a = openAssignment(req) ?: return Response.redirect("/")
         val raw = Assignments.questions(a).associate { it["id"].toString() to (req.form[it["id"].toString()] ?: "") }
         val (answers, errors) = Assignments.validateAnswers(a, raw)
-        if (errors.isNotEmpty()) return Response(page(req, a["title"].toString(), renderForm(a, raw, errors)), 400)
+        if (errors.isNotEmpty()) return Response(page(req, a["title"].toString(), renderForm(a, student, raw, errors)), 400)
         if (a["mode"] != "practice" &&
             db.one("SELECT 1 AS x FROM submissions WHERE assignment_id = ? AND student = ?", a["id"], student) != null) {
             return Response.redirect("/results")
         }
         submit(a, student, answers)
+        // Turned in: forget the draft the browser kept while the student worked.
+        val clearDraft = "<div id='clear-draft' data-key='${esc(student + "|" + a["id"])}'></div><script>${Html.CLEAR_DRAFT_JS}</script>"
         if (a["mode"] == "practice") {
             val feedback = Assignments.practiceFeedback(a, answers)
             val items = Assignments.questions(a).joinToString("") { q ->
@@ -565,13 +618,16 @@ class Phone(
             }
             val right = feedback.values.count { it == true }
             val checked = feedback.values.count { it != null }
-            val body = "<p>You got <strong>$right</strong> of $checked auto-checked questions right.</p><ol>$items</ol>" +
-                "<a class='button' href='/a/${esc(a["id"])}'>Try again</a><a class='button secondary' href='/'>Back</a>"
+            val body = "<div class='card'><p class='grade'>$right of $checked right</p>" +
+                "<p class='meta'>Questions the phone can check. Your teacher reads the written ones.</p><ol>$items</ol></div>" +
+                "<a class='button big' href='/a/${esc(a["id"])}'>Try again</a><a class='button big secondary' href='/'>Back to Home</a>" +
+                clearDraft
             return Response(page(req, "Practice results", body))
         }
-        val body = "<div class='card'><p class='good'><strong>Done! Your work is saved on this phone.</strong></p>" +
-            "<p>It will reach your teacher over the radio. That can take a while, and you do not need to wait here.</p></div>" +
-            "<a class='button' href='/'>Back to assignments</a>"
+        val body = "<div class='card'><p class='good grade'>Done! Your work is saved on this phone.</p>" +
+            "<p>It will reach your teacher over the radio. That can take a while, and you do not need to wait here.</p>" +
+            "<p class='meta'>Your grade will appear in My results.</p></div>" +
+            "<a class='button big' href='/'>Back to Home</a>" + clearDraft
         return Response(page(req, "Submitted", body))
     }
 
@@ -581,15 +637,19 @@ class Phone(
         for (s in db.all("SELECT * FROM submissions WHERE student = ? ORDER BY submitted_at DESC", student)) {
             val title = getAssignment(s.str("assignment_id")!!)?.get("title") ?: s.str("assignment_id")
             val sent = when (messenger.messageStatus(s.long("msg_id"))) {
-                "acked" -> "reached your teacher"; "pending" -> "on its way"; "failed" -> "could not be sent"
-                else -> "saved, sending soon"
+                "acked" -> "<span class='pill good'>Your teacher has it</span>"
+                "pending" -> "<span class='pill warn'>On its way to your teacher</span>"
+                "failed" -> "<span class='pill bad'>Could not be sent yet</span>"
+                else -> "<span class='pill'>Saved, sending soon</span>"
             }
             val grade = when {
-                s["score"] == null -> "Not graded yet"
-                (s.long("complete") ?: 0L) != 0L -> "<strong>${g(s.double("score"))} / ${g(s.double("max"))}</strong>"
-                else -> "${g(s.double("score"))} / ${g(s.double("max"))} so far (teacher still grading)"
+                s["score"] == null -> "<p class='meta'>Not graded yet</p>"
+                (s.long("complete") ?: 0L) != 0L -> "<p class='grade'>${g(s.double("score"))} / ${g(s.double("max"))}</p>"
+                else -> "<p class='grade'>${g(s.double("score"))} / ${g(s.double("max"))} so far</p>" +
+                    "<p class='meta'>Your teacher is still grading the written answers.</p>"
             }
-            out.append("<tr><td>${esc(title)}</td><td>${Html.whenText(s.double("submitted_at"))}</td><td>$sent</td><td>$grade</td></tr>")
+            out.append("<div class='card'><h3 style='margin:0'>${esc(title)}</h3>" +
+                "<p class='meta'>Turned in ${Html.whenText(s.double("submitted_at"))}</p>$grade$sent</div>")
         }
         val records = myRecords(student)
         val progress = StringBuilder()
@@ -598,13 +658,12 @@ class Phone(
             if (summary.answered == 0) continue
             val units = summary.units.filter { it.answered > 0 }
                 .joinToString("") { "<li>Unit ${it.number}: ${esc(it.title)} ${level(it.level, it.score)}</li>" }
-            progress.append("<div class='card'><h3 style='margin-top:0'>${esc(course["title"])} " +
-                "${level(summary.level, summary.score)}</h3><ul>$units</ul></div>")
+            progress.append("<div class='card'><h3 style='margin:0'>${esc(course["title"])} " +
+                "${level(summary.level, summary.score)}</h3><ul class='units'>$units</ul></div>")
         }
         val body = (if (progress.isNotEmpty()) "<h2>How you are doing</h2>$progress" else "") +
             "<h2>Everything you turned in</h2>" +
-            (if (out.isNotEmpty()) "<table><tr><th>Assignment</th><th>Turned in</th><th>Delivery</th><th>Grade</th></tr>$out</table>"
-            else "<p class='muted'>Nothing turned in yet.</p>")
+            (if (out.isNotEmpty()) out.toString() else "<p class='muted'>Nothing turned in yet.</p>")
         return Response(page(req, "My results", body))
     }
 
@@ -621,22 +680,23 @@ class Phone(
             val rows = StringBuilder()
             for (item in entries) {
                 val file = item["file"].toString()
-                val href = "/library/files/" + quote(file.replace(File.separatorChar, '/'))
-                var link = "<a href='$href'>${esc(item["title"])}</a>"
+                var href = "/library/files/" + quote(file.replace(File.separatorChar, '/'))
                 var note = ""
                 if (item["kind"] == "zim") {
                     val book = File(file).name.substringBeforeLast('.')
-                    if (kiwixUrl.isNotEmpty()) link = "<a href='${esc(kiwixUrl)}/content/${quote(book)}'>${esc(item["title"])}</a>"
-                    else note = " <span class='muted'>· open with the Kiwix app</span>"
+                    if (kiwixUrl.isNotEmpty()) href = "${esc(kiwixUrl)}/content/${quote(book)}"
+                    else note = " · open with the Kiwix app"
                 }
-                rows.append("<tr><td>$link$note</td><td class='muted'>${esc(item["kind"] ?: "")}</td>" +
-                    "<td class='muted'>${Html.size((item["size"] as? Number)?.toDouble() ?: 0.0)}</td></tr>")
+                val kind = KIND_NAMES[item["kind"]?.toString() ?: ""] ?: (item["kind"]?.toString() ?: "")
+                rows.append("<a class='card item' href='$href'><strong>${esc(item["title"])}</strong>" +
+                    "<span class='meta' style='display:block'>${esc(kind)} · ${Html.size((item["size"] as? Number)?.toDouble() ?: 0.0)}${esc(note)}</span></a>")
             }
-            sections.append("<h2>${esc(group)}</h2><table>$rows</table>")
+            sections.append("<h2>${esc(group)}</h2>$rows")
         }
-        val search = "<form method='get' action='/library'><label for='q'>Search the library</label>" +
-            "<input type='text' id='q' name='q' value='${esc(query)}'><button>Search</button></form>"
-        return Response(page(req, "Library", search + sections.ifEmpty { "<p class='muted'>Nothing found.</p>" }))
+        val search = "<label for='q'>Search the library</label><form method='get' action='/library' class='search'>" +
+            "<input type='text' id='q' name='q' value='${esc(query)}'><button>Search</button></form>" +
+            (if (query.isNotEmpty()) "<p class='meta'>Showing results for “${esc(query)}”. <a href='/library'>Show everything</a></p>" else "")
+        return Response(page(req, "Library", search + sections.ifEmpty { "<p class='muted'>Nothing found. Try a shorter word.</p>" }))
     }
 
     fun libraryFile(req: Request): Response {
@@ -704,6 +764,10 @@ class Phone(
         const val MAX_OPEN_S = 6 * 3600.0
         const val MAX_BATCH = 20
         val VIEWABLE = setOf(".html", ".htm", ".txt", ".pdf", ".epub", ".png", ".jpg", ".jpeg", ".svg", ".mp3", ".mp4", ".webm", ".zim")
+        /** Library file types in words a student knows. */
+        val KIND_NAMES = mapOf("html" to "Page", "htm" to "Page", "txt" to "Text", "pdf" to "PDF", "epub" to "Book",
+            "png" to "Picture", "jpg" to "Picture", "jpeg" to "Picture", "svg" to "Picture", "mp3" to "Audio",
+            "mp4" to "Video", "webm" to "Video", "zim" to "Encyclopedia")
         val STARTER_FILES = listOf("fractions.html", "photosynthesis.html", "using-this-library.html")
 
         const val SCHEMA = """

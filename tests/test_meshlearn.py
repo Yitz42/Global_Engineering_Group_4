@@ -93,6 +93,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(protocol.frame_count(protocol.OPEN, {"a": "a-fractions1", "v": "0123abcd", "o": 1, "d": "2026-11-06"}), 1)
 
 
+class StudentSiteTests(unittest.TestCase):
+    def test_due_dates_in_words(self):
+        from datetime import date
+
+        from meshlearn.web import due_label, minutes_for
+        today = date(2026, 11, 15)
+        self.assertEqual(due_label("2026-11-15", False, today), ("Due today", "soon"))
+        self.assertEqual(due_label("2026-11-16", False, today), ("Due tomorrow", "soon"))
+        self.assertEqual(due_label("2026-11-20", False, today), ("Due Fri, Nov 20", ""))
+        self.assertEqual(due_label("2026-10-16", False, today), ("Overdue · was due Fri, Oct 16", "late"))
+        self.assertEqual(due_label("2026-10-16", True, today), ("Was due Fri, Oct 16", "done"))
+        self.assertEqual(due_label("", False, today), ("", ""))
+        self.assertEqual(minutes_for([{"type": t} for t in ("choice", "number", "number", "long")]), "about 6 min")
+
+
 class AssignmentTests(unittest.TestCase):
     def setUp(self):
         self.a = asg.normalize_assignment(load_sample())
@@ -295,6 +310,9 @@ class EndToEndTests(EndToEndBase):
 
         self.post(self.pport, "/login", {"student": "Ana"})
         self.assertIn("Fractions and plants", self.get(self.pport, "/"))
+        form = self.get(self.pport, f"/a/{aid}")
+        self.assertIn("Question 1 of 5", form)
+        self.assertIn("meshlearn-draft:", form)  # answers are kept in the browser while the student works
         self.assertIn("Please fix", self.post(self.pport, f"/a/{aid}", {"q1": "1"}))
         self.assertIn("Done!", self.post(self.pport, f"/a/{aid}", GOOD_ANSWERS))
 

@@ -164,6 +164,9 @@ class CoreTest {
         assertTrue(String(phone.app.dispatch(req("GET", "/", cookie = cookie)).body).contains("Fractions and plants"))
         val form = phone.app.dispatch(req("GET", "/a/a1b2c3", cookie = cookie))
         assertEquals(200, form.status)
+        val formHtml = String(form.body)
+        assertTrue(formHtml.contains("Question 1 of 5") && formHtml.contains("meshlearn-draft:") && formHtml.contains("0 / 500"))
+        assertTrue(String(phone.app.dispatch(req("GET", "/", cookie = cookie)).body).contains("You have 1 assignment to do."))
         val bad = phone.app.dispatch(req("POST", "/a/a1b2c3", "q1=1", cookie))
         assertEquals(400, bad.status)
         val ok = phone.app.dispatch(req("POST", "/a/a1b2c3", "q1=1&q2=3%2C5&q3=chlorophyll&q4=1&q5=We+share+pizza", cookie))
@@ -188,6 +191,25 @@ class CoreTest {
         // Admin actions need the phone itself or the PIN.
         assertTrue(String(phone.app.dispatch(req("POST", "/status/reload")).body).contains("Only the teacher"))
         phone.stop(); hub.stop()
+    }
+
+    /** The Kotlin and Python phones must serve the same student site: same stylesheet, same script. */
+    @Test fun studentSiteMatchesPythonPhone() {
+        val webPy = File(System.getProperty("meshlearn.repo"), "meshlearn/web.py").readText().replace("\r\n", "\n")
+        fun block(start: String) = webPy.substringAfter(start).substringBefore("\"\"\"").trim()
+        assertEquals(block("STUDENT_CSS = \"\"\""), Html.STUDENT_CSS.trim())
+        assertEquals(block("ASSIGNMENT_JS = r\"\"\""), Html.ASSIGNMENT_JS.trim())
+    }
+
+    @Test fun dueDatesInWords() {
+        val today = java.util.Calendar.getInstance().apply { set(2026, java.util.Calendar.NOVEMBER, 15, 10, 30) }
+        assertEquals("Due today" to "soon", Html.dueLabel("2026-11-15", false, today))
+        assertEquals("Due tomorrow" to "soon", Html.dueLabel("2026-11-16", false, today))
+        assertEquals("Due Fri, Nov 20" to "", Html.dueLabel("2026-11-20", false, today))
+        assertEquals("Overdue · was due Fri, Oct 16" to "late", Html.dueLabel("2026-10-16", false, today))
+        assertEquals("Was due Fri, Oct 16" to "done", Html.dueLabel("2026-10-16", true, today))
+        assertEquals("" to "", Html.dueLabel("", false, today))
+        assertEquals("about 6 min", Html.minutesFor(listOf("choice", "number", "number", "long").map { mapOf("type" to it) }))
     }
 
     @Test fun meshtasticPacketsRoundTrip() {

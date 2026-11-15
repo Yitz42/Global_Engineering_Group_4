@@ -105,7 +105,7 @@ def main() -> int:
         assert row["duration"] and row["duration"] >= 1, dict(row)
         assert json.loads(row["answers"])["q2"] == "3/4"
         wait_for("grade came back to the phone", lambda: "3 / 7 so far" in get("/results"))
-        wait_for("phone shows delivery confirmed", lambda: "reached your teacher" in get("/results"))
+        wait_for("phone shows delivery confirmed", lambda: "Your teacher has it" in get("/results"))
         print("PASSED")
         return 0
     except BaseException:
