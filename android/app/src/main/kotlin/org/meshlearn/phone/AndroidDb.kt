@@ -54,7 +54,7 @@ class AndroidDb(file: File, schema: String) : Db {
             bind(query, params)
             SQLiteCursor(driver, editTable, query)
         }
-        db.rawQueryWithFactory(factory, sql, null, null).use { c ->
+        db.rawQueryWithFactory(factory, sql, emptyArray(), "").use { c ->
             val out = ArrayList<Row>(c.count)
             val names = c.columnNames
             while (c.moveToNext()) {

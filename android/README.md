@@ -45,8 +45,15 @@ Install `meshtastic` first (as in `requirements-radio.txt`) to include its proto
 3. Press **Start** and turn on the phone's Wi-Fi hotspot. The screen shows the address students open.
 4. Load assignments from **Phone status** (over school Wi-Fi from the hub, or a course pack on the card).
 
+## Tested so far
+
+- `core`: unit tests, and the end-to-end test against the Python hub (20% simulated packet loss).
+- The app on the Android 16 emulator (API 37): starts the service, serves the student site, copies
+  assignments from a Python hub, keeps its data on the (emulated) memory card, and the setup screen
+  and in-app browser lay out correctly edge to edge.
+
 ## Not yet tested
 
 - On a real Android phone and with real radios over Bluetooth: the Bluetooth code follows Meshtastic's
-  documented BLE API but has only been compiled, not run. The Wi-Fi radio option is the fallback.
+  documented BLE API but has not talked to a radio yet. The Wi-Fi radio option is the fallback.
 - Android 7 phones specifically (the app targets Android 7.0 and newer).

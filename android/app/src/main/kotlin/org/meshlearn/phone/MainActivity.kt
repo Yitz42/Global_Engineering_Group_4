@@ -153,7 +153,15 @@ class MainActivity : Activity() {
         col.addView(note("\nMemory card folder for the library and course packs:\n${Settings.dataDir(this)}\n" +
             "Put collections in its 'library' folder and course packs in 'assignments' (with a card reader, or over school Wi-Fi from the status page)."))
 
-        return ScrollView(this).apply { addView(col) }
+        // Open at the top with nothing focused (otherwise the first text box grabs focus and scrolls the status away).
+        col.isFocusableInTouchMode = true
+        col.descendantFocusability = android.view.ViewGroup.FOCUS_BEFORE_DESCENDANTS
+        col.requestFocus()
+        return ScrollView(this).apply {
+            addView(col)
+            padForSystemBars(this)
+            post { scrollTo(0, 0) }
+        }
     }
 
     // -- status -------------------------------------------------------------------
@@ -257,7 +265,6 @@ class MainActivity : Activity() {
 
     /** Asks for anything missing; returns true when everything is already granted. */
     private fun ensurePermissions(): Boolean {
-        if (Build.VERSION.SDK_INT < 23) return true
         val missing = neededPermissions()
         if (missing.isEmpty()) return true
         requestPermissions(missing.toTypedArray(), 1)

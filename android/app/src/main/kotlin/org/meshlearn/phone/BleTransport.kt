@@ -8,6 +8,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
 import android.util.Log
@@ -77,8 +78,8 @@ class BleTransport(
             return
         }
         status = "Connecting to the radio…"
-        gatt = if (Build.VERSION.SDK_INT >= 23) device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
-        else device.connectGatt(context, false, callback)
+        @Suppress("DEPRECATION")   // still the call that works on Android 7 through 16
+        gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
     }
 
     private fun retryLater() {
@@ -159,7 +160,7 @@ class BleTransport(
         num.getDescriptor(CCCD)?.let { d ->
             op {
                 if (Build.VERSION.SDK_INT >= 33) {
-                    g.writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothGatt.GATT_SUCCESS
+                    g.writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
                     d.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
@@ -186,7 +187,7 @@ class BleTransport(
         val c = toRadio ?: return false
         return op {
             if (Build.VERSION.SDK_INT >= 33) {
-                g.writeCharacteristic(c, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
+                g.writeCharacteristic(c, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT

@@ -69,7 +69,10 @@ class PhoneService : Service() {
         phone = p
         server = srv
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "meshlearn:phone").apply { acquire() }
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "meshlearn:phone").apply {
+                @Suppress("WakelockTimeout")   // held all school day on purpose; released when the service stops
+                acquire()
+            }
         state = PhoneState(running = true, port = s.port, dataDir = dataDir.path)
         instance = this
     }
@@ -95,7 +98,7 @@ class PhoneService : Service() {
             nm.createNotificationChannel(NotificationChannel(CHANNEL, "Student site", NotificationManager.IMPORTANCE_LOW))
         }
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0))
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else @Suppress("DEPRECATION") Notification.Builder(this)
         val notification = builder
             .setContentTitle("MeshLearn is running")
