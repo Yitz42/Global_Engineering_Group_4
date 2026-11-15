@@ -61,7 +61,44 @@ Any Android phone that meets these will do; donated or second-hand phones are id
 ## 6. Setting up the radios
 
 1. Flash Meshtastic from https://flasher.meshtastic.org (Chrome or Edge, USB cable).
-2. In the Meshtastic app, set the **region** from the table above. Put all radios on the **same channel name and key**.
-3. **Phone's radio:** under Network, turn on Wi-Fi and enter the phone hotspot's name and password. Note the IP address the radio gets (shown on the Heltec screen or in the Meshtastic app). On ESP32 boards Bluetooth switches off while Wi-Fi is on; LoRa keeps working.
-4. **Relay:** set Device role to `ROUTER`.
-5. Write down each radio's node id (looks like `!a1b2c3d4`). The hub needs the phone radio's id, and the phone needs the hub radio's id.
+2. In the Meshtastic app, set the **region** from the table above.
+3. **Give MeshLearn its own channel.** Channel 0 is the public default: other people's radios nearby use it, and their relays would carry MeshLearn traffic. Add a secondary channel with a random key on one radio, then copy the same key to the others. With the Meshtastic command line:
+   ```bash
+   meshtastic --port /dev/ttyUSB0 --ch-add MeshLearn          # first radio; note the slot it reports, e.g. 3
+   meshtastic --port /dev/ttyUSB0 --info                      # copy the MeshLearn channel's psk
+   meshtastic --port /dev/ttyUSB1 --ch-add MeshLearn          # each other radio
+   meshtastic --port /dev/ttyUSB1 --ch-index 3 --ch-set psk base64:<the psk>
+   ```
+   Then start the hub and phone with `--radio-channel 3` (the slot number).
+4. **Phone's radio:** under Network, turn on Wi-Fi and enter the phone hotspot's name and password. Note the IP address the radio gets (shown on the Heltec screen or in the Meshtastic app). On ESP32 boards Bluetooth switches off while Wi-Fi is on; LoRa keeps working.
+5. **Relay:** set Device role to `ROUTER`.
+6. Write down each radio's node id (looks like `!a1b2c3d4`). The hub needs the phone radio's id, and the phone needs the hub radio's id.
+
+## 7. Bench test with two radios
+
+Before going to the field, plug both radios into one computer and run:
+
+```bash
+pip install meshtastic
+python3 -m meshlearn radio-test --a /dev/ttyUSB0 --b /dev/ttyUSB1 --channel 3 --hops 0
+```
+
+Radio A plays the hub and radio B the phone. The test sends the four messages MeshLearn uses most and times each one. `--hops 0` stops other radios from relaying the test packets. On macOS the ports look like `/dev/cu.usbmodem101`.
+
+Results on 2026-11-15, with a RAK4631 (firmware 2.7.26) and a Seeed Wio Tracker L1 (firmware 2.8.0) about 1 m apart, US region, `LONG_TURBO` preset:
+
+| Message | Packets | Arrived | Confirmed | Resends |
+| --- | --- | --- | --- | --- |
+| Open an assignment the phone already has | 1 | 2.6 s | 3.9 s | 0 |
+| A batch of 5 students' answers | 1 | 4.1 s | 5.1 s | 0 |
+| A full assignment the phone doesn't have | 2 | 6.4 s | 7.8 s | 0 |
+| A batch of 5 grades | 1 | 1.7 s | 3.3 s | 0 |
+
+The real hub and phone then ran a full cycle over the same radios. A new assignment reached the student site in 5.7 s, a student's answers reached the hub 7 s after they pressed Submit (5 s of that was the phone's batching wait), and the grade was back on the student site 7 s after the teacher saved it.
+
+What the test found:
+
+- **Packets over 219 bytes never arrive.** Meshtastic advertises 233 bytes, but current firmware reserves room for encryption and silently drops anything larger. MeshLearn now uses 219-byte frames; with 228-byte frames every multi-packet message failed.
+- **RAK4631 and Wio Tracker L1 have no Wi-Fi.** They work well as the hub's radio (USB) or a relay, but the phone's radio needs Wi-Fi, so use a Heltec V3 or T-Beam there.
+
+Still to measure: range outdoors, and timing with relays in between.

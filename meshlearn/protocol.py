@@ -1,9 +1,11 @@
 """Wire format for messages sent over the mesh.
 
 LoRa packets are small: the Meshtastic library accepts up to 233 bytes of
-payload. A message is a JSON pair [type, payload], compressed with zlib using a
-preset dictionary of words common in assignments (so even short messages
-compress well), then split into numbered frames:
+payload, but current firmware reserves room for its public-key encryption and
+silently drops anything over 219 bytes. A message is a JSON pair
+[type, payload], compressed with zlib using a preset dictionary of words common
+in assignments (so even short messages compress well), then split into
+numbered frames:
 
     magic (1) | version << 4 | flags (1) | message id (4) | seq (1) | total (1) | data
 
@@ -28,7 +30,7 @@ MAGIC = 0xA7
 VERSION = 2
 FLAG_END = 0x01
 HEADER = struct.Struct(">BBIBB")
-MAX_FRAME_BYTES = 228  # under Meshtastic's 233-byte payload limit
+MAX_FRAME_BYTES = 219  # measured on firmware 2.7 and 2.8: 220 bytes and up never arrive
 CHUNK_BYTES = MAX_FRAME_BYTES - HEADER.size
 MAX_FRAMES = 255
 

@@ -143,9 +143,15 @@ class MeshtasticTransport(Transport):
 
     min_interval_s paces transmissions; on the default LongFast preset a gap of
     a few seconds keeps the radio's queue from overflowing.
+
+    channel is the node's channel index to send on. Use a private channel (its own
+    key) rather than 0, the public default, so other people's mesh doesn't carry
+    MeshLearn traffic. hop_limit caps relays (0 = direct only; None = the node's
+    setting).
     """
 
-    def __init__(self, device: Optional[str] = None, host: Optional[str] = None, min_interval_s: float = 3.0):
+    def __init__(self, device: Optional[str] = None, host: Optional[str] = None, min_interval_s: float = 3.0,
+                 channel: int = 0, hop_limit: Optional[int] = None):
         try:
             from pubsub import pub  # installed with meshtastic
             try:
@@ -159,6 +165,8 @@ class MeshtasticTransport(Transport):
         self._port = portnums_pb2.PortNum.PRIVATE_APP
         self._port_name = "PRIVATE_APP"
         self._pacer = _Pacer(min_interval_s)
+        self.channel = channel
+        self.hop_limit = hop_limit
         if host:
             from meshtastic.tcp_interface import TCPInterface
             self._iface = TCPInterface(hostname=host)
@@ -174,6 +182,8 @@ class MeshtasticTransport(Transport):
         self._pub.subscribe(self._receive, "meshtastic.receive")
 
     def _receive(self, packet, interface=None):
+        if interface is not None and interface is not self._iface:
+            return  # another radio open in this process (radio-test opens two)
         decoded = packet.get("decoded") or {}
         if decoded.get("portnum") != self._port_name or self._on_frame is None:
             return
@@ -186,7 +196,8 @@ class MeshtasticTransport(Transport):
 
     def send(self, frame: bytes, dest: str) -> None:
         self._pacer.wait()
-        self._iface.sendData(frame, destinationId=dest, portNum=self._port, wantAck=True)
+        self._iface.sendData(frame, destinationId=dest, portNum=self._port, wantAck=True,
+                             channelIndex=self.channel, hopLimit=self.hop_limit)
 
     def close(self) -> None:
         try:

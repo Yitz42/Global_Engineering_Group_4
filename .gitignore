@@ -13,3 +13,6 @@ phone-data/
 *.part
 library/
 !meshlearn/starter_library/
+
+# Python virtual environment
+.venv/

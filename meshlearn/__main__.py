@@ -25,6 +25,9 @@ def _add_radio_args(p: argparse.ArgumentParser, default_node: str, default_port:
     g = p.add_argument_group("radio link (pick one)")
     g.add_argument("--radio-serial", metavar="DEVICE", help="real Meshtastic radio on USB, e.g. /dev/ttyUSB0 or COM3")
     g.add_argument("--radio-host", metavar="IP", help="real Meshtastic radio over Wi-Fi (TCP), e.g. 192.168.43.20")
+    g.add_argument("--radio-channel", type=int, default=0, metavar="INDEX",
+                   help="real radio: channel index to send on; use a private channel, not 0 (the public default)")
+    g.add_argument("--radio-hops", type=int, metavar="N", help="real radio: most relays a packet may take (default: the node's)")
     g.add_argument("--sim-node", default=default_node, help=f"simulator: this node's name (default {default_node})")
     g.add_argument("--sim-port", type=int, default=default_port, help=f"simulator: UDP port to listen on (default {default_port})")
     g.add_argument("--sim-peer", action="append", default=[], metavar="NAME=HOST:PORT",
@@ -34,7 +37,8 @@ def _add_radio_args(p: argparse.ArgumentParser, default_node: str, default_port:
 
 def _transport(args):
     if args.radio_serial or args.radio_host:
-        return MeshtasticTransport(device=args.radio_serial, host=args.radio_host), 30.0
+        return MeshtasticTransport(device=args.radio_serial, host=args.radio_host,
+                                   channel=args.radio_channel, hop_limit=args.radio_hops), 30.0
     return UdpSimTransport(args.sim_node, args.sim_port, parse_peers(args.sim_peer), drop_rate=args.sim_loss), 3.0
 
 
@@ -148,6 +152,11 @@ a student who already has work and grades. Every name and answer is made up.
     return 0
 
 
+def cmd_radio_test(args) -> int:
+    from .radiotest import run
+    return run(args.a, args.b, args.channel, args.hops, args.timeout, args.retry)
+
+
 def cmd_library(args) -> int:
     if args.from_hub:
         return _library_from_hub(args)
@@ -228,6 +237,15 @@ def main(argv=None) -> int:
     pk.add_argument("--hub-data", default="hub-data", help="the hub's data folder")
     pk.add_argument("--out", required=True, help="the phone's MeshLearn folder on the card, e.g. /Volumes/SDCARD/.../meshlearn")
     pk.set_defaults(func=cmd_pack)
+
+    rt = sub.add_parser("radio-test", help="send MeshLearn messages between two real radios plugged into this computer")
+    rt.add_argument("--a", required=True, metavar="DEVICE", help="radio playing the hub, e.g. /dev/ttyUSB0")
+    rt.add_argument("--b", required=True, metavar="DEVICE", help="radio playing the phone, e.g. /dev/ttyUSB1")
+    rt.add_argument("--channel", type=int, default=0, metavar="INDEX", help="channel index on both radios (use a private one)")
+    rt.add_argument("--hops", type=int, metavar="N", help="most relays a packet may take (0 = direct only)")
+    rt.add_argument("--timeout", type=float, default=300, help="seconds to wait for each message (default 300)")
+    rt.add_argument("--retry", type=float, default=30, help="seconds before the first resend (default 30)")
+    rt.set_defaults(func=cmd_radio_test)
 
     lib = sub.add_parser("library", help="download open content sized to an SD card")
     lib.add_argument("--sd-gb", type=float, help="card size printed on the label, in GB")

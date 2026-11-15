@@ -69,17 +69,17 @@ The five students on the demo phone (Lena, Ana, Bruno, Kofi, Mateus) send their 
 ## Running on real hardware
 
 1. **Get radios.** See [docs/hardware.md](docs/hardware.md) for recommended boards, antennas, power, and the right frequency band for the US, Brazil, Germany, and Kenya.
-2. **Flash Meshtastic** on each radio (https://flasher.meshtastic.org), set the region, and put all radios on the same channel.
+2. **Flash Meshtastic** on each radio (https://flasher.meshtastic.org), set the region, and give MeshLearn its own private channel on every radio ([docs/hardware.md](docs/hardware.md#6-setting-up-the-radios) shows how). Then check the pair on a desk with `python3 -m meshlearn radio-test` ([bench test](docs/hardware.md#7-bench-test-with-two-radios)).
 3. **Teacher hub:** plug a radio into the laptop by USB and run:
    ```bash
    pip install meshtastic
-   python3 -m meshlearn hub --radio-serial /dev/ttyUSB0      # Windows: --radio-serial COM3
+   python3 -m meshlearn hub --radio-serial /dev/ttyUSB0 --radio-channel 3      # Windows: --radio-serial COM3
    ```
    Open http://localhost:8000. On the **Phones** page, add each community phone by its radio node id (for example `!a1b2c3d4`). Phones also register themselves the first time they check in.
    Add `--host 0.0.0.0` if phones will copy assignments from this laptop over school Wi-Fi.
 4. **Student phone:** follow [docs/android-setup.md](docs/android-setup.md) to install Termux, put the data on the microSD card, connect the phone to its radio over Wi-Fi, and start:
    ```bash
-   python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-host 192.168.43.20
+   python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-host 192.168.43.20 --radio-channel 3
    ```
 5. **Load the assignments** while the phone is at school. Either way puts a copy of every assignment on the phone with no radio traffic:
    - **School Wi-Fi:** open `http://localhost:8080/status` in the phone's browser and enter the hub's address.
@@ -218,7 +218,7 @@ Moving a due date or hiding an assignment is always 1 packet.
 
 - **Stored copies stay in step.** Every assignment carries a version stamp computed from its content. Phones report their versions when they check in. The hub sends a full copy only when a phone's copy is missing or out of date, including after an edit. If an open message reaches a phone without the right copy, the phone asks for it.
 - **Answers are graded against what the student saw.** Each submission records the version it was written against, and the hub keeps every version.
-- **Small packets.** Each message is compressed with zlib using a shared dictionary of words common in assignments, so short messages compress well. It is then split into 228-byte frames, under Meshtastic's 233-byte limit. Assignments use a compact format with short field names, and defaults are left out.
+- **Small packets.** Each message is compressed with zlib using a shared dictionary of words common in assignments, so short messages compress well. It is then split into 219-byte frames. Meshtastic advertises 233 bytes, but current firmware keeps 12 for encryption and silently drops anything over 219, as a test with two real radios showed. Assignments use a compact format with short field names, and defaults are left out.
 - **Only lost pieces are resent.** When a burst ends with pieces missing, the receiver asks for exactly those. If the sender hears nothing, it sends one probe packet instead of the whole message. At 20% packet loss, a 10-packet message costs about 13 transmissions this way, compared with about 90 if the whole message were resent.
 - **Nothing is lost.** Every outgoing message is written to SQLite before it is sent. Retries back off from 30 s up to 10 min on real radios. If a phone reboots or the link is down for days, the queue picks up where it left off.
 - **No duplicates.** The receiver remembers which messages it has handled. It re-acknowledges a repeat without acting on it twice.
@@ -240,6 +240,7 @@ meshlearn/
   protocol.py        message format: dictionary compression, framing, missing-piece reports
   transport.py       simulated radio (UDP) and real Meshtastic radios (USB or Wi-Fi)
   messenger.py       store-and-forward delivery: acks, selective resend, de-duplication
+  radiotest.py       bench test for two real radios on one computer (radio-test)
   assignments.py     question types, compact format, version stamps, answer checking, grading
   courses.py         courses and numbered units; courses.json holds the starter courses
   comprehension.py   scores per unit and course, mistake kinds, timing signals (sandbox rules)
@@ -295,11 +296,12 @@ End-to-end tests run through both websites:
 Tested:
 
 - Everything above, on Python 3.9 on macOS, using the simulated radio.
+- **Real Meshtastic radios on a desk.** A RAK4631 and a Wio Tracker L1, 1 m apart, ran the hub and phone through a full cycle with no resends. See the [bench test](docs/hardware.md#7-bench-test-with-two-radios).
 - The library fetcher's live lookups against the Kiwix catalog and Project Gutenberg, and a real download.
 
 Not yet tested:
 
-- **Real Meshtastic radios.** `MeshtasticTransport` follows the Meshtastic Python API but has not been run against hardware.
+- **Radios over Wi-Fi.** The phone talks to its radio over Wi-Fi (`--radio-host`); the bench test used USB only.
 - **Termux on Android.** The steps in the setup guide have not been run on a phone yet.
 - **Airtime and range at the pilot site.** Field testing will set the retry timing and the submission batch window, which defaults to 120 s. It will also show how many relays a site needs.
 
