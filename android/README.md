@@ -52,12 +52,15 @@ Install `meshtastic` first (as in `requirements-radio.txt`) to include its proto
   assignments from a Python hub, keeps its data on the (emulated) memory card, and the setup screen
   and in-app browser lay out correctly edge to edge.
 
-- Android 7 compatibility, checked statically: every platform call newer than Android 7.0 (API 24)
-  sits behind a version check, and lint checks `core` too (`checkDependencies`). This caught one real
-  crash: `java.util.Base64` (Android 8+) in the shared dictionary, now hex.
+- Android 7.0 (API 24), on an emulator sized like an old phone (1 GB RAM, 720×1280, memory card):
+  the same checks pass, including building and queueing a compressed radio message. Every platform call
+  newer than API 24 sits behind a version check, and lint checks `core` too (`checkDependencies`).
+  This found one real crash on Android 7: `java.util.Base64` (Android 8+) in the shared dictionary,
+  now hex.
 
 ## Not yet tested
 
 - On a real Android phone and with real radios over Bluetooth: the Bluetooth code follows Meshtastic's
   documented BLE API but has not talked to a radio yet. The Wi-Fi radio option is the fallback.
-- Android 7 phones specifically (the app targets Android 7.0 and newer).
+- Real old phones: makers' battery savers that stop background apps (set the app to "unrestricted"),
+  slow memory cards, and Bluetooth on old chipsets. Android 7.0 is the oldest version supported.
