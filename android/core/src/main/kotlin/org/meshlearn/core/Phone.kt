@@ -12,7 +12,8 @@ import java.util.logging.Logger
 /**
  * The student phone: hosts assignments and the offline library over Wi-Fi, keeps every
  * assignment it is given, and batches students' work onto the radio. A port of phone.py;
- * the pages, messages and database match the Python phone.
+ * the pages, messages and database match the Python phone. Every word students see comes
+ * from the school's language ([Strings]), which arrives with the course pack.
  */
 class Phone(
     val dataDir: File,
@@ -34,11 +35,16 @@ class Phone(
     private val flushLock = Object()
     @Volatile private var flushNow = false
     @Volatile private var running = false
+    @Volatile var school: Strings = Strings.ENGLISH
+        private set
+    @Volatile var languages: Map<String, Strings> = mapOf(school.code to school)
+        private set
 
     init {
         dataDir.mkdirs()
         installStarterLibrary()
         db = makeDb(File(dataDir, "phone.db"), SCHEMA)
+        loadLanguage()
         messenger = messengerFactory(::onMessage)
         loadPackFolder()
         routes()
@@ -58,7 +64,8 @@ class Phone(
         messenger.stop()
     }
 
-    private fun flush() = synchronized(flushLock) { flushNow = true; flushLock.notifyAll() }
+    /** Batch students' saved work into a radio message now instead of waiting. */
+    fun flush() = synchronized(flushLock) { flushNow = true; flushLock.notifyAll() }
 
     private fun installStarterLibrary() {
         val target = File(libraryDir, "starter")
@@ -81,6 +88,38 @@ class Phone(
             "sw" to VERSION, "inv" to inventory(),
         ))
     }
+
+    // -- language -------------------------------------------------------------
+
+    private fun loadLanguage() {
+        val data = db.one("SELECT value FROM settings WHERE key = 'language'")?.str("value")?.let {
+            try { Json.parse(it).asMap() } catch (e: Exception) { null }
+        } ?: emptyMap()
+        val first = Strings(data["school"].asMap())
+        val all = linkedMapOf(first.code to first)
+        val second = data["second"].asMap()
+        val secondCode = second?.get("code") as? String
+        if (second != null && !secondCode.isNullOrEmpty() && secondCode != first.code) {
+            val other = Strings(second)
+            all[other.code] = other
+        }
+        school = first
+        languages = all
+    }
+
+    /** Keep the school's words from a course pack. Returns true if they changed. */
+    fun importLanguage(data: Any?): Boolean {
+        val m = data.asMap() ?: return false
+        val first = m["school"].asMap() ?: return false
+        val value = Json.dumps(mapOf("school" to first, "second" to m["second"].asMap()), sortKeys = true)
+        if (db.one("SELECT value FROM settings WHERE key = 'language'")?.str("value") == value) return false
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('language', ?)", value)
+        loadLanguage()
+        return true
+    }
+
+    /** The student's language: the one they switched to, else the school's. */
+    fun words(req: Request): Strings = languages[req.cookies["lang"] ?: ""] ?: school
 
     // -- assignments ----------------------------------------------------------
 
@@ -133,8 +172,16 @@ class Phone(
                 log.warning("skipping unreadable courses.json in the course pack")
             }
         }
+        val languageFile = File(packDir, "language.json")
+        if (languageFile.exists()) {
+            try {
+                importLanguage(Json.parse(languageFile.readText(Charsets.UTF_8)))
+            } catch (e: Exception) {
+                log.warning("skipping unreadable language.json in the course pack")
+            }
+        }
         for (f in (packDir.listFiles() ?: emptyArray()).sortedBy { it.name }) {
-            if (!f.name.endsWith(".json") || f.name == "courses.json") continue
+            if (!f.name.endsWith(".json") || f.name == "courses.json" || f.name == "language.json") continue
             try {
                 val packed = Json.parse(f.readText()).asMap() ?: continue
                 if (importAssignment(packed)) count++
@@ -145,7 +192,7 @@ class Phone(
         return count
     }
 
-    /** Copy every assignment from the teacher hub over Wi-Fi (no radio). */
+    /** Copy every assignment, and the school's words, from the teacher hub over Wi-Fi (no radio). */
     fun syncFromHub(hubUrl: String): Int {
         val url = hubUrl.trimEnd('/') + "/api/pack?node=" + quote(nodeId, "") + "&name=" + quote(name, "")
         val conn = URL(url).openConnection() as HttpURLConnection
@@ -158,6 +205,7 @@ class Phone(
             conn.disconnect()
         }
         importCourses(data["courses"].asList() ?: emptyList())
+        importLanguage(data["language"])
         return (data["assignments"].asList() ?: emptyList()).count { p -> p.asMap()?.let { importAssignment(it) } == true }
     }
 
@@ -284,26 +332,56 @@ class Phone(
             val title = capitalize(f.name.substringBeforeLast('.').replace("_", " ").replace("-", " ").trim())
             val folder = File(rel).parent ?: ""
             items.add(linkedMapOf("title" to title, "file" to rel, "size" to f.length(),
-                "collection" to (if (folder.isNotEmpty()) capitalize(folder) else "Other"), "kind" to ext.removePrefix(".")))
+                "collection" to (if (folder.isNotEmpty()) capitalize(folder) else ""), "kind" to ext.removePrefix(".")))
         }
         return items
     }
 
     // -- web ------------------------------------------------------------------
 
-    private fun nav(req: Request): String {
+    /** Big tabs; the one for this page is highlighted. */
+    private fun nav(req: Request, w: Strings): String {
         val who = req.cookies["student"]
-        var out = "<a href='/'>Courses</a><a href='/library'>Library</a>"
-        if (!who.isNullOrEmpty()) out += "<a href='/results'>My results</a><span class='muted'>Hi, ${esc(who)}</span>"
-        return out
+        val section = when {
+            req.path.startsWith("/library") -> "/library"
+            req.path.startsWith("/results") -> "/results"
+            req.path == "/" || req.path.startsWith("/c/") || req.path.startsWith("/a/") -> "/"
+            else -> ""
+        }
+        val tabs = mutableListOf("/" to w("tab.home"), "/library" to w("tab.library"))
+        if (!who.isNullOrEmpty()) tabs.add("/results" to w("tab.results"))
+        return "<nav class='tabs'>" + tabs.joinToString("") { (href, label) ->
+            "<a href='$href'${if (href == section) " aria-current='page'" else ""}>${esc(label)}</a>"
+        } + "</nav>"
     }
 
-    private fun page(req: Request, title: String, body: String) = Html.page(title, body, nav(req), site = "MeshLearn · $name")
+    /** With a second language, a button in the header switches to the other one. */
+    private fun languageSwitch(req: Request, w: Strings): String {
+        val other = languages.values.firstOrNull { it.code != w.code } ?: return ""
+        val back = req.path + (if (req.query.isEmpty()) "" else
+            "?" + req.query.entries.joinToString("&") { (k, v) -> quote(k, "") + "=" + quote(v, "") })
+        return "<form method='post' action='/lang' class='lang'><input type='hidden' name='to' value='${esc(other.code)}'>" +
+            "<input type='hidden' name='back' value='${esc(back)}'>" +
+            "<button title='${esc(w("lang.switch"))}' lang='${esc(other.tag)}' dir='${other.dir}'>${esc(other.name)}</button></form>"
+    }
+
+    private fun page(req: Request, title: String, body: String): String {
+        val w = words(req)
+        val who = req.cookies["student"]
+        val site = "MeshLearn · $name"
+        val html = Html.page(title, body, languageSwitch(req, w) + nav(req, w), site = site, extraCss = Html.STUDENT_CSS,
+            lang = w.tag, dir = w.dir)
+        // The student's name sits on the right of the header line, so they can see who is signed in.
+        return if (who.isNullOrEmpty()) html
+        else html.replaceFirst("<header><strong>${esc(site)}</strong>",
+            "<header><strong><span>${esc(site)}</span><span class='who'>${esc(who)}</span></strong>")
+    }
 
     private fun routes() {
         app.add("GET", "/", ::home)
         app.add("POST", "/login", ::login)
         app.add("POST", "/logout", ::logout)
+        app.add("POST", "/lang", ::switchLanguage)
         app.add("GET", "/c/<cid>", ::coursePage)
         app.add("GET", "/a/<aid>", ::assignmentForm)
         app.add("POST", "/a/<aid>", ::assignmentSubmit)
@@ -352,6 +430,13 @@ class Phone(
         return tree
     }
 
+    /** A course's title; "Other assignments" in the student's language. */
+    private fun title(course: Map<String, Any?>, w: Strings): String =
+        if (course["id"] == "") w("course.other.title") else course["title"].toString()
+
+    private fun description(course: Map<String, Any?>, w: Strings): String =
+        if (course["id"] == "") w("course.other.description") else (course["description"]?.toString() ?: "")
+
     private fun assignmentsIn(courseId: String, openOnly: Boolean = true): List<MutableMap<String, Any?>> {
         val rows = db.all("SELECT id FROM assignments" + (if (openOnly) " WHERE open = 1" else "") +
             " ORDER BY due = '', due, received DESC")
@@ -375,26 +460,30 @@ class Phone(
         return out
     }
 
-    private fun level(level: String, score: Long?): String {
+    private fun level(level: String, score: Long?, w: Strings): String {
         val cls = mapOf("Strong" to "good", "Good" to "good", "Developing" to "warn", "Needs work" to "bad")[level] ?: ""
-        return "<span class='pill $cls'>${esc(level)}${if (score == null) "" else " · $score%"}</span>"
+        return "<span class='pill $cls'>${esc(w.level(level))}${if (score == null) "" else " · $score%"}</span>"
     }
 
-    private fun questionCount(a: Map<String, Any?>) = Assignments.questions(a).size
-
-    private fun assignmentCard(a: Map<String, Any?>, sub: Row?): String {
-        val state = when {
-            sub == null -> "<span class='pill'>To do</span>"
-            sub["score"] == null -> "<span class='pill warn'>Turned in · waiting for grade</span>"
+    /** One assignment as a card that opens it: what it is, when it is due, and what to do next. */
+    private fun assignmentCard(a: Map<String, Any?>, sub: Row?, w: Strings, courseTitle: String = ""): String {
+        val practice = a["mode"] == "practice"
+        val (state, action) = when {
+            sub == null -> "" to (if (practice) w("card.practice") else w("card.start"))
+            practice -> "<span class='pill good'>${esc(w("card.practiced"))}</span>" to w("card.practice_again")
+            sub["score"] == null -> "<span class='pill warn'>${esc(w("card.waiting"))}</span>" to ""
             (sub.long("complete") ?: 0L) == 0L ->
-                "<span class='pill warn'>${g(sub.double("score"))} / ${g(sub.double("max"))} so far · teacher still grading</span>"
-            else -> "<span class='pill good'>Score ${g(sub.double("score"))} / ${g(sub.double("max"))}</span>"
+                "<span class='pill warn'>${esc(w("card.so_far", "score" to g(sub.double("score")), "max" to g(sub.double("max"))))}</span>" to ""
+            else -> "<span class='pill good'>${esc(w("card.score", "score" to g(sub.double("score")), "max" to g(sub.double("max"))))}</span>" to ""
         }
-        val due = if (truthy(a["due"])) " · due ${esc(a["due"])}" else ""
-        val n = questionCount(a)
-        return "<div class='card'><h3 style='margin:0 0 4px'><a href='/a/${esc(a["id"])}'>${esc(a["title"])}</a></h3>" +
-            "<p class='muted' style='margin:0 0 8px'>$n question${if (n == 1) "" else "s"}$due" +
-            "${if (a["mode"] == "practice") " · practice" else ""}</p>$state</div>"
+        val qs = Assignments.questions(a)
+        val meta = listOfNotNull(courseTitle.ifEmpty { null }, w.n("card.questions", qs.size), Html.minutesFor(qs, w),
+            if (practice) w("card.practice_tag") else null).joinToString(" · ")
+        val (dueText, dueCls) = Html.dueLabel(a["due"]?.toString(), turnedIn = sub != null, words = w)
+        val due = if (dueText.isNotEmpty()) "<p class='due $dueCls'>${esc(dueText)}</p>" else ""
+        val go = if (action.isNotEmpty()) "<span class='button go'>${esc(action)}</span>" else ""
+        return "<a class='card task' href='/a/${esc(a["id"])}'><h3>${esc(a["title"])}</h3>" +
+            "<p class='meta'>${esc(meta)}</p>$due$state$go</a>"
     }
 
     private fun myLatest(student: String): Map<String, Row> = db.all(
@@ -404,47 +493,59 @@ class Phone(
     private fun student(req: Request): String? = req.cookies["student"]?.takeIf { it.isNotEmpty() }
 
     fun home(req: Request): Response {
+        val w = words(req)
         val student = student(req)
         if (student == null) {
-            val body = "<div class='card'><p>Welcome! Type your name so your teacher knows whose work this is.</p>" +
-                "<form method='post' action='/login'><label for='student'>Your name</label>" +
+            val link = "<a href='/library'>${esc(w("welcome.library"))}</a>"
+            val body = "<p class='lead'>${esc(w("welcome.lead"))}</p>" +
+                "<form method='post' action='/login' class='card'><label for='student'>${esc(w("welcome.name"))}</label>" +
                 "<input type='text' id='student' name='student' maxlength='40' autocomplete='name' required>" +
-                "<button>Start</button></form></div>" +
-                "<p>Or go straight to the <a href='/library'>library</a>.</p>"
-            return Response(page(req, "Welcome", body))
+                "<button class='big'>${esc(w("welcome.start"))}</button></form>" +
+                "<p>${w.html("welcome.just_read", "link" to link)}</p>"
+            return Response(page(req, w("welcome.title"), body))
         }
         val mine = myLatest(student)
         val records = myRecords(student)
         val cards = StringBuilder()
-        val todo = ArrayList<Map<String, Any?>>()
+        val todo = ArrayList<Pair<Map<String, Any?>, String>>()
         for (course in courseTree()) {
             val openItems = assignmentsIn(course["id"].toString())
             if (course["id"] == "" && openItems.isEmpty()) continue
-            todo += openItems.filter { it["id"] !in mine }
+            val courseTitle = title(course, w)
+            todo += openItems.filter { it["id"] !in mine }.map { it to courseTitle }
             if (truthy(course["comingSoon"])) {
-                cards.append("<div class='card' style='opacity:.6'><h2 style='margin-top:0'>${esc(course["title"])}</h2>" +
-                    "<p class='muted'>${esc(course["description"] ?: "")}</p><span class='pill'>Coming later</span></div>")
+                cards.append("<div class='card' style='opacity:.6'><h2 style='margin-top:0'>${esc(courseTitle)}</h2>" +
+                    "<p class='muted'>${esc(description(course, w))}</p><span class='pill'>${esc(w("course.coming_later"))}</span></div>")
                 continue
             }
             val summary = Comprehension.summarize(records, course)
-            val left = openItems.count { it["id"] !in mine }
+            val done = openItems.count { it["id"] in mine }
             val href = esc(course["id"]).ifEmpty { "_other" }
-            cards.append("<div class='card'><h2 style='margin-top:0'><a href='/c/$href'>${esc(course["title"])}</a></h2>" +
-                "<p class='muted'>${esc(course["description"] ?: "")}</p>" +
-                "<p>${openItems.size} open · $left to do</p>${level(summary.level, summary.score)}</div>")
+            val progress = if (openItems.isEmpty()) "<p class='meta'>${esc(w("course.nothing_now"))}</p>" else {
+                val pct = done * 100 / openItems.size
+                val doneText = esc(w("course.done", "done" to done, "total" to openItems.size))
+                "<div class='bar' role='img' aria-label='$doneText'><span style='width:$pct%'></span></div>" +
+                    "<p class='meta'>$doneText</p>"
+            }
+            cards.append("<a class='card' href='/c/$href'><h2>${esc(courseTitle)}</h2>" +
+                "<p class='muted'>${esc(description(course, w))}</p>$progress${level(summary.level, summary.score, w)}</a>")
         }
-        val todoHtml = if (todo.isNotEmpty()) "<h2>To do</h2>" + todo.take(5).joinToString("") { assignmentCard(it, null) } else ""
-        val body = todoHtml + "<h2>Your courses</h2>" +
-            (if (cards.isNotEmpty()) "<div class='grid'>$cards</div>" else "<p class='muted'>No courses yet. Your teacher will send them.</p>") +
-            "<form method='post' action='/logout'><button class='secondary'>Not you? Change name</button></form>"
-        return Response(page(req, "Hi, $student", body))
+        val lead = if (todo.isEmpty()) w("home.caught_up") else w.n("home.todo", todo.size)
+        val todoHtml = if (todo.isEmpty()) "" else "<h2>${esc(w("home.todo_heading"))}</h2>" +
+            todo.take(5).joinToString("") { (a, course) -> assignmentCard(a, null, w, course) } +
+            (if (todo.size > 5) "<p class='meta'>${esc(w("home.more", "n" to todo.size - 5))}</p>" else "")
+        val body = "<p class='lead'>${esc(lead)}</p>" + todoHtml + "<h2>${esc(w("home.courses"))}</h2>" +
+            (if (cards.isNotEmpty()) "<div class='grid'>$cards</div>" else "<p class='muted'>${esc(w("home.no_courses"))}</p>") +
+            "<form method='post' action='/logout'><button class='secondary'>${esc(w("home.change_name"))}</button></form>"
+        return Response(page(req, w("home.title", "name" to student), body))
     }
 
     fun coursePage(req: Request): Response {
+        val w = words(req)
         val student = student(req) ?: return Response.redirect("/")
         val cid = if (req.params["cid"] == "_other") "" else req.params["cid"] ?: ""
         val course = courseTree().firstOrNull { it["id"] == cid }
-            ?: return Response(page(req, "Not found", "<p>That course is not on this phone.</p>"), 404)
+            ?: return Response(page(req, w("notfound.title"), "<p>${esc(w("course.not_here"))}</p>"), 404)
         val mine = myLatest(student)
         val summary = Comprehension.summarize(myRecords(student), course)
         val byUnit = summary.units.associateBy { it.id }
@@ -455,19 +556,20 @@ class Phone(
             val inUnit = items.filter { (it["unit"] ?: "") == unit["id"] }
             val u = byUnit[unit["id"]]
             val read = (unit["read"]?.toString()?.ifEmpty { null } ?: unit["title"].toString())
-            sections.append("<h2>Unit ${i + 1}: ${esc(unit["title"])} ${level(u?.level ?: "Not started", u?.score)}</h2>" +
-                (inUnit.joinToString("") { assignmentCard(it, mine[it["id"]]) }.ifEmpty { "<p class='muted'>Nothing open in this unit right now.</p>" }) +
-                "<p><a href='/library?q=${quote(read)}'>Find readings in the library</a></p>")
+            sections.append("<h2>${esc(w("course.unit", "n" to i + 1, "title" to unit["title"]))} ${level(u?.level ?: "Not started", u?.score, w)}</h2>" +
+                (inUnit.joinToString("") { assignmentCard(it, mine[it["id"]], w) }
+                    .ifEmpty { "<p class='muted'>${esc(w("course.nothing_in_unit"))}</p>" }) +
+                "<p><a class='button secondary' href='/library?q=${quote(read)}'>${esc(w("course.find_readings"))}</a></p>")
         }
         val unitIds = units.map { it["id"] }.toSet()
         val loose = items.filter { (it["unit"] ?: "") !in unitIds }
         if (loose.isNotEmpty()) {
-            sections.append((if (units.isEmpty()) "<h2>Assignments</h2>" else "<h2>Other assignments</h2>") +
-                loose.joinToString("") { assignmentCard(it, mine[it["id"]]) })
+            val heading = if (units.isEmpty()) w("course.assignments") else w("course.other_assignments")
+            sections.append("<h2>${esc(heading)}</h2>" + loose.joinToString("") { assignmentCard(it, mine[it["id"]], w) })
         }
-        val body = "<p class='muted'>${esc(course["description"] ?: "")}</p>" +
-            "<p>Your level in this course: ${level(summary.level, summary.score)}</p>$sections"
-        return Response(page(req, course["title"].toString(), body))
+        val body = "<p class='muted'>${esc(description(course, w))}</p>" +
+            "<p>${w.html("course.your_level", "level" to level(summary.level, summary.score, w))}</p>$sections"
+        return Response(page(req, title(course, w), body))
     }
 
     fun login(req: Request): Response {
@@ -478,47 +580,72 @@ class Phone(
 
     fun logout(req: Request): Response = Response.redirect("/").setCookie("student", "", maxAge = 0)
 
-    private fun renderForm(a: Map<String, Any?>, values: Map<String, String>, errors: Map<String, String>): String {
+    fun switchLanguage(req: Request): Response {
+        var back = req.form["back"] ?: "/"
+        if (!back.startsWith("/") || back.startsWith("//")) back = "/"
+        val code = req.form["to"] ?: ""
+        val response = Response.redirect(back)
+        return if (code in languages) response.setCookie("lang", code) else response
+    }
+
+    /**
+     * The assignment as a list of question cards, with big choices, a character count on written
+     * answers, and a bar at the bottom saying how many are answered. Answers are kept in the browser
+     * while the student works (ASSIGNMENT_JS), keyed by student and assignment.
+     */
+    private fun renderForm(req: Request, a: Map<String, Any?>, student: String, values: Map<String, String>,
+                           errors: Map<String, String>): String {
+        val w = words(req)
         val parts = StringBuilder()
+        val qs = Assignments.questions(a)
+        val n = qs.size
+        val count = w.n("card.questions", n)
         if (truthy(a["instructions"])) parts.append("<div class='card'><p>${esc(a["instructions"])}</p></div>")
-        if (errors.isNotEmpty()) {
-            parts.append("<p class='error' role='alert'>Please fix ${errors.size} answer${if (errors.size > 1) "s" else ""} below.</p>")
-        }
-        parts.append("<form method='post' action='/a/${esc(a["id"])}' novalidate>")
-        Assignments.questions(a).forEachIndexed { idx, q ->
+        parts.append("<p class='meta'>${esc(w("form.meta", "count" to count, "minutes" to Html.minutesFor(qs, w)))}</p>")
+        if (errors.isNotEmpty()) parts.append("<p class='error' role='alert'>${esc(w.n("form.fix", errors.size))}</p>")
+        parts.append("<form id='aform' method='post' action='/a/${esc(a["id"])}' data-key='${esc(student + "|" + a["id"])}' novalidate>")
+        qs.forEachIndexed { idx, q ->
             val i = idx + 1
             val qid = esc(q["id"])
             val value = values[q["id"].toString()] ?: ""
             val err = errors[q["id"].toString()]
-            val errHtml = if (err != null) "<p class='error' id='$qid-err'>${esc(err)}</p>" else ""
+            val errHtml = if (err != null) "<p class='error' id='$qid-err'>${esc(w.error(err))}</p>" else ""
             val described = if (err != null) " aria-describedby='$qid-err' aria-invalid='true'" else ""
-            val pts = " <span class='muted'>(${g((q["points"] as? Number)?.toDouble() ?: 1.0)} pt)</span>"
+            val points = (q["points"] as? Number)?.toDouble() ?: 1.0
+            val pointsText = if (points == 1.0) w("form.points.one") else w("form.points.other", "n" to g(points))
+            val legend = "<legend><span class='qnum'>${esc(w("form.qnum", "i" to i, "n" to n, "points" to pointsText))}</span>" +
+                "${esc(q["prompt"])}</legend>"
+            val cls = if (err != null) "q bad" else "q"
             when (q["type"]) {
                 "choice" -> {
                     val opts = (q["options"].asList() ?: emptyList()).mapIndexed { j, opt ->
-                        "<label class='option'><input type='radio' name='$qid' value='$j'" +
-                            "${if (value == j.toString()) " checked" else ""}$described> ${esc(opt)}</label>"
+                        val on = value == j.toString()
+                        "<label class='option${if (on) " on" else ""}'><input type='radio' name='$qid' value='$j'" +
+                            "${if (on) " checked" else ""}$described> ${esc(opt)}</label>"
                     }.joinToString("")
-                    parts.append("<fieldset><legend>$i. ${esc(q["prompt"])}$pts</legend>$errHtml$opts</fieldset>")
+                    parts.append("<fieldset class='$cls'>$legend$errHtml$opts</fieldset>")
                 }
                 "long" -> {
                     val limit = (q["max_chars"] as? Number)?.toLong() ?: 600L
-                    parts.append("<fieldset><legend>$i. ${esc(q["prompt"])}$pts</legend>$errHtml" +
-                        "<label for='$qid'>Your answer (up to $limit characters)</label>" +
-                        "<textarea id='$qid' name='$qid' maxlength='$limit'$described>${esc(value)}</textarea></fieldset>")
+                    parts.append("<fieldset class='$cls'>$legend$errHtml" +
+                        "<label for='$qid'>${esc(w("form.long", "n" to limit))}</label>" +
+                        "<textarea id='$qid' name='$qid' maxlength='$limit'$described>${esc(value)}</textarea>" +
+                        "<p class='counter' id='$qid-count' aria-live='polite'>${value.length} / $limit</p></fieldset>")
                 }
                 else -> {
                     val number = q["type"] == "number"
                     val mode = if (number) " inputmode='decimal'" else ""
-                    val hint = if (number) "A number, like 12, 3.5, 3,5 or 1/2" else "Short answer"
-                    parts.append("<fieldset><legend>$i. ${esc(q["prompt"])}$pts</legend>$errHtml" +
-                        "<label for='$qid'>$hint</label>" +
+                    val hint = if (number) w("form.number") else w("form.short")
+                    parts.append("<fieldset class='$cls'>$legend$errHtml" +
+                        "<label for='$qid'>${esc(hint)}</label>" +
                         "<input type='text' id='$qid' name='$qid' value='${esc(value)}' maxlength='${Assignments.MAX_TEXT_CHARS}'$mode$described>" +
                         "</fieldset>")
                 }
             }
         }
-        parts.append("<button>Check and submit</button></form>")
+        parts.append("<div class='submitbar'><p class='meta' id='answered' aria-live='polite' " +
+            "data-words='${esc(w("form.answered"))}'>${esc(count)}</p>" +
+            "<button class='big'>${esc(w("form.submit"))}</button></div></form><script>${Html.ASSIGNMENT_JS}</script>")
         return parts.toString()
     }
 
@@ -526,70 +653,83 @@ class Phone(
         getAssignment(req.params["aid"] ?: "")?.takeIf { it["open"] == true }
 
     fun assignmentForm(req: Request): Response {
+        val w = words(req)
         val student = student(req) ?: return Response.redirect("/")
-        val a = openAssignment(req) ?: return Response(page(req, "Not open",
-            "<p>That assignment is not open right now.</p><p><a href='/'>Back to assignments</a></p>"), 404)
+        val a = openAssignment(req) ?: return Response(page(req, w("open.not_title"),
+            "<p>${esc(w("open.not_text"))}</p><p><a href='/'>${esc(w("open.back"))}</a></p>"), 404)
         if (a["mode"] != "practice") {
             val done = db.one("SELECT submitted_at FROM submissions WHERE assignment_id = ? AND student = ?", a["id"], student)
             if (done != null) {
-                val body = "<p>You already turned this in on ${Html.whenText(done.double("submitted_at"))}.</p>" +
-                    "<p><a href='/results'>See your results</a></p>"
+                val body = "<div class='card'><p>${esc(w("open.already", "when" to w.whenText(done.double("submitted_at"))))}</p></div>" +
+                    "<a class='button big' href='/results'>${esc(w("open.see_results"))}</a>" +
+                    "<a class='button big secondary' href='/'>${esc(w("nav.back_home"))}</a>"
                 return Response(page(req, a["title"].toString(), body))
             }
         }
         opened(student, a["id"].toString())
-        return Response(page(req, a["title"].toString(), renderForm(a, emptyMap(), emptyMap())))
+        return Response(page(req, a["title"].toString(), renderForm(req, a, student, emptyMap(), emptyMap())))
     }
 
     fun assignmentSubmit(req: Request): Response {
+        val w = words(req)
         val student = student(req) ?: return Response.redirect("/")
         val a = openAssignment(req) ?: return Response.redirect("/")
         val raw = Assignments.questions(a).associate { it["id"].toString() to (req.form[it["id"].toString()] ?: "") }
         val (answers, errors) = Assignments.validateAnswers(a, raw)
-        if (errors.isNotEmpty()) return Response(page(req, a["title"].toString(), renderForm(a, raw, errors)), 400)
+        if (errors.isNotEmpty()) return Response(page(req, a["title"].toString(), renderForm(req, a, student, raw, errors)), 400)
         if (a["mode"] != "practice" &&
             db.one("SELECT 1 AS x FROM submissions WHERE assignment_id = ? AND student = ?", a["id"], student) != null) {
             return Response.redirect("/results")
         }
         submit(a, student, answers)
+        // Turned in: forget the draft the browser kept while the student worked.
+        val clearDraft = "<div id='clear-draft' data-key='${esc(student + "|" + a["id"])}'></div><script>${Html.CLEAR_DRAFT_JS}</script>"
         if (a["mode"] == "practice") {
             val feedback = Assignments.practiceFeedback(a, answers)
             val items = Assignments.questions(a).joinToString("") { q ->
                 val ok = feedback[q["id"].toString()]
                 val mark = when (ok) {
-                    true -> "<span class='good'>Correct</span>"
-                    false -> "<span class='bad'>Not quite</span>"
-                    null -> "<span class='muted'>Your teacher will read this one</span>"
+                    true -> "<span class='good'>${esc(w("practice.correct"))}</span>"
+                    false -> "<span class='bad'>${esc(w("practice.not_quite"))}</span>"
+                    null -> "<span class='muted'>${esc(w("practice.teacher_reads"))}</span>"
                 }
                 "<li>${esc(q["prompt"])}: $mark</li>"
             }
             val right = feedback.values.count { it == true }
             val checked = feedback.values.count { it != null }
-            val body = "<p>You got <strong>$right</strong> of $checked auto-checked questions right.</p><ol>$items</ol>" +
-                "<a class='button' href='/a/${esc(a["id"])}'>Try again</a><a class='button secondary' href='/'>Back</a>"
-            return Response(page(req, "Practice results", body))
+            val body = "<div class='card'><p class='grade'>${esc(w("practice.right", "right" to right, "checked" to checked))}</p>" +
+                "<p class='meta'>${esc(w("practice.note"))}</p><ol>$items</ol></div>" +
+                "<a class='button big' href='/a/${esc(a["id"])}'>${esc(w("practice.try_again"))}</a>" +
+                "<a class='button big secondary' href='/'>${esc(w("nav.back_home"))}</a>" + clearDraft
+            return Response(page(req, w("practice.title"), body))
         }
-        val body = "<div class='card'><p class='good'><strong>Done! Your work is saved on this phone.</strong></p>" +
-            "<p>It will reach your teacher over the radio. That can take a while, and you do not need to wait here.</p></div>" +
-            "<a class='button' href='/'>Back to assignments</a>"
-        return Response(page(req, "Submitted", body))
+        val body = "<div class='card'><p class='good grade'>${esc(w("submitted.done"))}</p>" +
+            "<p>${esc(w("submitted.radio"))}</p>" +
+            "<p class='meta'>${esc(w("submitted.later"))}</p></div>" +
+            "<a class='button big' href='/'>${esc(w("nav.back_home"))}</a>" + clearDraft
+        return Response(page(req, w("submitted.title"), body))
     }
 
     fun results(req: Request): Response {
+        val w = words(req)
         val student = student(req) ?: return Response.redirect("/")
         val out = StringBuilder()
         for (s in db.all("SELECT * FROM submissions WHERE student = ? ORDER BY submitted_at DESC", student)) {
             val title = getAssignment(s.str("assignment_id")!!)?.get("title") ?: s.str("assignment_id")
             val sent = when (messenger.messageStatus(s.long("msg_id"))) {
-                "acked" -> "reached your teacher"; "pending" -> "on its way"; "failed" -> "could not be sent"
-                else -> "saved, sending soon"
+                "acked" -> "<span class='pill good'>${esc(w("results.acked"))}</span>"
+                "pending" -> "<span class='pill warn'>${esc(w("results.pending"))}</span>"
+                "failed" -> "<span class='pill bad'>${esc(w("results.failed"))}</span>"
+                else -> "<span class='pill'>${esc(w("results.saved"))}</span>"
             }
             val grade = when {
-                s["score"] == null -> "Not graded yet"
-                (s.long("complete") ?: 0L) != 0L -> "<strong>${g(s.double("score"))} / ${g(s.double("max"))}</strong>"
-                else -> "${g(s.double("score"))} / ${g(s.double("max"))} so far (teacher still grading)"
+                s["score"] == null -> "<p class='meta'>${esc(w("results.not_graded"))}</p>"
+                (s.long("complete") ?: 0L) != 0L -> "<p class='grade'>${g(s.double("score"))} / ${g(s.double("max"))}</p>"
+                else -> "<p class='grade'>${esc(w("results.so_far", "score" to g(s.double("score")), "max" to g(s.double("max"))))}</p>" +
+                    "<p class='meta'>${esc(w("results.still_grading"))}</p>"
             }
-            out.append("<tr><td>${esc(title)}</td><td>${Html.whenText(s.double("submitted_at"))}</td><td>$sent</td><td>$grade</td></tr>")
+            out.append("<div class='card'><h3 style='margin:0'>${esc(title)}</h3>" +
+                "<p class='meta'>${esc(w("results.turned_in", "when" to w.whenText(s.double("submitted_at"))))}</p>$grade$sent</div>")
         }
         val records = myRecords(student)
         val progress = StringBuilder()
@@ -597,53 +737,55 @@ class Phone(
             val summary = Comprehension.summarize(records, course)
             if (summary.answered == 0) continue
             val units = summary.units.filter { it.answered > 0 }
-                .joinToString("") { "<li>Unit ${it.number}: ${esc(it.title)} ${level(it.level, it.score)}</li>" }
-            progress.append("<div class='card'><h3 style='margin-top:0'>${esc(course["title"])} " +
-                "${level(summary.level, summary.score)}</h3><ul>$units</ul></div>")
+                .joinToString("") { "<li>${esc(w("course.unit", "n" to it.number, "title" to it.title))} ${level(it.level, it.score, w)}</li>" }
+            progress.append("<div class='card'><h3 style='margin:0'>${esc(title(course, w))} " +
+                "${level(summary.level, summary.score, w)}</h3><ul class='units'>$units</ul></div>")
         }
-        val body = (if (progress.isNotEmpty()) "<h2>How you are doing</h2>$progress" else "") +
-            "<h2>Everything you turned in</h2>" +
-            (if (out.isNotEmpty()) "<table><tr><th>Assignment</th><th>Turned in</th><th>Delivery</th><th>Grade</th></tr>$out</table>"
-            else "<p class='muted'>Nothing turned in yet.</p>")
-        return Response(page(req, "My results", body))
+        val body = (if (progress.isNotEmpty()) "<h2>${esc(w("results.how"))}</h2>$progress" else "") +
+            "<h2>${esc(w("results.everything"))}</h2>" +
+            (if (out.isNotEmpty()) out.toString() else "<p class='muted'>${esc(w("results.nothing"))}</p>")
+        return Response(page(req, w("results.title"), body))
     }
 
     fun library(req: Request): Response {
+        val w = words(req)
         val query = (req.query["q"] ?: "").trim().lowercase()
         var items = libraryItems()
         if (query.isNotEmpty()) {
             items = items.filter { query in ("${it["title"] ?: ""} ${it["collection"] ?: ""}").lowercase() }.toMutableList()
         }
         val groups = sortedMapOf<String, MutableList<Map<String, Any?>>>()
-        for (item in items) groups.getOrPut(item["collection"]?.toString()?.ifEmpty { null } ?: "Other") { ArrayList() }.add(item)
+        for (item in items) groups.getOrPut(item["collection"]?.toString()?.ifEmpty { null } ?: w("library.other")) { ArrayList() }.add(item)
         val sections = StringBuilder()
         for ((group, entries) in groups) {
             val rows = StringBuilder()
             for (item in entries) {
                 val file = item["file"].toString()
-                val href = "/library/files/" + quote(file.replace(File.separatorChar, '/'))
-                var link = "<a href='$href'>${esc(item["title"])}</a>"
+                var href = "/library/files/" + quote(file.replace(File.separatorChar, '/'))
                 var note = ""
                 if (item["kind"] == "zim") {
                     val book = File(file).name.substringBeforeLast('.')
-                    if (kiwixUrl.isNotEmpty()) link = "<a href='${esc(kiwixUrl)}/content/${quote(book)}'>${esc(item["title"])}</a>"
-                    else note = " <span class='muted'>· open with the Kiwix app</span>"
+                    if (kiwixUrl.isNotEmpty()) href = "${esc(kiwixUrl)}/content/${quote(book)}"
+                    else note = " · " + w("library.kiwix")
                 }
-                rows.append("<tr><td>$link$note</td><td class='muted'>${esc(item["kind"] ?: "")}</td>" +
-                    "<td class='muted'>${Html.size((item["size"] as? Number)?.toDouble() ?: 0.0)}</td></tr>")
+                val kind = KIND_KEYS[item["kind"]?.toString() ?: ""]?.let { w(it) } ?: (item["kind"]?.toString() ?: "")
+                rows.append("<a class='card item' href='$href'><strong>${esc(item["title"])}</strong>" +
+                    "<span class='meta' style='display:block'>${esc(kind)} · ${Html.size((item["size"] as? Number)?.toDouble() ?: 0.0)}${esc(note)}</span></a>")
             }
-            sections.append("<h2>${esc(group)}</h2><table>$rows</table>")
+            sections.append("<h2>${esc(group)}</h2>$rows")
         }
-        val search = "<form method='get' action='/library'><label for='q'>Search the library</label>" +
-            "<input type='text' id='q' name='q' value='${esc(query)}'><button>Search</button></form>"
-        return Response(page(req, "Library", search + sections.ifEmpty { "<p class='muted'>Nothing found.</p>" }))
+        val search = "<label for='q'>${esc(w("library.search_label"))}</label><form method='get' action='/library' class='search'>" +
+            "<input type='text' id='q' name='q' value='${esc(query)}'><button>${esc(w("library.search"))}</button></form>" +
+            (if (query.isNotEmpty()) "<p class='meta'>${esc(w("library.showing", "q" to query))} <a href='/library'>${esc(w("library.show_all"))}</a></p>" else "")
+        return Response(page(req, w("library.title"), search + sections.ifEmpty { "<p class='muted'>${esc(w("library.nothing"))}</p>" }))
     }
 
     fun libraryFile(req: Request): Response {
         val root = libraryDir.canonicalFile
         val target = File(root, req.params["path"] ?: "").canonicalFile
         if (!target.path.startsWith(root.path + File.separator) || !target.isFile) {
-            return Response(page(req, "Not found", "<p>That file is not in the library.</p>"), 404)
+            val w = words(req)
+            return Response(page(req, w("notfound.title"), "<p>${esc(w("library.no_file"))}</p>"), 404)
         }
         return Response.file(target)
     }
@@ -654,49 +796,51 @@ class Phone(
     private fun isAdmin(req: Request): Boolean = req.isLocal || (adminPin.isNotEmpty() && req.form["pin"] == adminPin)
 
     fun status(req: Request, notice: String = ""): Response {
+        val w = words(req)
         val q = messenger.status()
         val held = db.one("SELECT COUNT(*) AS n, SUM(open) AS o FROM assignments")
         val waiting = db.one("SELECT COUNT(*) AS n FROM submissions WHERE msg_id IS NULL")?.long("n") ?: 0
         fun pinField(id: String) = if (adminPin.isEmpty()) "" else
-            "<label for='$id'>Teacher PIN</label><input type='text' id='$id' name='pin' inputmode='numeric'>"
+            "<label for='$id'>${esc(w("status.pin"))}</label><input type='text' id='$id' name='pin' inputmode='numeric'>"
+        val names = languages.values.joinToString(" · ") { it.name }
         val body = (if (notice.isNotEmpty()) "<p class='good' role='status'>${esc(notice)}</p>" else "") +
             "<div class='grid'>" +
-            "<div class='card'><div class='stat'>${held?.long("n") ?: 0}</div>assignments stored (${held?.long("o") ?: 0} open)</div>" +
-            "<div class='card'><div class='stat'>$waiting</div>submissions waiting to be batched</div>" +
-            "<div class='card'><div class='stat'>${q["pending"]}</div>messages waiting for the radio" +
-            "<div class='muted'>${q["frames_sent"]} radio packets sent since start</div></div>" +
-            "<div class='card'><div class='stat'>${Html.size(dataDir.usableSpace.toDouble())}</div>free on the card</div></div>" +
-            "<h2>Copy assignments from the teacher (no radio)</h2>" +
+            "<div class='card'><div class='stat'>${held?.long("n") ?: 0}</div>${esc(w("status.stored", "n" to (held?.long("o") ?: 0)))}</div>" +
+            "<div class='card'><div class='stat'>$waiting</div>${esc(w("status.waiting"))}</div>" +
+            "<div class='card'><div class='stat'>${q["pending"]}</div>${esc(w("status.radio"))}" +
+            "<div class='muted'>${esc(w("status.packets", "n" to q["frames_sent"]))}</div></div>" +
+            "<div class='card'><div class='stat'>${Html.size(dataDir.usableSpace.toDouble())}</div>${esc(w("status.free"))}</div></div>" +
+            "<p>${esc(w("status.language", "name" to names))}</p>" +
+            "<h2>${esc(w("status.copy_heading"))}</h2>" +
             "<form method='post' action='/status/sync' class='card'>" +
-            "<p>When this phone is on the same Wi-Fi as the teacher's laptop, copy every assignment at once.</p>" +
-            "<label for='hub_url'>Teacher hub address</label>" +
-            "<input type='text' id='hub_url' name='hub_url' placeholder='http://192.168.1.20:8000' required>" +
-            "${pinField("pin-sync")}<button>Copy assignments</button></form>" +
+            "<p>${esc(w("status.copy_text"))}</p>" +
+            "<label for='hub_url'>${esc(w("status.hub_address"))}</label>" +
+            "<input type='text' id='hub_url' name='hub_url' placeholder='http://192.168.1.20:8000' dir='ltr' required>" +
+            "${pinField("pin-sync")}<button>${esc(w("status.copy_button"))}</button></form>" +
             "<form method='post' action='/status/reload' class='card'>" +
-            "<p>Copied a course pack onto the memory card? Load it now.</p>" +
-            "${pinField("pin-reload")}<button class='secondary'>Reload from card</button></form>" +
-            "<p class='muted'>Teacher hub radio: ${esc(hubId)} · this phone's radio: ${esc(nodeId)} · " +
-            "data folder: ${esc(dataDir.path)}</p>"
-        return Response(page(req, "Phone status", body))
+            "<p>${esc(w("status.reload_text"))}</p>" +
+            "${pinField("pin-reload")}<button class='secondary'>${esc(w("status.reload_button"))}</button></form>" +
+            "<p class='muted'>${esc(w("status.footer", "hub" to hubId, "node" to nodeId, "dir" to dataDir.path))}</p>"
+        return Response(page(req, w("status.title"), body))
     }
 
     fun statusSync(req: Request): Response {
-        if (!isAdmin(req)) return status(req, "Only the teacher can do that (open this page on the phone itself, or enter the PIN).")
+        if (!isAdmin(req)) return status(req, words(req)("status.only_teacher"))
         var url = (req.form["hub_url"] ?: "").trim()
         if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://$url"
         val count = try {
             syncFromHub(url)
         } catch (e: Exception) {
-            return status(req, "Could not reach the teacher hub at $url: ${e.message ?: e.javaClass.simpleName}")
+            return status(req, words(req)("status.cant_reach", "url" to url, "error" to (e.message ?: e.javaClass.simpleName)))
         }
-        return status(req, "Copied from the teacher hub: $count new or updated assignments.")
+        return status(req, words(req)("status.copied", "n" to count))
     }
 
     fun statusReload(req: Request): Response {
-        if (!isAdmin(req)) return status(req, "Only the teacher can do that (open this page on the phone itself, or enter the PIN).")
+        if (!isAdmin(req)) return status(req, words(req)("status.only_teacher"))
         val count = loadPackFolder()
         sayHello()
-        return status(req, "Loaded from the card: $count new or updated assignments.")
+        return status(req, words(req)("status.loaded", "n" to count))
     }
 
     companion object {
@@ -704,6 +848,10 @@ class Phone(
         const val MAX_OPEN_S = 6 * 3600.0
         const val MAX_BATCH = 20
         val VIEWABLE = setOf(".html", ".htm", ".txt", ".pdf", ".epub", ".png", ".jpg", ".jpeg", ".svg", ".mp3", ".mp4", ".webm", ".zim")
+        /** Library file types, as the key of the word a student knows. */
+        val KIND_KEYS = mapOf("html" to "kind.page", "htm" to "kind.page", "txt" to "kind.text", "pdf" to "kind.pdf",
+            "epub" to "kind.book", "png" to "kind.picture", "jpg" to "kind.picture", "jpeg" to "kind.picture",
+            "svg" to "kind.picture", "mp3" to "kind.audio", "mp4" to "kind.video", "webm" to "kind.video", "zim" to "kind.encyclopedia")
         val STARTER_FILES = listOf("fractions.html", "photosynthesis.html", "using-this-library.html")
 
         const val SCHEMA = """
@@ -719,7 +867,8 @@ CREATE TABLE IF NOT EXISTS submissions (
 CREATE TABLE IF NOT EXISTS courses (id TEXT PRIMARY KEY, data TEXT NOT NULL, position INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS opens (
     student TEXT NOT NULL, aid TEXT NOT NULL, opened_at REAL NOT NULL, PRIMARY KEY (student, aid)
-)"""
+);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"""
 
         /** Python's str.capitalize(): first letter upper, the rest lower. */
         fun capitalize(s: String) = if (s.isEmpty()) s else s.substring(0, 1).uppercase() + s.substring(1).lowercase()

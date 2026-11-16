@@ -93,6 +93,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(protocol.frame_count(protocol.OPEN, {"a": "a-fractions1", "v": "0123abcd", "o": 1, "d": "2026-11-06"}), 1)
 
 
+class StudentSiteTests(unittest.TestCase):
+    def test_due_dates_in_words(self):
+        from datetime import date
+
+        from meshlearn.web import due_label, minutes_for
+        today = date(2026, 11, 15)
+        self.assertEqual(due_label("2026-11-15", False, today), ("Due today", "soon"))
+        self.assertEqual(due_label("2026-11-16", False, today), ("Due tomorrow", "soon"))
+        self.assertEqual(due_label("2026-11-20", False, today), ("Due Fri, Nov 20", ""))
+        self.assertEqual(due_label("2026-10-16", False, today), ("Overdue · was due Fri, Oct 16", "late"))
+        self.assertEqual(due_label("2026-10-16", True, today), ("Was due Fri, Oct 16", "done"))
+        self.assertEqual(due_label("", False, today), ("", ""))
+        self.assertEqual(minutes_for([{"type": t} for t in ("choice", "number", "number", "long")]), "about 6 min")
+
+
 class AssignmentTests(unittest.TestCase):
     def setUp(self):
         self.a = asg.normalize_assignment(load_sample())
@@ -295,6 +310,9 @@ class EndToEndTests(EndToEndBase):
 
         self.post(self.pport, "/login", {"student": "Ana"})
         self.assertIn("Fractions and plants", self.get(self.pport, "/"))
+        form = self.get(self.pport, f"/a/{aid}")
+        self.assertIn("Question 1 of 5", form)
+        self.assertIn("meshlearn-draft:", form)  # answers are kept in the browser while the student works
         self.assertIn("Please fix", self.post(self.pport, f"/a/{aid}", {"q1": "1"}))
         self.assertIn("Done!", self.post(self.pport, f"/a/{aid}", GOOD_ANSWERS))
 
@@ -790,6 +808,126 @@ class PhoneCourseTests(EndToEndBase):
         self.assertTrue(wait_for(lambda: self.phone.db.one("SELECT complete FROM submissions")["complete"] == 1))
         self.assertIn("How you are doing", self.get(self.pport, "/results"))
         self.assertIn("Strong · 100%", self.get(self.pport, "/c/math"))
+
+
+class LanguageTests(unittest.TestCase):
+    def test_every_language_file_matches_the_english_words(self):
+        from meshlearn import language as lang
+        english = set(lang.keys())
+        for code, pack in lang.bundled().items():
+            with self.subTest(code=code):
+                self.assertEqual(pack["code"], code)
+                self.assertIn(pack["dir"], ("ltr", "rtl"))
+                self.assertEqual(set(pack["strings"]) - english, set())
+                for key, text in pack["strings"].items():
+                    self.assertEqual(lang.check(key, text), "", f"{code} {key}")
+                self.assertEqual(len(pack["lists"]["days"]), 7)
+                self.assertEqual(len(pack["lists"]["months"]), 12)
+
+    def test_words_fall_back_to_english_and_fill_in(self):
+        from datetime import date
+
+        from meshlearn import language as lang
+        from meshlearn.web import due_label, minutes_for
+        partial = lang.Strings({"code": "hau", "name": "Hausa",
+                                "strings": {"tab.home": "Gida", "home.title": "Sannu, {name}", "card.score": "broken {nope}"}})
+        self.assertEqual(partial("tab.home"), "Gida")
+        self.assertEqual(partial("tab.library"), "Library")  # not translated yet: English
+        self.assertEqual(partial("home.title", name="Ada"), "Sannu, Ada")
+        self.assertEqual(partial("card.score", score=3, max=4), "Score 3 / 4")  # a broken translation is ignored
+        self.assertEqual(partial.tag, "ha")
+
+        es = lang.Strings(lang.build_pack("spa"))
+        self.assertEqual(es.n("card.questions", 1), "1 pregunta")
+        self.assertEqual(es.n("card.questions", 5), "5 preguntas")
+        self.assertEqual(due_label("2026-11-20", False, date(2026, 11, 15), words=es), ("Para el vie 20 de nov", ""))
+        self.assertEqual(minutes_for([{"type": "long"}], es), "unos 3 min")
+        self.assertEqual(es.error("Keep this under 600 characters (640 now)."), "Usa menos de 600 caracteres (ahora hay 640).")
+        self.assertEqual(es.level("Needs work"), "Necesita práctica")
+        self.assertEqual(lang.ENGLISH.html("welcome.just_read", link="<a href='/library'>library</a>"),
+                         "Just want to read? Open the <a href='/library'>library</a>.")
+
+        ar = lang.Strings(lang.build_pack("ara"))
+        self.assertEqual((ar.tag, ar.dir), ("ar", "rtl"))
+        self.assertEqual(lang.build_pack("urd")["dir"], "rtl")  # no file yet, still written right to left
+        self.assertEqual(lang.check("home.title", "Habari"), "keep {name}")
+        self.assertIn("remove {x}", lang.check("tab.home", "Home {x}"))
+        self.assertLess(lang.coverage(lang.build_pack("hau", {"tab.home": "Gida"})), 5)
+
+
+class SchoolLanguageTests(EndToEndBase):
+    LOSS = 0.0
+
+    def sync(self):
+        return self.post(self.pport, "/status/sync", {"hub_url": f"127.0.0.1:{self.hport}"})
+
+    def test_school_language_reaches_the_phone_with_the_lessons(self):
+        page = self.get(self.hport, "/language")
+        self.assertIn("Kiswahili", page)
+        self.assertIn("Right to left", page)  # Arabic, Urdu, …
+        self.post(self.hport, "/language", {"lang": "swa"})
+        self.assertEqual(self.hub.setting("lang"), "swa")  # the same setting the card library uses
+        aid = self.hub.create_assignment(load_sample())["id"]
+        self.assertIn("Lugha kwenye simu hii: Kiswahili", self.sync())  # the words came with the lessons
+        welcome = self.get(self.pport, "/")
+        self.assertIn("<html lang='sw'>", welcome)
+        self.assertIn("Andika jina lako", welcome)
+
+        self.hub.set_open(aid, "phone-1", True)
+        self.assertTrue(wait_for(self.phone_open(aid)))
+        self.post(self.pport, "/login", {"student": "Ana"})
+        home = self.get(self.pport, "/")
+        self.assertIn("Habari, Ana", home)
+        self.assertIn("Una kazi 1 ya kufanya.", home)
+        form = self.get(self.pport, f"/a/{aid}")
+        self.assertIn("Swali 1 kati ya 5", form)
+        self.assertIn("data-words='Umejibu {done} kati ya {total}'", form)
+        self.assertIn("Tafadhali jibu swali hili.", self.post(self.pport, f"/a/{aid}", {"q1": "1"}))
+
+        # A teacher fixes a word on the hub. A word that drops its {name} is refused, not sent.
+        saved = self.post(self.hport, "/language/words", {"lang": "swa", "k.tab.home": "Nyumbani", "k.home.title": "Habari"})
+        self.assertIn("keep {name}", saved)
+        self.sync()
+        home = self.get(self.pport, "/")
+        self.assertIn(">Nyumbani<", home)
+        self.assertIn("Habari, Ana", home)
+
+    def test_second_language_switch_and_right_to_left(self):
+        self.post(self.hport, "/language", {"lang": "ara", "lang2": "eng"})
+        self.sync()
+        page = self.get(self.pport, "/")
+        self.assertIn("<html lang='ar' dir='rtl'>", page)
+        self.assertIn("اكتب اسمك", page)
+        self.assertIn("action='/lang'", page)
+        english = self.post(self.pport, "/lang", {"to": "eng", "back": "/library"})
+        self.assertIn("<html lang='en'>", english)
+        self.assertIn("Search the library", english)
+        self.assertIn(">العربية</button>", english)  # the way back
+        # Unknown languages and other sites are ignored.
+        self.assertIn("<html lang='en'>", self.post(self.pport, "/lang", {"to": "xyz", "back": "https://example.org/"}))
+
+    def test_a_language_with_no_file_by_memory_card_and_shared(self):
+        self.post(self.hport, "/language", {"lang": "hau"})  # MeshLearn has no Hausa words yet
+        self.assertIn("not translated into this language yet", self.get(self.hport, "/language"))
+        saved = self.post(self.hport, "/language/words",
+                          {"lang": "hau", "_name": "Hausa", "_dir": "ltr", "k.tab.home": "Gida", "k.welcome.start": "Fara"})
+        self.assertIn("Saved.", saved)
+        with zipfile.ZipFile(io.BytesIO(self.hub.course_pack_zip())) as zf:
+            self.assertIn("assignments/language.json", zf.namelist())
+            zf.extractall(self.phone.data_dir)
+        self.phone.load_pack_folder()
+        welcome = self.get(self.pport, "/")
+        self.assertIn("<html lang='ha'>", welcome)
+        self.assertIn(">Gida<", welcome)
+        self.assertIn(">Fara<", welcome)
+        self.assertIn(">Library<", welcome)  # not translated yet: English
+
+        exported = json.loads(self.get(self.hport, "/language/export/hau"))
+        self.assertEqual(exported["strings"]["tab.home"], "Gida")
+        self.hub.db.execute("DELETE FROM phrases")  # as if on another school's hub
+        result = self.post_json(self.hport, "/api/language/import", exported)
+        self.assertEqual((result["saved"], result["name"]), (2, "Hausa"))
+        self.assertEqual(self.hub.language_pack("hau")["strings"]["welcome.start"], "Fara")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ package org.meshlearn.phone
 
 import android.content.Context
 import android.os.Environment
+import android.os.StatFs
 import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -55,23 +56,69 @@ class Settings(context: Context) {
     var wantRunning: Boolean
         get() = prefs.getBoolean("want_running", false)
         set(v) = prefs.edit().putBoolean("want_running", v).apply()
+    /** Whether first-time setup was finished (phones set up before it existed count as done). */
+    var setupDone: Boolean
+        get() = prefs.getBoolean("setup_done", hubId.isNotBlank())
+        set(v) = prefs.edit().putBoolean("setup_done", v).apply()
+    /** Where MeshLearn keeps its files: CARD, PHONE, or "" (the card when there is one). */
+    var storage: String
+        get() = prefs.getString("storage", "")!!
+        set(v) = prefs.edit().putString("storage", v).apply()
+
+    /** One place MeshLearn can keep its files. [folder] is the MeshLearn folder inside it. */
+    data class Place(val kind: String, val folder: File, val free: Long, val total: Long)
 
     companion object {
+        const val CARD = "card"
+        const val PHONE = "phone"
+
         /**
-         * The MeshLearn folder: on the microSD card when there is one, else internal storage.
-         * Android lets the app use Android/data/org.meshlearn.phone/files on the card without any
-         * permission; a card reader can fill it from a computer.
+         * The memory card and the phone's own storage, whichever this phone has. Both are the app's
+         * folder in Android/data/org.meshlearn.phone/files, which needs no permission and which a
+         * computer can fill: the card in a card reader, the phone's storage over a USB cable.
          */
-        fun dataDir(context: Context): File {
-            val dirs = context.getExternalFilesDirs(null).filterNotNull()
-            val card = dirs.firstOrNull { runCatching { Environment.isExternalStorageRemovable(it) }.getOrDefault(false) }
-            val base = card ?: dirs.firstOrNull() ?: context.filesDir
-            return File(base, "meshlearn").apply { mkdirs() }
+        fun places(context: Context): List<Place> {
+            val out = LinkedHashMap<String, Place>()
+            for (dir in context.getExternalFilesDirs(null).filterNotNull()) {
+                val removable = runCatching { Environment.isExternalStorageRemovable(dir) }.getOrDefault(false)
+                val kind = if (removable) CARD else PHONE
+                if (kind !in out) out[kind] = place(kind, dir)
+            }
+            if (PHONE !in out) out[PHONE] = place(PHONE, context.filesDir)   // no shared storage: the app's private folder
+            return listOf(CARD, PHONE).mapNotNull { out[it] }
         }
+
+        private fun place(kind: String, base: File): Place {
+            val stat = runCatching { StatFs(base.path) }.getOrNull()
+            return Place(kind, File(base, "meshlearn"), stat?.availableBytes ?: 0L, stat?.totalBytes ?: 0L)
+        }
+
+        /** The place in use: the one chosen, else the card when there is one. */
+        fun currentPlace(context: Context): Place {
+            val all = places(context)
+            val chosen = Settings(context).storage
+            return all.firstOrNull { it.kind == chosen } ?: all.firstOrNull { it.kind == CARD } ?: all.first()
+        }
+
+        /** The MeshLearn folder: where students' work, lessons and books are kept. */
+        fun dataDir(context: Context): File = currentPlace(context).folder.apply { mkdirs() }
+
+        /**
+         * This phone's address on its own hotspot, or null when the hotspot looks off. Android
+         * gives apps no reliable way to ask, so this goes by the hotspot's usual network names.
+         */
+        fun hotspotAddress(): String? = runCatching {
+            NetworkInterface.getNetworkInterfaces().toList()
+                .filter { it.isUp && !it.isLoopback && HOTSPOT.any { p -> it.name.startsWith(p) } }
+                .flatMap { iface -> iface.inetAddresses.toList().filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress } }
+                .firstOrNull()
+        }.getOrNull()
+
+        private val HOTSPOT = listOf("ap", "swlan", "softap")
 
         /** The phone's own addresses students can type, hotspot first. */
         fun localAddresses(): List<String> {
-            val preferred = listOf("ap", "swlan", "softap", "wlan")
+            val preferred = HOTSPOT + "wlan"
             return runCatching {
                 NetworkInterface.getNetworkInterfaces().toList()
                     .filter { it.isUp && !it.isLoopback }

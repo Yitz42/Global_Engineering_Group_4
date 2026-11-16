@@ -6,7 +6,10 @@ does in Termux, and talks to the same Python teacher hub, but it can also:
 - reach its LoRa radio over **Bluetooth** directly (Python's Bluetooth library does not run on Android),
   or over Wi-Fi if the radio is on the hotspot;
 - keep running all day with the screen off (a foreground service), and start again after a reboot;
-- keep its data on the microSD card without Termux (Android/data/org.meshlearn.phone/files/meshlearn).
+- keep its data on the microSD card or the phone's own storage, without Termux
+  (Android/data/org.meshlearn.phone/files/meshlearn on either). It uses the card when there is one;
+  the setup screen can switch, moving students' work and lessons (and the books, if there is room)
+  and keeping the old databases as a backup.
 
 Students still use any browser: the phone serves the same pages on its hotspot.
 
@@ -39,11 +42,15 @@ Install `meshtastic` first (as in `requirements-radio.txt`) to include its proto
 
 ## Setting up a phone
 
-1. Install the app, open it, and fill in **Setup**: the phone's name, the teacher hub's radio id
-   (`!a1b2c3d4`), the private channel index.
-2. Pair the radio in Android's Bluetooth settings (PIN on its screen), then **Find my radio** and **Save**.
-3. Press **Start** and turn on the phone's Wi-Fi hotspot. The screen shows the address students open.
-4. Load assignments from **Phone status** (over school Wi-Fi from the hub, or a course pack on the card).
+1. Install the app and open it. Setup goes one step per screen: the phone's name, finding the radio
+   over Bluetooth (or a Wi-Fi radio, or none yet), the school's radio id (`!a1b2c3d4`) and private
+   channel, then a check that starts MeshLearn and shows what still needs doing (usually the hotspot).
+2. If Android asks for a PIN while pairing, it is on the radio's screen (123456 on radios without one).
+3. The last screen shows students how to join. After that the app opens on a status screen: whether
+   everything works, the radio, when the school last answered, what is waiting, and what to try when
+   the radio is lost. Settings (the gear) changes any step, where files are kept, and the technical options.
+4. Add lessons from **Add lessons and books**: from the teacher's laptop over school Wi-Fi, or a course
+   pack on the memory card (or copied over USB).
 
 ## Tested so far
 
@@ -52,8 +59,18 @@ Install `meshtastic` first (as in `requirements-radio.txt`) to include its proto
   assignments from a Python hub, keeps its data on the (emulated) memory card, and the setup screen
   and in-app browser lay out correctly edge to edge.
 
+- Android 7.0 (API 24), on an emulator sized like an old phone (1 GB RAM, 720×1280, memory card):
+  the same checks pass, including building and queueing a compressed radio message. Every platform call
+  newer than API 24 sits behind a version check, and lint checks `core` too (`checkDependencies`).
+  This found one real crash on Android 7: `java.util.Base64` (Android 8+) in the shared dictionary,
+  now hex.
+
+- A real Android phone: the new setup screens found and connected to a real Meshtastic radio over
+  Bluetooth.
+
 ## Not yet tested
 
-- On a real Android phone and with real radios over Bluetooth: the Bluetooth code follows Meshtastic's
-  documented BLE API but has not talked to a radio yet. The Wi-Fi radio option is the fallback.
-- Android 7 phones specifically (the app targets Android 7.0 and newer).
+- A whole school day on real radios: work going from a real phone to the teacher hub by radio and
+  grades coming back, the hotspot with many students, and range between villages.
+- Real old phones: makers' battery savers that stop background apps (set the app to "unrestricted"),
+  slow memory cards, and Bluetooth on old chipsets. Android 7.0 is the oldest version supported.

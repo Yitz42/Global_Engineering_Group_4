@@ -164,6 +164,9 @@ class CoreTest {
         assertTrue(String(phone.app.dispatch(req("GET", "/", cookie = cookie)).body).contains("Fractions and plants"))
         val form = phone.app.dispatch(req("GET", "/a/a1b2c3", cookie = cookie))
         assertEquals(200, form.status)
+        val formHtml = String(form.body)
+        assertTrue(formHtml.contains("Question 1 of 5") && formHtml.contains("meshlearn-draft:") && formHtml.contains("0 / 500"))
+        assertTrue(String(phone.app.dispatch(req("GET", "/", cookie = cookie)).body).contains("You have 1 assignment to do."))
         val bad = phone.app.dispatch(req("POST", "/a/a1b2c3", "q1=1", cookie))
         assertEquals(400, bad.status)
         val ok = phone.app.dispatch(req("POST", "/a/a1b2c3", "q1=1&q2=3%2C5&q3=chlorophyll&q4=1&q5=We+share+pizza", cookie))
@@ -188,6 +191,115 @@ class CoreTest {
         // Admin actions need the phone itself or the PIN.
         assertTrue(String(phone.app.dispatch(req("POST", "/status/reload")).body).contains("Only the teacher"))
         phone.stop(); hub.stop()
+    }
+
+    /** The Kotlin and Python phones must serve the same student site: same stylesheet, same script. */
+    @Test fun studentSiteMatchesPythonPhone() {
+        val webPy = File(System.getProperty("meshlearn.repo"), "meshlearn/web.py").readText().replace("\r\n", "\n")
+        fun block(start: String) = webPy.substringAfter(start).substringBefore("\"\"\"").trim()
+        assertEquals(block("STUDENT_CSS = \"\"\""), Html.STUDENT_CSS.trim())
+        assertEquals(block("ASSIGNMENT_JS = r\"\"\""), Html.ASSIGNMENT_JS.trim())
+    }
+
+    /** The school's words, from the same files the Python phone reads, give the same pages. */
+    @Test fun phoneSpeaksTheSchoolLanguage() {
+        val langDir = File(System.getProperty("meshlearn.repo"), "meshlearn/lang")
+        fun pack(code: String) = Json.parse(File(langDir, "$code.json").readText(Charsets.UTF_8)).asMap()!!
+
+        val es = Strings(pack("spa"))
+        val today = java.util.Calendar.getInstance().apply { set(2026, java.util.Calendar.NOVEMBER, 15, 10, 30) }
+        assertEquals("Para el vie 20 de nov" to "", Html.dueLabel("2026-11-20", false, today, es))
+        assertEquals("unos 3 min", Html.minutesFor(listOf(mapOf("type" to "long")), es))
+        assertEquals("1 pregunta", es.n("card.questions", 1))
+        assertEquals("5 preguntas", es.n("card.questions", 5))
+        assertEquals("Usa menos de 600 caracteres (ahora hay 640).", es.error("Keep this under 600 characters (640 now)."))
+        assertEquals("Necesita práctica", es.level("Needs work"))
+        val partial = Strings(mapOf("code" to "hau", "tag" to "ha", "strings" to mapOf("tab.home" to "Gida", "card.score" to "broken {nope}")))
+        assertEquals("Gida", partial("tab.home"))
+        assertEquals("Library", partial("tab.library"))
+        assertEquals("Score 3 / 4", partial("card.score", "score" to 3, "max" to 4))
+
+        // A memory card with Arabic as the school language and English as the second.
+        val dir = tmp()
+        val packDir = File(dir, "phone/assignments").apply { mkdirs() }
+        File(packDir, "language.json").writeText(Json.dumps(mapOf("school" to pack("ara"), "second" to pack("eng"))), Charsets.UTF_8)
+        val link = Link(0.0, 1)
+        val phone = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        fun req(method: String, path: String, body: String = "", cookie: String = "") = Request(method, path, emptyMap(),
+            mapOf("cookie" to cookie), body.toByteArray(), "192.168.43.10")
+        val home = String(phone.app.dispatch(req("GET", "/")).body, Charsets.UTF_8)
+        assertTrue(home.contains("<html lang='ar' dir='rtl'>") && home.contains("اكتب اسمك") && home.contains("action='/lang'"))
+        val switched = phone.app.dispatch(req("POST", "/lang", "to=eng&back=%2Flibrary"))
+        assertEquals(303, switched.status)
+        assertEquals("/library", switched.headers["Location"])
+        val cookie = switched.headers["Set-Cookie"]!!.substringBefore(";")
+        val library = String(phone.app.dispatch(req("GET", "/library", cookie = cookie)).body, Charsets.UTF_8)
+        assertTrue(library.contains("<html lang='en'>") && library.contains("Search the library") && library.contains(">العربية</button>"))
+        // Unknown languages and other sites are ignored.
+        val ignored = phone.app.dispatch(req("POST", "/lang", "to=xyz&back=https%3A%2F%2Fexample.org%2F"))
+        assertEquals("/", ignored.headers["Location"])
+        assertNull(ignored.headers["Set-Cookie"])
+    }
+
+    /** Moving between the memory card and the phone: work always moves, books only if asked, nothing lost on failure. */
+    @Test fun storageMoveKeepsWorkSafe() {
+        val root = tmp()
+        val card = File(root, "card/meshlearn")
+        val phone = File(root, "phone/meshlearn")
+        fun put(dir: File, path: String, text: String) = File(dir, path).apply { parentFile.mkdirs(); writeText(text) }
+        put(card, "phone.db", "students' work")
+        put(card, "outbox.db", "waiting messages")
+        put(card, "assignments/a1.json", "{}")
+        put(card, "library/wiki.zim", "x".repeat(5000))
+        put(phone, "library/copied-by-cable.epub", "book")   // already on the phone: must survive
+
+        // Not enough room: nothing changes anywhere.
+        try {
+            StorageMove.move(card, phone, books = true, freeAtTarget = 100)
+            throw AssertionError("should not fit")
+        } catch (e: StorageMove.NotEnoughRoom) {
+            assertTrue(e.needed > 5000)
+        }
+        assertTrue(File(card, "phone.db").exists() && !File(phone, "phone.db").exists())
+
+        // Work and lessons only: books stay on the card, the old databases are kept as a backup.
+        StorageMove.move(card, phone, books = false, freeAtTarget = Long.MAX_VALUE)
+        assertEquals("students' work", File(phone, "phone.db").readText())
+        assertEquals("waiting messages", File(phone, "outbox.db").readText())
+        assertTrue(File(phone, "assignments/a1.json").exists())
+        assertTrue(!File(card, "phone.db").exists() && File(card, "phone.db" + StorageMove.BACKUP_SUFFIX).exists())
+        assertTrue(!File(card, "assignments").exists())
+        assertTrue(File(card, "library/wiki.zim").exists() && !File(phone, "library/wiki.zim").exists())
+
+        // Back to the card with the books: they merge with what is there, and the phone's backup stays put.
+        put(phone, "phone.db", "more work")
+        StorageMove.move(phone, card, books = true, freeAtTarget = Long.MAX_VALUE)
+        assertEquals("more work", File(card, "phone.db").readText())
+        assertTrue(File(card, "library/wiki.zim").exists() && File(card, "library/copied-by-cable.epub").exists())
+        assertTrue(!File(phone, "library").exists())
+
+        // A copy that fails part way leaves the old place untouched and still the one in use.
+        File(root, "blocker").writeText("a file where a folder must go")
+        try {
+            StorageMove.move(card, File(root, "blocker"), books = false, freeAtTarget = Long.MAX_VALUE)
+            throw AssertionError("should fail")
+        } catch (e: Exception) {
+            // expected: the copy could not be written
+        }
+        assertEquals("more work", File(card, "phone.db").readText())
+        assertTrue(File(card, "outbox.db").exists() && File(card, "assignments/a1.json").exists())
+    }
+
+    @Test fun dueDatesInWords() {
+        val today = java.util.Calendar.getInstance().apply { set(2026, java.util.Calendar.NOVEMBER, 15, 10, 30) }
+        assertEquals("Due today" to "soon", Html.dueLabel("2026-11-15", false, today))
+        assertEquals("Due tomorrow" to "soon", Html.dueLabel("2026-11-16", false, today))
+        assertEquals("Due Fri, Nov 20" to "", Html.dueLabel("2026-11-20", false, today))
+        assertEquals("Overdue · was due Fri, Oct 16" to "late", Html.dueLabel("2026-10-16", false, today))
+        assertEquals("Was due Fri, Oct 16" to "done", Html.dueLabel("2026-10-16", true, today))
+        assertEquals("" to "", Html.dueLabel("", false, today))
+        assertEquals("about 6 min", Html.minutesFor(listOf("choice", "number", "number", "long").map { mapOf("type" to it) }))
     }
 
     @Test fun meshtasticPacketsRoundTrip() {

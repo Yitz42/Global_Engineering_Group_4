@@ -25,6 +25,7 @@ from . import courses as crs
 from . import library
 from . import protocol
 from .db import Database
+from .hublang import HubLanguage
 from .hubpages import HubPages
 from .messenger import Messenger
 from .web import App, Request, Response, esc, json_response, page, redirect
@@ -58,9 +59,11 @@ CREATE TABLE IF NOT EXISTS courses (
     id TEXT PRIMARY KEY, data TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, updated REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS library_selection (key TEXT PRIMARY KEY, item TEXT NOT NULL, added REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS phrases (lang TEXT NOT NULL, key TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY (lang, key));
 """
 
-LIBRARY_DEFAULTS = {"card_gb": "32", "reserve_gb": "2", "lang": "eng", "dest": "", "ages": ",".join(library.DEFAULT_AGES)}
+LIBRARY_DEFAULTS = {"card_gb": "32", "reserve_gb": "2", "lang": "eng", "lang2": "", "dest": "",
+                    "ages": ",".join(library.DEFAULT_AGES)}
 AGE_FILTERS = [("fit", "Suited to the students' ages"), ("any", "Any age (suited ones first)")]
 LEVEL_FILTERS = [("3", "Core learning only"), ("2", "Education and reference"), ("0", "Everything")]
 
@@ -71,7 +74,7 @@ def _when(ts: Optional[float]) -> str:
     return time.strftime("%b %d, %H:%M", time.localtime(ts)) if ts else "never"
 
 
-class Hub(HubPages):
+class Hub(HubPages, HubLanguage):
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
@@ -82,6 +85,7 @@ class Hub(HubPages):
         self.app = App("hub", max_body=32 * 1024 * 1024)  # learning-data files can be large
         self._routes()
         self._page_routes()
+        self._language_routes()
 
     def _migrate(self) -> None:
         """Columns added after the first release; older hub databases get them here."""
@@ -216,6 +220,7 @@ class Hub(HubPages):
                 zf.writestr(f"assignments/{packed['i']}.json", json.dumps(packed, ensure_ascii=False, indent=1))
             zf.writestr("assignments/courses.json", json.dumps({"courses": self.course_list_for_phones()},
                                                                ensure_ascii=False, indent=1))
+            zf.writestr("assignments/language.json", json.dumps(self.language_bundle(), ensure_ascii=False, indent=1))
             zf.writestr("assignments/README.txt",
                         "Copy this 'assignments' folder into the phone's MeshLearn data folder on the microSD card,\n"
                         "next to the 'library' folder. The phone loads it when it starts or when you press\n"
@@ -348,7 +353,8 @@ class Hub(HubPages):
 
     def _nav(self) -> str:
         return ("<a href='/'>Home</a><a href='/courses'>Courses</a><a href='/comprehension'>Comprehension</a>"
-                "<a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a><a href='/library'>Card library</a>")
+                "<a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a><a href='/library'>Card library</a>"
+                "<a href='/language'>Language</a>")
 
     def _page(self, title: str, body: str) -> str:
         return page(title, body, self._nav(), site="MeshLearn Teacher Hub", wide=True)  # used on a laptop
@@ -422,6 +428,7 @@ class Hub(HubPages):
             "<p><strong>Over school Wi-Fi:</strong> put the phone on the same network as this laptop, open the phone's "
             "status page, and enter this hub's address.</p>"
             "<p><strong>By memory card:</strong> download the course pack and unzip it into the phone's MeshLearn folder.</p>"
+            f"<p class='muted'>{self.language_summary()}. Phones get it with these copies.</p>"
             "<a class='button secondary' href='/pack.zip'>Download course pack (zip)</a></div>"
         )
         courses = "<h2>Courses</h2>" + self._course_cards(self.comprehension_records())
@@ -474,7 +481,7 @@ class Hub(HubPages):
             self.db.execute("INSERT INTO phones (node_id, name, last_seen) VALUES (?, ?, ?) "
                             "ON CONFLICT(node_id) DO UPDATE SET last_seen = excluded.last_seen", (node, name, time.time()))
             self.record_inventory(node, {p["i"]: p["v"] for p in pack}, complete=False)
-        return json_response({"assignments": pack, "courses": self.course_list_for_phones()})
+        return json_response({"assignments": pack, "courses": self.course_list_for_phones(), "language": self.language_bundle()})
 
     def pack_zip(self, req: Request) -> Response:
         return Response(self.course_pack_zip(), content_type="application/zip",
@@ -766,7 +773,8 @@ class Hub(HubPages):
             "<form method='post' action='/library/settings' class='grid'>"
             f"<div><label for='card_gb'>Card size (GB on the label)</label><input type='number' id='card_gb' name='card_gb' min='1' step='1' value='{esc(self.setting('card_gb'))}'></div>"
             f"<div><label for='reserve_gb'>Keep free for assignments (GB)</label><input type='number' id='reserve_gb' name='reserve_gb' min='0' step='0.5' value='{esc(self.setting('reserve_gb'))}'></div>"
-            f"<div><label for='lang_set'>Students' language</label><select id='lang_set' name='lang'>{lang_options}</select></div>"
+            f"<div><label for='lang_set'>School language (<a href='/language'>more</a>)</label>"
+            f"<select id='lang_set' name='lang'>{lang_options}</select></div>"
             f"<fieldset style='grid-column:1/-1;margin:0'><legend>Students' ages</legend>{age_boxes}</fieldset>"
             "<div><input type='hidden' name='ages_form' value='1'><button class='secondary'>Save</button></div></form>"
             f"<p><strong>{self._gb(used)}</strong> chosen of <strong>{self._gb(budget)}</strong> available on the card"

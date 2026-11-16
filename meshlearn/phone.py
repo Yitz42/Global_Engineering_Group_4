@@ -8,6 +8,9 @@ The phone keeps its own copy of every assignment (from a course pack loaded by
 memory card or school Wi-Fi, or sent by radio when new). Students only see the
 ones the teacher has opened. Submissions are batched so several students'
 work shares a few radio packets.
+
+Every word students see comes from the school's language (language.py), which
+arrives with the course pack. Until one arrives, the phone speaks English.
 """
 
 from __future__ import annotations
@@ -29,8 +32,10 @@ from . import comprehension as cmp
 from . import courses as crs
 from . import protocol
 from .db import Database
+from .language import Strings
 from .messenger import Messenger
-from .web import App, Request, Response, esc, file_response, page, redirect
+from .web import (ASSIGNMENT_JS, CLEAR_DRAFT_JS, STUDENT_CSS, App, Request, Response, due_label, esc, file_response,
+                  minutes_for, page, redirect)
 
 log = logging.getLogger(__name__)
 
@@ -48,16 +53,17 @@ CREATE TABLE IF NOT EXISTS courses (id TEXT PRIMARY KEY, data TEXT NOT NULL, pos
 CREATE TABLE IF NOT EXISTS opens (
     student TEXT NOT NULL, aid TEXT NOT NULL, opened_at REAL NOT NULL, PRIMARY KEY (student, aid)
 );
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 MAX_OPEN_S = 6 * 3600  # an assignment opened longer ago than this: timing unknown
 
+# Library file types, as the key of the word a student knows.
+KIND_KEYS = {"html": "kind.page", "htm": "kind.page", "txt": "kind.text", "pdf": "kind.pdf", "epub": "kind.book",
+             "png": "kind.picture", "jpg": "kind.picture", "jpeg": "kind.picture", "svg": "kind.picture",
+             "mp3": "kind.audio", "mp4": "kind.video", "webm": "kind.video", "zim": "kind.encyclopedia"}
 VIEWABLE = {".html", ".htm", ".txt", ".pdf", ".epub", ".png", ".jpg", ".jpeg", ".svg", ".mp3", ".mp4", ".webm", ".zim"}
 STARTER_DIR = os.path.join(os.path.dirname(__file__), "starter_library")
 MAX_BATCH = 20
-
-
-def _when(ts: Optional[float]) -> str:
-    return time.strftime("%b %d, %H:%M", time.localtime(ts)) if ts else ""
 
 
 def _size(num: float) -> str:
@@ -86,6 +92,7 @@ class Phone:
             self.db.execute("ALTER TABLE submissions ADD COLUMN duration REAL")
         except Exception:
             pass
+        self._load_language()
         self.messenger: Messenger = messenger_factory(self.on_message)
         self.load_pack_folder()
         self.app = App("phone")
@@ -123,6 +130,39 @@ class Phone:
             "n": self.name, "f": usage.free // (1024 * 1024), "l": len(self.library_items()),
             "sw": __version__, "inv": self.inventory(),
         })
+
+    # -- language -------------------------------------------------------------
+
+    def _load_language(self) -> None:
+        row = self.db.one("SELECT value FROM settings WHERE key = 'language'")
+        try:
+            data = json.loads(row["value"]) if row else {}
+        except ValueError:
+            data = {}
+        school = Strings(data.get("school") if isinstance(data.get("school"), dict) else None)
+        self.school = school
+        self.languages: Dict[str, Strings] = {school.code: school}
+        second = data.get("second")
+        if isinstance(second, dict) and second.get("code") and second.get("code") != school.code:
+            other = Strings(second)
+            self.languages[other.code] = other
+
+    def import_language(self, data) -> bool:
+        """Keep the school's words from a course pack. Returns True if they changed."""
+        if not isinstance(data, dict) or not isinstance(data.get("school"), dict):
+            return False
+        second = data.get("second") if isinstance(data.get("second"), dict) else None
+        value = json.dumps({"school": data["school"], "second": second}, ensure_ascii=False, sort_keys=True)
+        row = self.db.one("SELECT value FROM settings WHERE key = 'language'")
+        if row and row["value"] == value:
+            return False
+        self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('language', ?)", (value,))
+        self._load_language()
+        return True
+
+    def words(self, req: Request) -> Strings:
+        """The student's language: the one they switched to, else the school's."""
+        return self.languages.get(req.cookies.get("lang", ""), self.school)
 
     # -- assignments ----------------------------------------------------------
 
@@ -168,8 +208,15 @@ class Phone:
                     self.import_courses(json.load(fh).get("courses", []))
             except (OSError, ValueError):
                 log.warning("skipping unreadable courses.json in the course pack")
+        language_file = os.path.join(self.pack_dir, "language.json")
+        if os.path.exists(language_file):
+            try:
+                with open(language_file, encoding="utf-8") as fh:
+                    self.import_language(json.load(fh))
+            except (OSError, ValueError):
+                log.warning("skipping unreadable language.json in the course pack")
         for fname in sorted(os.listdir(self.pack_dir)):
-            if not fname.endswith(".json") or fname == "courses.json":
+            if not fname.endswith(".json") or fname in ("courses.json", "language.json"):
                 continue
             try:
                 with open(os.path.join(self.pack_dir, fname), encoding="utf-8") as fh:
@@ -180,12 +227,13 @@ class Phone:
         return count
 
     def sync_from_hub(self, hub_url: str) -> int:
-        """Copy every assignment from the teacher hub over Wi-Fi (no radio)."""
+        """Copy every assignment, and the school's words, from the teacher hub over Wi-Fi (no radio)."""
         query = urllib.parse.urlencode({"node": self.node_id, "name": self.name})
         url = hub_url.rstrip("/") + "/api/pack?" + query
         with urllib.request.urlopen(url, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         self.import_courses(data.get("courses", []))
+        self.import_language(data.get("language"))
         return sum(1 for packed in data.get("assignments", []) if self.import_assignment(packed))
 
     def get_assignment(self, aid: str) -> Optional[dict]:
@@ -296,26 +344,58 @@ class Phone:
                 title = os.path.splitext(fname)[0].replace("_", " ").replace("-", " ").strip().capitalize()
                 folder = os.path.dirname(rel)
                 items.append({"title": title, "file": rel, "size": os.path.getsize(os.path.join(root, fname)),
-                              "collection": folder.capitalize() if folder else "Other", "kind": ext.lstrip(".")})
+                              "collection": folder.capitalize() if folder else "", "kind": ext.lstrip(".")})
         return items
 
     # -- web ------------------------------------------------------------------
 
-    def _nav(self, req: Request) -> str:
-        who = req.cookies.get("student")
-        out = "<a href='/'>Courses</a><a href='/library'>Library</a>"
-        if who:
-            out += f"<a href='/results'>My results</a><span class='muted'>Hi, {esc(who)}</span>"
-        return out
+    def _nav(self, req: Request, w: Strings) -> str:
+        """Big tabs; the one for this page is highlighted."""
+        path = req.path
+        if path.startswith("/library"):
+            section = "/library"
+        elif path.startswith("/results"):
+            section = "/results"
+        elif path == "/" or path.startswith(("/c/", "/a/")):
+            section = "/"
+        else:
+            section = ""
+        tabs = [("/", w("tab.home")), ("/library", w("tab.library"))]
+        if req.cookies.get("student"):
+            tabs.append(("/results", w("tab.results")))
+        links = ""
+        for href, label in tabs:
+            current = " aria-current='page'" if href == section else ""
+            links += f"<a href='{href}'{current}>{esc(label)}</a>"
+        return f"<nav class='tabs'>{links}</nav>"
+
+    def _language_switch(self, req: Request, w: Strings) -> str:
+        """With a second language, a button in the header switches to the other one."""
+        other = next((s for code, s in self.languages.items() if code != w.code), None)
+        if other is None:
+            return ""
+        back = req.path + ("?" + urllib.parse.urlencode(req.query) if req.query else "")
+        return (f"<form method='post' action='/lang' class='lang'><input type='hidden' name='to' value='{esc(other.code)}'>"
+                f"<input type='hidden' name='back' value='{esc(back)}'>"
+                f"<button title='{esc(w('lang.switch'))}' lang='{esc(other.tag)}' dir='{other.dir}'>{esc(other.name)}</button></form>")
 
     def _page(self, req: Request, title: str, body: str) -> str:
-        return page(title, body, self._nav(req), site=f"MeshLearn · {self.name}")
+        w = self.words(req)
+        who = req.cookies.get("student")
+        site = f"MeshLearn · {self.name}"
+        out = page(title, body, self._language_switch(req, w) + self._nav(req, w), site=site, extra_css=STUDENT_CSS,
+                   lang=w.tag, direction=w.dir)
+        if who:  # the student's name on the right of the header line, so they can see who is signed in
+            out = out.replace(f"<header><strong>{esc(site)}</strong>",
+                              f"<header><strong><span>{esc(site)}</span><span class='who'>{esc(who)}</span></strong>", 1)
+        return out
 
     def _routes(self) -> None:
         app = self.app
         app.add_route("GET", "/", self.home)
         app.add_route("POST", "/login", self.login)
         app.add_route("POST", "/logout", self.logout)
+        app.add_route("POST", "/lang", self.switch_language)
         app.add_route("GET", "/c/<cid>", self.course_page)
         app.add_route("GET", "/a/<aid>", self.assignment_form)
         app.add_route("POST", "/a/<aid>", self.assignment_submit)
@@ -354,6 +434,15 @@ class Phone:
             tree.append(dict(crs.OTHER))
         return tree
 
+    @staticmethod
+    def _title(course: dict, w: Strings) -> str:
+        """A course's title; 'Other assignments' in the student's language."""
+        return w("course.other.title") if course["id"] == "" else course["title"]
+
+    @staticmethod
+    def _description(course: dict, w: Strings) -> str:
+        return w("course.other.description") if course["id"] == "" else course.get("description", "")
+
     def _assignments_in(self, course_id: str, open_only: bool = True) -> List[dict]:
         rows = self.db.all("SELECT id FROM assignments" + (" WHERE open = 1" if open_only else "")
                            + " ORDER BY due = '', due, received DESC")
@@ -381,23 +470,33 @@ class Phone:
         return records
 
     @staticmethod
-    def _level(level: str, score) -> str:
+    def _level(level: str, score, w: Strings) -> str:
         cls = {"Strong": "good", "Good": "good", "Developing": "warn", "Needs work": "bad"}.get(level, "")
-        return f"<span class='pill {cls}'>{esc(level)}{'' if score is None else f' · {score}%'}</span>"
+        return f"<span class='pill {cls}'>{esc(w.level(level))}{'' if score is None else f' · {score}%'}</span>"
 
-    def _assignment_card(self, a: dict, sub) -> str:
+    def _assignment_card(self, a: dict, sub, w: Strings, course_title: str = "") -> str:
+        """One assignment as a card that opens it: what it is, when it is due, and what to do next."""
+        practice = a.get("mode") == "practice"
         if sub is None:
-            state = "<span class='pill'>To do</span>"
+            state, action = "", w("card.practice") if practice else w("card.start")
+        elif practice:
+            state, action = f"<span class='pill good'>{esc(w('card.practiced'))}</span>", w("card.practice_again")
         elif sub["score"] is None:
-            state = "<span class='pill warn'>Turned in · waiting for grade</span>"
-        elif not sub["complete"]:
-            state = f"<span class='pill warn'>{sub['score']:g} / {sub['max']:g} so far · teacher still grading</span>"
+            state, action = f"<span class='pill warn'>{esc(w('card.waiting'))}</span>", ""
         else:
-            state = f"<span class='pill good'>Score {sub['score']:g} / {sub['max']:g}</span>"
-        due = f" · due {esc(a['due'])}" if a.get("due") else ""
-        return (f"<div class='card'><h3 style='margin:0 0 4px'><a href='/a/{esc(a['id'])}'>{esc(a['title'])}</a></h3>"
-                f"<p class='muted' style='margin:0 0 8px'>{len(a['questions'])} question{'' if len(a['questions']) == 1 else 's'}{due}"
-                f"{' · practice' if a.get('mode') == 'practice' else ''}</p>{state}</div>")
+            score, top = format(sub["score"], "g"), format(sub["max"], "g")
+            if not sub["complete"]:
+                state, action = f"<span class='pill warn'>{esc(w('card.so_far', score=score, max=top))}</span>", ""
+            else:
+                state, action = f"<span class='pill good'>{esc(w('card.score', score=score, max=top))}</span>", ""
+        n = len(a["questions"])
+        meta = " · ".join(x for x in (course_title, w.n("card.questions", n), minutes_for(a["questions"], w),
+                                      w("card.practice_tag") if practice else "") if x)
+        due_text, due_cls = due_label(a.get("due", ""), turned_in=sub is not None, words=w)
+        due = f"<p class='due {due_cls}'>{esc(due_text)}</p>" if due_text else ""
+        go = f"<span class='button go'>{esc(action)}</span>" if action else ""
+        return (f"<a class='card task' href='/a/{esc(a['id'])}'><h3>{esc(a['title'])}</h3>"
+                f"<p class='meta'>{esc(meta)}</p>{due}{state}{go}</a>")
 
     def _my_latest(self, student: str) -> dict:
         return {r["assignment_id"]: r for r in self.db.all(
@@ -405,16 +504,18 @@ class Phone:
             "WHERE student = ? GROUP BY assignment_id", (student,))}
 
     def home(self, req: Request) -> Response:
+        w = self.words(req)
         student = req.cookies.get("student")
         if not student:
+            link = f"<a href='/library'>{esc(w('welcome.library'))}</a>"
             body = (
-                "<div class='card'><p>Welcome! Type your name so your teacher knows whose work this is.</p>"
-                "<form method='post' action='/login'><label for='student'>Your name</label>"
+                f"<p class='lead'>{esc(w('welcome.lead'))}</p>"
+                f"<form method='post' action='/login' class='card'><label for='student'>{esc(w('welcome.name'))}</label>"
                 "<input type='text' id='student' name='student' maxlength='40' autocomplete='name' required>"
-                "<button>Start</button></form></div>"
-                "<p>Or go straight to the <a href='/library'>library</a>.</p>"
+                f"<button class='big'>{esc(w('welcome.start'))}</button></form>"
+                f"<p>{w.html('welcome.just_read', link=link)}</p>"
             )
-            return Response(self._page(req, "Welcome", body))
+            return Response(self._page(req, w("welcome.title"), body))
         mine = self._my_latest(student)
         records = self.my_records(student)
         cards, todo = "", []
@@ -422,35 +523,48 @@ class Phone:
             open_items = self._assignments_in(course["id"])
             if course["id"] == "" and not open_items:
                 continue
-            todo += [a for a in open_items if a["id"] not in mine]
+            title = self._title(course, w)
+            todo += [(a, title) for a in open_items if a["id"] not in mine]
             if course.get("comingSoon"):
-                cards += (f"<div class='card' style='opacity:.6'><h2 style='margin-top:0'>{esc(course['title'])}</h2>"
-                          f"<p class='muted'>{esc(course.get('description', ''))}</p><span class='pill'>Coming later</span></div>")
+                cards += (f"<div class='card' style='opacity:.6'><h2 style='margin-top:0'>{esc(title)}</h2>"
+                          f"<p class='muted'>{esc(self._description(course, w))}</p>"
+                          f"<span class='pill'>{esc(w('course.coming_later'))}</span></div>")
                 continue
             summary = cmp.summarize(records, course)
-            left = sum(1 for a in open_items if a["id"] not in mine)
+            done = sum(1 for a in open_items if a["id"] in mine)
+            if open_items:
+                pct = done * 100 // len(open_items)
+                done_text = esc(w("course.done", done=done, total=len(open_items)))
+                progress = (f"<div class='bar' role='img' aria-label='{done_text}'><span style='width:{pct}%'></span></div>"
+                            f"<p class='meta'>{done_text}</p>")
+            else:
+                progress = f"<p class='meta'>{esc(w('course.nothing_now'))}</p>"
             cards += (
-                f"<div class='card'><h2 style='margin-top:0'><a href='/c/{esc(course['id']) or '_other'}'>{esc(course['title'])}</a></h2>"
-                f"<p class='muted'>{esc(course.get('description', ''))}</p>"
-                f"<p>{len(open_items)} open · {left} to do</p>{self._level(summary['level'], summary['score'])}</div>"
+                f"<a class='card' href='/c/{esc(course['id']) or '_other'}'><h2>{esc(title)}</h2>"
+                f"<p class='muted'>{esc(self._description(course, w))}</p>{progress}"
+                f"{self._level(summary['level'], summary['score'], w)}</a>"
             )
+        lead = w("home.caught_up") if not todo else w.n("home.todo", len(todo))
         todo_html = ""
         if todo:
-            todo_html = ("<h2>To do</h2>" + "".join(self._assignment_card(a, None) for a in todo[:5]))
-        body = (todo_html + "<h2>Your courses</h2>"
+            todo_html = (f"<h2>{esc(w('home.todo_heading'))}</h2>"
+                         + "".join(self._assignment_card(a, None, w, title) for a, title in todo[:5])
+                         + (f"<p class='meta'>{esc(w('home.more', n=len(todo) - 5))}</p>" if len(todo) > 5 else ""))
+        body = (f"<p class='lead'>{esc(lead)}</p>" + todo_html + f"<h2>{esc(w('home.courses'))}</h2>"
                 + (f"<div class='grid'>{cards}</div>" if cards else
-                   "<p class='muted'>No courses yet. Your teacher will send them.</p>")
-                + "<form method='post' action='/logout'><button class='secondary'>Not you? Change name</button></form>")
-        return Response(self._page(req, f"Hi, {student}", body))
+                   f"<p class='muted'>{esc(w('home.no_courses'))}</p>")
+                + f"<form method='post' action='/logout'><button class='secondary'>{esc(w('home.change_name'))}</button></form>")
+        return Response(self._page(req, w("home.title", name=student), body))
 
     def course_page(self, req: Request) -> Response:
+        w = self.words(req)
         student = req.cookies.get("student")
         if not student:
             return redirect("/")
         cid = "" if req.params["cid"] == "_other" else req.params["cid"]
         course = next((c for c in self.course_tree() if c["id"] == cid), None)
         if course is None:
-            return Response(self._page(req, "Not found", "<p>That course is not on this phone.</p>"), status=404)
+            return Response(self._page(req, w("notfound.title"), f"<p>{esc(w('course.not_here'))}</p>"), status=404)
         mine = self._my_latest(student)
         summary = cmp.summarize(self.my_records(student), course)
         by_unit = {u["id"]: u for u in summary["units"]}
@@ -459,20 +573,21 @@ class Phone:
         for n, unit in enumerate(course["units"], start=1):
             in_unit = [a for a in items if a.get("unit", "") == unit["id"]]
             u = by_unit.get(unit["id"], {"level": "Not started", "score": None})
-            reading = (f"<a href='/library?q={quote(unit.get('read') or unit['title'])}'>Find readings in the library</a>")
+            reading = (f"<a class='button secondary' href='/library?q={quote(unit.get('read') or unit['title'])}'>"
+                       f"{esc(w('course.find_readings'))}</a>")
             sections += (
-                f"<h2>Unit {n}: {esc(unit['title'])} {self._level(u['level'], u['score'])}</h2>"
-                + ("".join(self._assignment_card(a, mine.get(a["id"])) for a in in_unit)
-                   or "<p class='muted'>Nothing open in this unit right now.</p>")
+                f"<h2>{esc(w('course.unit', n=n, title=unit['title']))} {self._level(u['level'], u['score'], w)}</h2>"
+                + ("".join(self._assignment_card(a, mine.get(a["id"]), w) for a in in_unit)
+                   or f"<p class='muted'>{esc(w('course.nothing_in_unit'))}</p>")
                 + f"<p>{reading}</p>"
             )
         loose = [a for a in items if a.get("unit", "") not in {u["id"] for u in course["units"]}]
         if loose:
-            sections += ("<h2>Assignments</h2>" if not course["units"] else "<h2>Other assignments</h2>") + "".join(
-                self._assignment_card(a, mine.get(a["id"])) for a in loose)
-        body = (f"<p class='muted'>{esc(course.get('description', ''))}</p>"
-                f"<p>Your level in this course: {self._level(summary['level'], summary['score'])}</p>" + sections)
-        return Response(self._page(req, course["title"], body))
+            heading = w("course.assignments") if not course["units"] else w("course.other_assignments")
+            sections += f"<h2>{esc(heading)}</h2>" + "".join(self._assignment_card(a, mine.get(a["id"]), w) for a in loose)
+        body = (f"<p class='muted'>{esc(self._description(course, w))}</p>"
+                f"<p>{w.html('course.your_level', level=self._level(summary['level'], summary['score'], w))}</p>" + sections)
+        return Response(self._page(req, self._title(course, w), body))
 
     def login(self, req: Request) -> Response:
         name = " ".join(req.form.get("student", "").split())[:40]
@@ -483,44 +598,64 @@ class Phone:
     def logout(self, req: Request) -> Response:
         return redirect("/").set_cookie("student", "", max_age=0)
 
-    def _render_form(self, req: Request, a: dict, values: Dict[str, str], errors: Dict[str, str]) -> str:
+    def switch_language(self, req: Request) -> Response:
+        back = req.form.get("back", "/")
+        if not back.startswith("/") or back.startswith("//"):
+            back = "/"
+        code = req.form.get("to", "")
+        response = redirect(back)
+        return response.set_cookie("lang", code) if code in self.languages else response
+
+    def _render_form(self, req: Request, a: dict, student: str, values: Dict[str, str], errors: Dict[str, str]) -> str:
+        """Question cards with big choices, a character count on written answers, and a bar at the bottom
+        saying how many are answered. ASSIGNMENT_JS keeps the answers in the browser while the student works."""
+        w = self.words(req)
         parts = []
+        n = len(a["questions"])
+        count = w.n("card.questions", n)
         if a.get("instructions"):
             parts.append(f"<div class='card'><p>{esc(a['instructions'])}</p></div>")
+        parts.append(f"<p class='meta'>{esc(w('form.meta', count=count, minutes=minutes_for(a['questions'], w)))}</p>")
         if errors:
-            parts.append(f"<p class='error' role='alert'>Please fix {len(errors)} answer{'s' if len(errors) > 1 else ''} below.</p>")
-        parts.append(f"<form method='post' action='/a/{esc(a['id'])}' novalidate>")
+            parts.append(f"<p class='error' role='alert'>{esc(w.n('form.fix', len(errors)))}</p>")
+        parts.append(f"<form id='aform' method='post' action='/a/{esc(a['id'])}' data-key='{esc(student + '|' + a['id'])}' novalidate>")
         for i, q in enumerate(a["questions"], start=1):
             qid = esc(q["id"])
             value = values.get(q["id"], "")
             err = errors.get(q["id"])
-            err_html = f"<p class='error' id='{qid}-err'>{esc(err)}</p>" if err else ""
+            err_html = f"<p class='error' id='{qid}-err'>{esc(w.error(err))}</p>" if err else ""
             described = f" aria-describedby='{qid}-err' aria-invalid='true'" if err else ""
-            pts = f" <span class='muted'>({q['points']:g} pt)</span>"
+            points = w("form.points.one") if q["points"] == 1 else w("form.points.other", n=f"{q['points']:g}")
+            legend = (f"<legend><span class='qnum'>{esc(w('form.qnum', i=i, n=n, points=points))}"
+                      f"</span>{esc(q['prompt'])}</legend>")
+            cls = "q bad" if err else "q"
             if q["type"] == "choice":
-                opts = "".join(
-                    f"<label class='option'><input type='radio' name='{qid}' value='{j}'"
-                    f"{' checked' if value == str(j) else ''}{described}> {esc(opt)}</label>"
-                    for j, opt in enumerate(q["options"])
-                )
-                parts.append(f"<fieldset><legend>{i}. {esc(q['prompt'])}{pts}</legend>{err_html}{opts}</fieldset>")
+                opts = ""
+                for j, opt in enumerate(q["options"]):
+                    on = value == str(j)
+                    opts += (f"<label class='option{' on' if on else ''}'><input type='radio' name='{qid}' value='{j}'"
+                             f"{' checked' if on else ''}{described}> {esc(opt)}</label>")
+                parts.append(f"<fieldset class='{cls}'>{legend}{err_html}{opts}</fieldset>")
             elif q["type"] == "long":
                 limit = q.get("max_chars", 600)
                 parts.append(
-                    f"<fieldset><legend>{i}. {esc(q['prompt'])}{pts}</legend>{err_html}"
-                    f"<label for='{qid}'>Your answer (up to {limit} characters)</label>"
-                    f"<textarea id='{qid}' name='{qid}' maxlength='{limit}'{described}>{esc(value)}</textarea></fieldset>"
+                    f"<fieldset class='{cls}'>{legend}{err_html}"
+                    f"<label for='{qid}'>{esc(w('form.long', n=limit))}</label>"
+                    f"<textarea id='{qid}' name='{qid}' maxlength='{limit}'{described}>{esc(value)}</textarea>"
+                    f"<p class='counter' id='{qid}-count' aria-live='polite'>{len(value)} / {limit}</p></fieldset>"
                 )
             else:
                 mode = " inputmode='decimal'" if q["type"] == "number" else ""
-                hint = "A number, like 12, 3.5, 3,5 or 1/2" if q["type"] == "number" else "Short answer"
+                hint = w("form.number") if q["type"] == "number" else w("form.short")
                 parts.append(
-                    f"<fieldset><legend>{i}. {esc(q['prompt'])}{pts}</legend>{err_html}"
-                    f"<label for='{qid}'>{hint}</label>"
+                    f"<fieldset class='{cls}'>{legend}{err_html}"
+                    f"<label for='{qid}'>{esc(hint)}</label>"
                     f"<input type='text' id='{qid}' name='{qid}' value='{esc(value)}' maxlength='{asg.MAX_TEXT_CHARS}'{mode}{described}>"
                     "</fieldset>"
                 )
-        parts.append("<button>Check and submit</button></form>")
+        parts.append(f"<div class='submitbar'><p class='meta' id='answered' aria-live='polite' "
+                     f"data-words='{esc(w('form.answered'))}'>{esc(count)}</p>"
+                     f"<button class='big'>{esc(w('form.submit'))}</button></div></form><script>{ASSIGNMENT_JS}</script>")
         return "".join(parts)
 
     def _open_assignment(self, req: Request):
@@ -528,23 +663,26 @@ class Phone:
         return a if a and a.get("open") else None
 
     def assignment_form(self, req: Request) -> Response:
+        w = self.words(req)
         student = req.cookies.get("student")
         if not student:
             return redirect("/")
         a = self._open_assignment(req)
         if a is None:
-            return Response(self._page(req, "Not open", "<p>That assignment is not open right now.</p>"
-                                       "<p><a href='/'>Back to assignments</a></p>"), status=404)
+            return Response(self._page(req, w("open.not_title"), f"<p>{esc(w('open.not_text'))}</p>"
+                                       f"<p><a href='/'>{esc(w('open.back'))}</a></p>"), status=404)
         if a.get("mode") != "practice":
             done = self.db.one("SELECT submitted_at FROM submissions WHERE assignment_id = ? AND student = ?", (a["id"], student))
             if done:
-                body = (f"<p>You already turned this in on {_when(done['submitted_at'])}.</p>"
-                        "<p><a href='/results'>See your results</a></p>")
+                body = (f"<div class='card'><p>{esc(w('open.already', when=w.when(done['submitted_at'])))}</p></div>"
+                        f"<a class='button big' href='/results'>{esc(w('open.see_results'))}</a>"
+                        f"<a class='button big secondary' href='/'>{esc(w('nav.back_home'))}</a>")
                 return Response(self._page(req, a["title"], body))
         self.opened(student, a["id"])
-        return Response(self._page(req, a["title"], self._render_form(req, a, {}, {})))
+        return Response(self._page(req, a["title"], self._render_form(req, a, student, {}, {})))
 
     def assignment_submit(self, req: Request) -> Response:
+        w = self.words(req)
         student = req.cookies.get("student")
         if not student:
             return redirect("/")
@@ -554,30 +692,39 @@ class Phone:
         raw = {q["id"]: req.form.get(q["id"], "") for q in a["questions"]}
         answers, errors = asg.validate_answers(a, raw)
         if errors:
-            return Response(self._page(req, a["title"], self._render_form(req, a, raw, errors)), status=400)
+            return Response(self._page(req, a["title"], self._render_form(req, a, student, raw, errors)), status=400)
         if a.get("mode") != "practice" and self.db.one(
                 "SELECT 1 FROM submissions WHERE assignment_id = ? AND student = ?", (a["id"], student)):
             return redirect("/results")
         self.submit(a, student, answers)
+        # Turned in: forget the draft the browser kept while the student worked.
+        clear_draft = (f"<div id='clear-draft' data-key='{esc(student + '|' + a['id'])}'></div>"
+                       f"<script>{CLEAR_DRAFT_JS}</script>")
         if a.get("mode") == "practice":
             feedback = asg.practice_feedback(a, answers)
             items = ""
             for q in a["questions"]:
                 ok = feedback.get(q["id"])
-                mark = ("<span class='good'>Correct</span>" if ok else "<span class='bad'>Not quite</span>") if ok is not None \
-                    else "<span class='muted'>Your teacher will read this one</span>"
+                mark = (f"<span class='good'>{esc(w('practice.correct'))}</span>" if ok else
+                        f"<span class='bad'>{esc(w('practice.not_quite'))}</span>") if ok is not None \
+                    else f"<span class='muted'>{esc(w('practice.teacher_reads'))}</span>"
                 items += f"<li>{esc(q['prompt'])}: {mark}</li>"
             right = sum(1 for v in feedback.values() if v)
-            body = (f"<p>You got <strong>{right}</strong> of {sum(1 for v in feedback.values() if v is not None)} "
-                    f"auto-checked questions right.</p><ol>{items}</ol>"
-                    f"<a class='button' href='/a/{esc(a['id'])}'>Try again</a><a class='button secondary' href='/'>Back</a>")
-            return Response(self._page(req, "Practice results", body))
-        body = ("<div class='card'><p class='good'><strong>Done! Your work is saved on this phone.</strong></p>"
-                "<p>It will reach your teacher over the radio. That can take a while, and you do not need to wait here.</p></div>"
-                "<a class='button' href='/'>Back to assignments</a>")
-        return Response(self._page(req, "Submitted", body))
+            checked = sum(1 for v in feedback.values() if v is not None)
+            body = (f"<div class='card'><p class='grade'>{esc(w('practice.right', right=right, checked=checked))}</p>"
+                    f"<p class='meta'>{esc(w('practice.note'))}</p>"
+                    f"<ol>{items}</ol></div>"
+                    f"<a class='button big' href='/a/{esc(a['id'])}'>{esc(w('practice.try_again'))}</a>"
+                    f"<a class='button big secondary' href='/'>{esc(w('nav.back_home'))}</a>" + clear_draft)
+            return Response(self._page(req, w("practice.title"), body))
+        body = (f"<div class='card'><p class='good grade'>{esc(w('submitted.done'))}</p>"
+                f"<p>{esc(w('submitted.radio'))}</p>"
+                f"<p class='meta'>{esc(w('submitted.later'))}</p></div>"
+                f"<a class='button big' href='/'>{esc(w('nav.back_home'))}</a>" + clear_draft)
+        return Response(self._page(req, w("submitted.title"), body))
 
     def results(self, req: Request) -> Response:
+        w = self.words(req)
         student = req.cookies.get("student")
         if not student:
             return redirect("/")
@@ -586,65 +733,73 @@ class Phone:
         for s in rows:
             a = self.get_assignment(s["assignment_id"]) or {"title": s["assignment_id"]}
             delivery = self.messenger.message_status(s["msg_id"])
-            sent = {"acked": "reached your teacher", "pending": "on its way", "failed": "could not be sent"}.get(
-                delivery, "saved, sending soon")
+            sent = {"acked": f"<span class='pill good'>{esc(w('results.acked'))}</span>",
+                    "pending": f"<span class='pill warn'>{esc(w('results.pending'))}</span>",
+                    "failed": f"<span class='pill bad'>{esc(w('results.failed'))}</span>"}.get(
+                delivery, f"<span class='pill'>{esc(w('results.saved'))}</span>")
             if s["score"] is None:
-                grade = "Not graded yet"
+                grade = f"<p class='meta'>{esc(w('results.not_graded'))}</p>"
             elif s["complete"]:
-                grade = f"<strong>{s['score']:g} / {s['max']:g}</strong>"
+                grade = f"<p class='grade'>{s['score']:g} / {s['max']:g}</p>"
             else:
-                grade = f"{s['score']:g} / {s['max']:g} so far (teacher still grading)"
-            out += f"<tr><td>{esc(a['title'])}</td><td>{_when(s['submitted_at'])}</td><td>{sent}</td><td>{grade}</td></tr>"
+                so_far = w("results.so_far", score=format(s["score"], "g"), max=format(s["max"], "g"))
+                grade = f"<p class='grade'>{esc(so_far)}</p><p class='meta'>{esc(w('results.still_grading'))}</p>"
+            out += (f"<div class='card'><h3 style='margin:0'>{esc(a['title'])}</h3>"
+                    f"<p class='meta'>{esc(w('results.turned_in', when=w.when(s['submitted_at'])))}</p>{grade}{sent}</div>")
         records = self.my_records(student)
         progress = ""
         for course in self.course_tree():
             summary = cmp.summarize(records, course)
             if not summary["answered"]:
                 continue
-            units = "".join(f"<li>Unit {u['number']}: {esc(u['title'])} {self._level(u['level'], u['score'])}</li>"
+            units = "".join(f"<li>{esc(w('course.unit', n=u['number'], title=u['title']))} {self._level(u['level'], u['score'], w)}</li>"
                             for u in summary["units"] if u["answered"])
-            progress += (f"<div class='card'><h3 style='margin-top:0'>{esc(course['title'])} "
-                         f"{self._level(summary['level'], summary['score'])}</h3><ul>{units}</ul></div>")
-        body = (("<h2>How you are doing</h2>" + progress if progress else "")
-                + "<h2>Everything you turned in</h2>"
-                + (f"<table><tr><th>Assignment</th><th>Turned in</th><th>Delivery</th><th>Grade</th></tr>{out}</table>"
-                   if out else "<p class='muted'>Nothing turned in yet.</p>"))
-        return Response(self._page(req, "My results", body))
+            progress += (f"<div class='card'><h3 style='margin:0'>{esc(self._title(course, w))} "
+                         f"{self._level(summary['level'], summary['score'], w)}</h3><ul class='units'>{units}</ul></div>")
+        body = ((f"<h2>{esc(w('results.how'))}</h2>" + progress if progress else "")
+                + f"<h2>{esc(w('results.everything'))}</h2>"
+                + (out or f"<p class='muted'>{esc(w('results.nothing'))}</p>"))
+        return Response(self._page(req, w("results.title"), body))
 
     def library(self, req: Request) -> Response:
+        w = self.words(req)
         query = (req.query.get("q") or "").strip().lower()
         items = self.library_items()
         if query:
             items = [i for i in items if query in (i.get("title", "") + " " + i.get("collection", "")).lower()]
         groups: Dict[str, List[dict]] = {}
         for item in items:
-            groups.setdefault(item.get("collection") or "Other", []).append(item)
+            groups.setdefault(item.get("collection") or w("library.other"), []).append(item)
         sections = ""
         for name in sorted(groups):
             rows = ""
             for item in groups[name]:
                 href = "/library/files/" + quote(item["file"].replace(os.sep, "/"))
-                link = f"<a href='{href}'>{esc(item['title'])}</a>"
                 note = ""
                 if item.get("kind") == "zim":
                     book = os.path.splitext(os.path.basename(item["file"]))[0]
                     if self.kiwix_url:
-                        link = f"<a href='{esc(self.kiwix_url)}/content/{quote(book)}'>{esc(item['title'])}</a>"
+                        href = f"{esc(self.kiwix_url)}/content/{quote(book)}"
                     else:
-                        note = " <span class='muted'>· open with the Kiwix app</span>"
-                rows += (f"<tr><td>{link}{note}</td><td class='muted'>{esc(item.get('kind', ''))}</td>"
-                         f"<td class='muted'>{_size(item.get('size', 0))}</td></tr>")
-            sections += f"<h2>{esc(name)}</h2><table>{rows}</table>"
-        search = (f"<form method='get' action='/library'><label for='q'>Search the library</label>"
-                  f"<input type='text' id='q' name='q' value='{esc(query)}'><button>Search</button></form>")
-        body = search + (sections or "<p class='muted'>Nothing found.</p>")
-        return Response(self._page(req, "Library", body))
+                        note = " · " + w("library.kiwix")
+                key = KIND_KEYS.get(item.get("kind", ""))
+                kind = w(key) if key else item.get("kind", "")
+                rows += (f"<a class='card item' href='{href}'><strong>{esc(item['title'])}</strong>"
+                         f"<span class='meta' style='display:block'>{esc(kind)} · {_size(item.get('size', 0))}{esc(note)}</span></a>")
+            sections += f"<h2>{esc(name)}</h2>{rows}"
+        search = (f"<label for='q'>{esc(w('library.search_label'))}</label><form method='get' action='/library' class='search'>"
+                  f"<input type='text' id='q' name='q' value='{esc(query)}'><button>{esc(w('library.search'))}</button></form>"
+                  + (f"<p class='meta'>{esc(w('library.showing', q=query))} <a href='/library'>{esc(w('library.show_all'))}</a></p>"
+                     if query else ""))
+        body = search + (sections or f"<p class='muted'>{esc(w('library.nothing'))}</p>")
+        return Response(self._page(req, w("library.title"), body))
 
     def library_file(self, req: Request) -> Response:
         root = os.path.realpath(self.library_dir)
         target = os.path.realpath(os.path.join(root, req.params["path"]))
         if not target.startswith(root + os.sep) or not os.path.isfile(target):
-            return Response(self._page(req, "Not found", "<p>That file is not in the library.</p>"), status=404)
+            w = self.words(req)
+            return Response(self._page(req, w("notfound.title"), f"<p>{esc(w('library.no_file'))}</p>"), status=404)
         return file_response(target)
 
     # -- status and admin -----------------------------------------------------
@@ -656,6 +811,7 @@ class Phone:
         return bool(self.admin_pin) and req.form.get("pin", "") == self.admin_pin
 
     def status(self, req: Request, notice: str = "") -> Response:
+        w = self.words(req)
         usage = shutil.disk_usage(self.data_dir)
         q = self.messenger.status()
         held = self.db.one("SELECT COUNT(*) AS n, SUM(open) AS o FROM assignments")
@@ -663,47 +819,48 @@ class Phone:
         def pin_field(field_id: str) -> str:
             if not self.admin_pin:
                 return ""
-            return (f"<label for='{field_id}'>Teacher PIN</label>"
+            return (f"<label for='{field_id}'>{esc(w('status.pin'))}</label>"
                     f"<input type='text' id='{field_id}' name='pin' inputmode='numeric'>")
 
+        names = " · ".join(s.name for s in self.languages.values())
         body = (
             (f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "")
             + "<div class='grid'>"
-            f"<div class='card'><div class='stat'>{held['n']}</div>assignments stored ({held['o'] or 0} open)</div>"
-            f"<div class='card'><div class='stat'>{waiting}</div>submissions waiting to be batched</div>"
-            f"<div class='card'><div class='stat'>{q['pending']}</div>messages waiting for the radio"
-            f"<div class='muted'>{q['frames_sent']} radio packets sent since start</div></div>"
-            f"<div class='card'><div class='stat'>{_size(usage.free)}</div>free on the card</div></div>"
-            "<h2>Copy assignments from the teacher (no radio)</h2>"
+            f"<div class='card'><div class='stat'>{held['n']}</div>{esc(w('status.stored', n=held['o'] or 0))}</div>"
+            f"<div class='card'><div class='stat'>{waiting}</div>{esc(w('status.waiting'))}</div>"
+            f"<div class='card'><div class='stat'>{q['pending']}</div>{esc(w('status.radio'))}"
+            f"<div class='muted'>{esc(w('status.packets', n=q['frames_sent']))}</div></div>"
+            f"<div class='card'><div class='stat'>{_size(usage.free)}</div>{esc(w('status.free'))}</div></div>"
+            f"<p>{esc(w('status.language', name=names))}</p>"
+            f"<h2>{esc(w('status.copy_heading'))}</h2>"
             "<form method='post' action='/status/sync' class='card'>"
-            "<p>When this phone is on the same Wi-Fi as the teacher's laptop, copy every assignment at once.</p>"
-            "<label for='hub_url'>Teacher hub address</label>"
-            "<input type='text' id='hub_url' name='hub_url' placeholder='http://192.168.1.20:8000' required>"
-            f"{pin_field('pin-sync')}<button>Copy assignments</button></form>"
+            f"<p>{esc(w('status.copy_text'))}</p>"
+            f"<label for='hub_url'>{esc(w('status.hub_address'))}</label>"
+            "<input type='text' id='hub_url' name='hub_url' placeholder='http://192.168.1.20:8000' dir='ltr' required>"
+            f"{pin_field('pin-sync')}<button>{esc(w('status.copy_button'))}</button></form>"
             "<form method='post' action='/status/reload' class='card'>"
-            "<p>Copied a course pack onto the memory card? Load it now.</p>"
-            f"{pin_field('pin-reload')}<button class='secondary'>Reload from card</button></form>"
-            f"<p class='muted'>Teacher hub radio: {esc(self.hub_id)} · this phone's radio: {esc(self.node_id)} · "
-            f"data folder: {esc(self.data_dir)}</p>"
+            f"<p>{esc(w('status.reload_text'))}</p>"
+            f"{pin_field('pin-reload')}<button class='secondary'>{esc(w('status.reload_button'))}</button></form>"
+            f"<p class='muted'>{esc(w('status.footer', hub=self.hub_id, node=self.node_id, dir=self.data_dir))}</p>"
         )
-        return Response(self._page(req, "Phone status", body))
+        return Response(self._page(req, w("status.title"), body))
 
     def status_sync(self, req: Request) -> Response:
         if not self._is_admin(req):
-            return self.status(req, notice="Only the teacher can do that (open this page on the phone itself, or enter the PIN).")
+            return self.status(req, notice=self.words(req)("status.only_teacher"))
         url = req.form.get("hub_url", "").strip()
         if not url.startswith(("http://", "https://")):
             url = "http://" + url
         try:
             count = self.sync_from_hub(url)
         except Exception as exc:
-            return self.status(req, notice=f"Could not reach the teacher hub at {url}: {exc}")
-        # No radio check-in needed: the hub recorded what this phone copied.
-        return self.status(req, notice=f"Copied from the teacher hub: {count} new or updated assignments.")
+            return self.status(req, notice=self.words(req)("status.cant_reach", url=url, error=exc))
+        # No radio check-in needed: the hub recorded what this phone copied. The words may have changed too.
+        return self.status(req, notice=self.words(req)("status.copied", n=count))
 
     def status_reload(self, req: Request) -> Response:
         if not self._is_admin(req):
-            return self.status(req, notice="Only the teacher can do that (open this page on the phone itself, or enter the PIN).")
+            return self.status(req, notice=self.words(req)("status.only_teacher"))
         count = self.load_pack_folder()
         self.say_hello()
-        return self.status(req, notice=f"Loaded from the card: {count} new or updated assignments.")
+        return self.status(req, notice=self.words(req)("status.loaded", n=count))

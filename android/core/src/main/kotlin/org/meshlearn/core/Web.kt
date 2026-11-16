@@ -118,12 +118,134 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-a
 .stat{font-size:28px;font-weight:700}
 """
 
-    fun page(title: String, body: String, nav: String = "", site: String = "MeshLearn"): String =
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'>" +
+    fun page(title: String, body: String, nav: String = "", site: String = "MeshLearn", extraCss: String = "",
+             lang: String = "en", dir: String = "ltr"): String =
+        "<!doctype html><html lang='${esc(lang)}'${if (dir == "rtl") " dir='rtl'" else ""}><head><meta charset='utf-8'>" +
             "<meta name='viewport' content='width=device-width,initial-scale=1'>" +
-            "<title>${esc(title)} · ${esc(site)}</title><style>$CSS</style></head>" +
+            "<title>${esc(title)} · ${esc(site)}</title><style>$CSS$extraCss</style></head>" +
             "<body><header><strong>${esc(site)}</strong>$nav</header>" +
             "<main id='main'><h1>${esc(title)}</h1>$body</main></body></html>"
+
+    /**
+     * The student site's look, on top of [CSS]: made for a phone held in one hand. Big tap targets,
+     * whole cards that open, tabs that show where you are. Kept identical to STUDENT_CSS in web.py.
+     */
+    val STUDENT_CSS = """
+body{font-size:18px}
+header{position:sticky;top:0;z-index:5;flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px}
+header strong{font-size:16px;margin:0;display:flex;justify-content:space-between;gap:8px}
+.who{font-weight:400;color:var(--muted);font-size:15px}
+nav.tabs{display:flex;gap:6px}
+nav.tabs a{flex:1;display:flex;align-items:center;justify-content:center;white-space:nowrap;padding:9px 4px;border-radius:10px;border:1px solid var(--line);font-size:16px;color:var(--accent);text-decoration:none}
+nav.tabs a[aria-current=page]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+main{padding:12px 14px 32px}
+h1{font-size:24px;margin:6px 0 10px}
+.lead{font-size:19px;margin:0 0 14px}
+a.card{display:block;color:var(--ink);text-decoration:none}
+a.card:hover,a.card:focus{border-color:var(--accent)}
+a.card h2,a.card h3{color:var(--accent);margin:0 0 6px}
+a.card h3{font-size:19px}
+.meta{color:var(--muted);font-size:15px;margin:4px 0}
+.due{font-size:15px;font-weight:700;margin:6px 0}
+.due.late{color:var(--bad)} .due.soon{color:var(--warn)} .due.done{color:var(--muted);font-weight:400}
+.go{display:block;text-align:center;margin:12px 0 0}
+.bar{height:10px;border-radius:99px;background:var(--line);overflow:hidden;margin:10px 0 4px}
+.bar span{display:block;height:100%;background:var(--good)}
+fieldset.q{background:var(--card);margin:14px 0;padding:14px}
+fieldset.q legend{float:left;width:100%;padding:0;margin:0 0 10px;font-size:19px;line-height:1.35}
+fieldset.q legend+*{clear:both}
+.qnum{display:block;color:var(--muted);font-size:14px;font-weight:600;margin-bottom:2px}
+.q label:not(.option){font-weight:400;font-size:15px;color:var(--muted);margin:4px 0}
+.option{border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0;min-height:52px;font-size:18px;color:var(--ink);cursor:pointer}
+.option.on{border-color:var(--accent);outline:2px solid var(--accent)}
+.q.bad{border-color:var(--bad)}
+.counter{font-size:14px;color:var(--muted);text-align:right;margin:4px 0 0}
+.submitbar{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0;margin-top:12px}
+.submitbar .meta{margin:0 0 6px}
+button.big,.button.big{display:block;width:100%;text-align:center;padding:15px;font-size:19px;margin:8px 0 0}
+.grade{font-size:22px;font-weight:700;margin:6px 0}
+.units{list-style:none;padding:0;margin:8px 0 0}
+.units li{padding:8px 0;border-top:1px solid var(--line)}
+a.item{padding:12px 14px;margin:8px 0}
+a.item strong{color:var(--accent)}
+form.search{display:flex;gap:8px;align-items:center;margin:0 0 8px}
+form.search input{flex:1}
+form.search button{margin:0}
+form.lang{align-self:flex-end;margin:0}
+form.lang button{margin:0;padding:6px 14px;font-size:15px;background:transparent;color:var(--accent);border:1px solid var(--line)}
+[dir=rtl] fieldset.q legend{float:right}
+[dir=rtl] .counter{text-align:left}
+[dir=rtl] button,[dir=rtl] .button{margin:8px 0 0 8px}
+[dir=rtl] button.big,[dir=rtl] .button.big,[dir=rtl] form.search button,[dir=rtl] form.lang button{margin:8px 0 0}
+[dir=rtl] th,[dir=rtl] td{text-align:right}
+"""
+
+    /**
+     * Keeps a student's answers in the browser while they work (so a closed tab or a flat battery loses
+     * nothing), counts what is answered, and shows which choice is picked. Plain ES5 for old phones.
+     */
+    const val ASSIGNMENT_JS = """
+(function(){var f=document.getElementById('aform');if(!f)return;var key='meshlearn-draft:'+f.getAttribute('data-key');
+var store=null;try{store=window.localStorage;}catch(e){}
+function all(){return f.querySelectorAll('input[type=text],input[type=radio],textarea');}
+function save(){if(!store)return;var d={},els=all();for(var i=0;i<els.length;i++){var el=els[i];
+if(el.type==='radio'){if(el.checked)d[el.name]=el.value;}else if(el.value)d[el.name]=el.value;}
+try{store.setItem(key,JSON.stringify(d));}catch(e){}}
+function restore(){if(!store)return;var d;try{d=JSON.parse(store.getItem(key)||'{}')||{};}catch(e){d={};}
+var els=all();for(var i=0;i<els.length;i++){var el=els[i];if(!d.hasOwnProperty(el.name))continue;
+if(el.type==='radio'){if(!f.querySelector('input[name="'+el.name+'"]:checked')&&el.value===d[el.name])el.checked=true;}
+else if(!el.value)el.value=d[el.name];}}
+function update(){var qs=f.querySelectorAll('fieldset.q'),done=0;for(var i=0;i<qs.length;i++){
+var q=qs[i],ok=false,els=q.querySelectorAll('input,textarea');for(var j=0;j<els.length;j++){var el=els[j];
+if(el.type==='radio'){var lab=el.parentNode;if(el.checked){ok=true;lab.className='option on';}else lab.className='option';}
+else if(el.value.replace(/\s/g,''))ok=true;
+if(el.tagName==='TEXTAREA'){var c=document.getElementById(el.id+'-count');if(c)c.innerHTML=el.value.length+' / '+el.getAttribute('maxlength');}}
+if(ok)done++;}var a=document.getElementById('answered');
+if(a)a.textContent=(a.getAttribute('data-words')||'{done} of {total} answered').replace('{done}',done).replace('{total}',qs.length);}
+restore();update();f.addEventListener('input',function(){save();update();});f.addEventListener('change',function(){save();update();});
+var bad=f.querySelector('[aria-invalid=true]');if(bad)bad.focus();})();
+"""
+
+    /** Forgets a saved draft once the work is safely turned in. */
+    const val CLEAR_DRAFT_JS =
+        "(function(){var el=document.getElementById('clear-draft');if(!el)return;" +
+            "try{window.localStorage.removeItem('meshlearn-draft:'+el.getAttribute('data-key'));}catch(e){}})();"
+
+    /** Seconds a student typically needs per question, as in comprehension.py. */
+    private val EXPECTED_S = mapOf("choice" to 30, "number" to 60, "text" to 30, "long" to 180)
+
+    /** "about 5 min" for a list of questions. */
+    fun minutesFor(questions: List<Map<String, Any?>>, words: Strings = Strings.ENGLISH): String {
+        val s = questions.sumOf { EXPECTED_S[it["type"]] ?: 45 }
+        return words("time.about_min", "n" to maxOf(1, Math.round(s / 60.0).toInt()))
+    }
+
+    /**
+     * A due date in words, and its style: ("Due tomorrow", "soon"), ("Overdue · was due Thu, Oct 16", "late").
+     * Empty when there is no date. Work already turned in is never "overdue".
+     */
+    fun dueLabel(due: String?, turnedIn: Boolean, today: java.util.Calendar = java.util.Calendar.getInstance(),
+                 words: Strings = Strings.ENGLISH): Pair<String, String> {
+        if (due.isNullOrBlank()) return "" to ""
+        val parsed = try {
+            SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }.parse(due.trim().take(10))
+        } catch (e: Exception) {
+            null
+        } ?: return words("due.on", "date" to due) to ""
+        val nice = words.date(parsed)
+        val start = (today.clone() as java.util.Calendar).apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val days = Math.round((parsed.time - start.timeInMillis) / 86_400_000.0).toInt()
+        return when {
+            turnedIn -> words("due.was", "date" to nice) to "done"
+            days < 0 -> words("due.overdue", "date" to nice) to "late"
+            days == 0 -> words("due.today") to "soon"
+            days == 1 -> words("due.tomorrow") to "soon"
+            else -> words("due.on", "date" to nice) to ""
+        }
+    }
 
     private val MIME = mapOf(
         "html" to "text/html", "htm" to "text/html", "txt" to "text/plain", "css" to "text/css", "js" to "text/javascript",

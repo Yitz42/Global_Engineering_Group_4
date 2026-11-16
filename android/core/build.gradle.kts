@@ -1,6 +1,7 @@
 plugins {
     id("org.jetbrains.kotlin.jvm")
     `java-library`
+    id("com.android.lint")   // lets the app's lint check this code against the oldest supported Android
 }
 
 java {
@@ -16,10 +17,11 @@ kotlin {
 
 sourceSets {
     main {
-        // The starter library pages ship inside the app, from the same files the Python phone uses.
+        // The starter library pages and the English words ship inside the app, from the same files
+        // the Python phone uses, so the two phones can never drift apart.
         resources {
             srcDir("../../meshlearn")
-            include("starter_library/**")
+            include("starter_library/**", "lang/eng.json")
         }
     }
 }
