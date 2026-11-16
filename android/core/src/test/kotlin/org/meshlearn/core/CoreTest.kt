@@ -201,6 +201,47 @@ class CoreTest {
         assertEquals(block("ASSIGNMENT_JS = r\"\"\""), Html.ASSIGNMENT_JS.trim())
     }
 
+    /** The school's words, from the same files the Python phone reads, give the same pages. */
+    @Test fun phoneSpeaksTheSchoolLanguage() {
+        val langDir = File(System.getProperty("meshlearn.repo"), "meshlearn/lang")
+        fun pack(code: String) = Json.parse(File(langDir, "$code.json").readText(Charsets.UTF_8)).asMap()!!
+
+        val es = Strings(pack("spa"))
+        val today = java.util.Calendar.getInstance().apply { set(2026, java.util.Calendar.NOVEMBER, 15, 10, 30) }
+        assertEquals("Para el vie 20 de nov" to "", Html.dueLabel("2026-11-20", false, today, es))
+        assertEquals("unos 3 min", Html.minutesFor(listOf(mapOf("type" to "long")), es))
+        assertEquals("1 pregunta", es.n("card.questions", 1))
+        assertEquals("5 preguntas", es.n("card.questions", 5))
+        assertEquals("Usa menos de 600 caracteres (ahora hay 640).", es.error("Keep this under 600 characters (640 now)."))
+        assertEquals("Necesita práctica", es.level("Needs work"))
+        val partial = Strings(mapOf("code" to "hau", "tag" to "ha", "strings" to mapOf("tab.home" to "Gida", "card.score" to "broken {nope}")))
+        assertEquals("Gida", partial("tab.home"))
+        assertEquals("Library", partial("tab.library"))
+        assertEquals("Score 3 / 4", partial("card.score", "score" to 3, "max" to 4))
+
+        // A memory card with Arabic as the school language and English as the second.
+        val dir = tmp()
+        val packDir = File(dir, "phone/assignments").apply { mkdirs() }
+        File(packDir, "language.json").writeText(Json.dumps(mapOf("school" to pack("ara"), "second" to pack("eng"))), Charsets.UTF_8)
+        val link = Link(0.0, 1)
+        val phone = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        fun req(method: String, path: String, body: String = "", cookie: String = "") = Request(method, path, emptyMap(),
+            mapOf("cookie" to cookie), body.toByteArray(), "192.168.43.10")
+        val home = String(phone.app.dispatch(req("GET", "/")).body, Charsets.UTF_8)
+        assertTrue(home.contains("<html lang='ar' dir='rtl'>") && home.contains("اكتب اسمك") && home.contains("action='/lang'"))
+        val switched = phone.app.dispatch(req("POST", "/lang", "to=eng&back=%2Flibrary"))
+        assertEquals(303, switched.status)
+        assertEquals("/library", switched.headers["Location"])
+        val cookie = switched.headers["Set-Cookie"]!!.substringBefore(";")
+        val library = String(phone.app.dispatch(req("GET", "/library", cookie = cookie)).body, Charsets.UTF_8)
+        assertTrue(library.contains("<html lang='en'>") && library.contains("Search the library") && library.contains(">العربية</button>"))
+        // Unknown languages and other sites are ignored.
+        val ignored = phone.app.dispatch(req("POST", "/lang", "to=xyz&back=https%3A%2F%2Fexample.org%2F"))
+        assertEquals("/", ignored.headers["Location"])
+        assertNull(ignored.headers["Set-Cookie"])
+    }
+
     @Test fun dueDatesInWords() {
         val today = java.util.Calendar.getInstance().apply { set(2026, java.util.Calendar.NOVEMBER, 15, 10, 30) }
         assertEquals("Due today" to "soon", Html.dueLabel("2026-11-15", false, today))

@@ -230,7 +230,9 @@ Moving a due date or hiding an assignment is always 1 packet.
 - Works in any browser on any device that can join Wi-Fi; no app install for students.
 - Large touch targets, visible labels on every field, error messages linked to their fields for screen readers, and light and dark themes that follow the device.
 - Numbers accept `3.5`, `3,5` (comma decimals used in Brazil and Germany), and fractions like `3/4`.
-- Library language per phone (English, Portuguese, German); text-only and smaller editions chosen automatically for small cards.
+- **The school's own language.** On the hub's **Language** page the teacher picks the language the school teaches in, from any language in the library catalog (more than 100). That one choice sets the words students see on every phone and the books suggested for the memory card. A second language is optional; students then switch with a button at the top of the phone's site. Right-to-left languages such as Arabic and Urdu mirror the whole page.
+- **Translations that can be partly done.** MeshLearn comes with its phone words in Spanish, French, Portuguese, Kiswahili and Arabic (`meshlearn/lang/`; not yet checked by native speakers). Any other language starts in English and the teacher translates word by word on the hub; anything not yet translated shows in English. Translations travel to phones with the lessons (Wi-Fi copy or memory card, never the radio), and can be downloaded and shared with other schools or sent to the project.
+- Text-only and smaller library editions are chosen automatically for small cards.
 - Students identify themselves by name only. No accounts, passwords, or personal data beyond what the teacher needs.
 
 ## Project layout
@@ -246,6 +248,9 @@ meshlearn/
   comprehension.py   scores per unit and course, mistake kinds, timing signals (sandbox rules)
   hub.py             teacher dashboard, open/hide per phone, course pack export
   hubpages.py        hub pages for courses, comprehension and learning data (export / import)
+  hublang.py         hub pages for the school's language: choose it, translate words, share them
+  language.py        the words students see, in the school's language, falling back to English
+  lang/              those words: eng.json (every word) and the translations that come with MeshLearn
   showcase.py        a realistic made-up school for demos (demo --showcase)
   phone.py           stored assignments, student website by course, timing, batching, library browser
   library.py         open-content planner and downloader

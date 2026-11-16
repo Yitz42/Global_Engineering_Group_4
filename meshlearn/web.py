@@ -19,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from .language import ENGLISH, Strings
+
 log = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 256 * 1024
@@ -263,6 +265,13 @@ a.item strong{color:var(--accent)}
 form.search{display:flex;gap:8px;align-items:center;margin:0 0 8px}
 form.search input{flex:1}
 form.search button{margin:0}
+form.lang{align-self:flex-end;margin:0}
+form.lang button{margin:0;padding:6px 14px;font-size:15px;background:transparent;color:var(--accent);border:1px solid var(--line)}
+[dir=rtl] fieldset.q legend{float:right}
+[dir=rtl] .counter{text-align:left}
+[dir=rtl] button,[dir=rtl] .button{margin:8px 0 0 8px}
+[dir=rtl] button.big,[dir=rtl] .button.big,[dir=rtl] form.search button,[dir=rtl] form.lang button{margin:8px 0 0}
+[dir=rtl] th,[dir=rtl] td{text-align:right}
 """
 
 # Keeps a student's answers in the browser while they work (so a closed tab or a flat battery loses
@@ -283,7 +292,8 @@ var q=qs[i],ok=false,els=q.querySelectorAll('input,textarea');for(var j=0;j<els.
 if(el.type==='radio'){var lab=el.parentNode;if(el.checked){ok=true;lab.className='option on';}else lab.className='option';}
 else if(el.value.replace(/\s/g,''))ok=true;
 if(el.tagName==='TEXTAREA'){var c=document.getElementById(el.id+'-count');if(c)c.innerHTML=el.value.length+' / '+el.getAttribute('maxlength');}}
-if(ok)done++;}var a=document.getElementById('answered');if(a)a.innerHTML=done+' of '+qs.length+' answered';}
+if(ok)done++;}var a=document.getElementById('answered');
+if(a)a.textContent=(a.getAttribute('data-words')||'{done} of {total} answered').replace('{done}',done).replace('{total}',qs.length);}
 restore();update();f.addEventListener('input',function(){save();update();});f.addEventListener('change',function(){save();update();});
 var bad=f.querySelector('[aria-invalid=true]');if(bad)bad.focus();})();
 """
@@ -295,13 +305,14 @@ CLEAR_DRAFT_JS = ("(function(){var el=document.getElementById('clear-draft');if(
 _EXPECTED_S = {"choice": 30, "number": 60, "text": 30, "long": 180}  # as in comprehension.py
 
 
-def minutes_for(questions) -> str:
+def minutes_for(questions, words: Strings = ENGLISH) -> str:
     """'about 5 min' for a list of questions."""
     seconds = sum(_EXPECTED_S.get(q.get("type"), 45) for q in questions)
-    return f"about {max(1, int(seconds / 60 + 0.5))} min"
+    return words("time.about_min", n=max(1, int(seconds / 60 + 0.5)))
 
 
-def due_label(due: str, turned_in: bool, today: Optional[datetime.date] = None) -> Tuple[str, str]:
+def due_label(due: str, turned_in: bool, today: Optional[datetime.date] = None,
+              words: Strings = ENGLISH) -> Tuple[str, str]:
     """A due date in words and its style, e.g. ('Due tomorrow', 'soon') or ('Overdue · was due Thu, Oct 16', 'late').
     Empty when there is no date. Work already turned in is never overdue."""
     if not due or not due.strip():
@@ -309,23 +320,25 @@ def due_label(due: str, turned_in: bool, today: Optional[datetime.date] = None) 
     try:
         when = datetime.date.fromisoformat(due.strip()[:10])
     except ValueError:
-        return f"Due {due}", ""
-    nice = f"{when:%a}, {when:%b} {when.day}"
+        return words("due.on", date=due), ""
+    nice = words.date(when)
     days = (when - (today or datetime.date.today())).days
     if turned_in:
-        return f"Was due {nice}", "done"
+        return words("due.was", date=nice), "done"
     if days < 0:
-        return f"Overdue · was due {nice}", "late"
+        return words("due.overdue", date=nice), "late"
     if days == 0:
-        return "Due today", "soon"
+        return words("due.today"), "soon"
     if days == 1:
-        return "Due tomorrow", "soon"
-    return f"Due {nice}", ""
+        return words("due.tomorrow"), "soon"
+    return words("due.on", date=nice), ""
 
 
-def page(title: str, body: str, nav: str = "", site: str = "MeshLearn", wide: bool = False, extra_css: str = "") -> str:
+def page(title: str, body: str, nav: str = "", site: str = "MeshLearn", wide: bool = False, extra_css: str = "",
+         lang: str = "en", direction: str = "ltr") -> str:
+    attrs = f"lang='{esc(lang)}'" + (" dir='rtl'" if direction == "rtl" else "")
     return (
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        f"<!doctype html><html {attrs}><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{esc(title)} · {esc(site)}</title><style>{CSS}{extra_css}</style></head>"
         f"<body><header><strong>{esc(site)}</strong>{nav}</header>"

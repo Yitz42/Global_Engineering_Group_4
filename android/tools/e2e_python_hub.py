@@ -106,6 +106,18 @@ def main() -> int:
         assert json.loads(row["answers"])["q2"] == "3/4"
         wait_for("grade came back to the phone", lambda: "3 / 7 so far" in get("/results"))
         wait_for("phone shows delivery confirmed", lambda: "Your teacher has it" in get("/results"))
+
+        # The teacher picks Kiswahili for the school, with English as a second language; the words
+        # reach the phone with the next Wi-Fi copy, and the student can switch back to English.
+        web.open(f"http://127.0.0.1:{HUB_HTTP}/language", data=urllib.parse.urlencode({"lang": "swa", "lang2": "eng"}).encode(),
+                 timeout=10).read()
+        page = post("/status/sync", {"hub_url": f"127.0.0.1:{HUB_HTTP}"})
+        assert "Lugha kwenye simu hii: Kiswahili · English" in page, page[-600:]
+        home = get("/")
+        assert "<html lang='sw'>" in home and "Habari, Lena Müller" in home, home[:800]
+        english = post("/lang", {"to": "eng", "back": "/results"})
+        assert "<html lang='en'>" in english and "3 / 7 so far" in english, english[:800]
+        print("  ok: the school's language came with the lessons, and the student switched to English")
         print("PASSED")
         return 0
     except BaseException:

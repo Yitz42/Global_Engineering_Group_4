@@ -6,7 +6,8 @@ Writes:
   core/src/main/kotlin/org/meshlearn/core/Zdict.kt   the preset compression dictionary (protocol.ZDICT)
   core/src/test/resources/vectors.json              frames and values made by the Python code,
                                                      which the Kotlin tests must read identically
-Run it again whenever protocol.py or assignments.py changes.
+Run it again whenever protocol.py or assignments.py changes. (The English words, meshlearn/lang/eng.json,
+need no step: core/build.gradle.kts packs that file itself.)
 """
 
 import base64

@@ -118,8 +118,9 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-a
 .stat{font-size:28px;font-weight:700}
 """
 
-    fun page(title: String, body: String, nav: String = "", site: String = "MeshLearn", extraCss: String = ""): String =
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'>" +
+    fun page(title: String, body: String, nav: String = "", site: String = "MeshLearn", extraCss: String = "",
+             lang: String = "en", dir: String = "ltr"): String =
+        "<!doctype html><html lang='${esc(lang)}'${if (dir == "rtl") " dir='rtl'" else ""}><head><meta charset='utf-8'>" +
             "<meta name='viewport' content='width=device-width,initial-scale=1'>" +
             "<title>${esc(title)} · ${esc(site)}</title><style>$CSS$extraCss</style></head>" +
             "<body><header><strong>${esc(site)}</strong>$nav</header>" +
@@ -170,6 +171,13 @@ a.item strong{color:var(--accent)}
 form.search{display:flex;gap:8px;align-items:center;margin:0 0 8px}
 form.search input{flex:1}
 form.search button{margin:0}
+form.lang{align-self:flex-end;margin:0}
+form.lang button{margin:0;padding:6px 14px;font-size:15px;background:transparent;color:var(--accent);border:1px solid var(--line)}
+[dir=rtl] fieldset.q legend{float:right}
+[dir=rtl] .counter{text-align:left}
+[dir=rtl] button,[dir=rtl] .button{margin:8px 0 0 8px}
+[dir=rtl] button.big,[dir=rtl] .button.big,[dir=rtl] form.search button,[dir=rtl] form.lang button{margin:8px 0 0}
+[dir=rtl] th,[dir=rtl] td{text-align:right}
 """
 
     /**
@@ -192,7 +200,8 @@ var q=qs[i],ok=false,els=q.querySelectorAll('input,textarea');for(var j=0;j<els.
 if(el.type==='radio'){var lab=el.parentNode;if(el.checked){ok=true;lab.className='option on';}else lab.className='option';}
 else if(el.value.replace(/\s/g,''))ok=true;
 if(el.tagName==='TEXTAREA'){var c=document.getElementById(el.id+'-count');if(c)c.innerHTML=el.value.length+' / '+el.getAttribute('maxlength');}}
-if(ok)done++;}var a=document.getElementById('answered');if(a)a.innerHTML=done+' of '+qs.length+' answered';}
+if(ok)done++;}var a=document.getElementById('answered');
+if(a)a.textContent=(a.getAttribute('data-words')||'{done} of {total} answered').replace('{done}',done).replace('{total}',qs.length);}
 restore();update();f.addEventListener('input',function(){save();update();});f.addEventListener('change',function(){save();update();});
 var bad=f.querySelector('[aria-invalid=true]');if(bad)bad.focus();})();
 """
@@ -206,34 +215,35 @@ var bad=f.querySelector('[aria-invalid=true]');if(bad)bad.focus();})();
     private val EXPECTED_S = mapOf("choice" to 30, "number" to 60, "text" to 30, "long" to 180)
 
     /** "about 5 min" for a list of questions. */
-    fun minutesFor(questions: List<Map<String, Any?>>): String {
+    fun minutesFor(questions: List<Map<String, Any?>>, words: Strings = Strings.ENGLISH): String {
         val s = questions.sumOf { EXPECTED_S[it["type"]] ?: 45 }
-        return "about ${maxOf(1, Math.round(s / 60.0).toInt())} min"
+        return words("time.about_min", "n" to maxOf(1, Math.round(s / 60.0).toInt()))
     }
 
     /**
      * A due date in words, and its style: ("Due tomorrow", "soon"), ("Overdue · was due Thu, Oct 16", "late").
      * Empty when there is no date. Work already turned in is never "overdue".
      */
-    fun dueLabel(due: String?, turnedIn: Boolean, today: java.util.Calendar = java.util.Calendar.getInstance()): Pair<String, String> {
+    fun dueLabel(due: String?, turnedIn: Boolean, today: java.util.Calendar = java.util.Calendar.getInstance(),
+                 words: Strings = Strings.ENGLISH): Pair<String, String> {
         if (due.isNullOrBlank()) return "" to ""
         val parsed = try {
             SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }.parse(due.trim().take(10))
         } catch (e: Exception) {
             null
-        } ?: return "Due $due" to ""
-        val nice = SimpleDateFormat("EEE, MMM d", Locale.US).format(parsed)
+        } ?: return words("due.on", "date" to due) to ""
+        val nice = words.date(parsed)
         val start = (today.clone() as java.util.Calendar).apply {
             set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
             set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
         }
         val days = Math.round((parsed.time - start.timeInMillis) / 86_400_000.0).toInt()
         return when {
-            turnedIn -> "Was due $nice" to "done"
-            days < 0 -> "Overdue · was due $nice" to "late"
-            days == 0 -> "Due today" to "soon"
-            days == 1 -> "Due tomorrow" to "soon"
-            else -> "Due $nice" to ""
+            turnedIn -> words("due.was", "date" to nice) to "done"
+            days < 0 -> words("due.overdue", "date" to nice) to "late"
+            days == 0 -> words("due.today") to "soon"
+            days == 1 -> words("due.tomorrow") to "soon"
+            else -> words("due.on", "date" to nice) to ""
         }
     }
 
