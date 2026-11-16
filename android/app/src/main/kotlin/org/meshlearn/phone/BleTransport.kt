@@ -51,6 +51,18 @@ class BleTransport(
     @Volatile private var gatt: BluetoothGatt? = null
     @Volatile private var ready = false
     @Volatile private var closed = false
+    /** The Bluetooth link itself is up (setting up MeshLearn on it can still take a while). */
+    @Volatile private var linkUp = false
+    /** Why this connection was given up, kept so the screen shows it rather than "lost". */
+    @Volatile private var failReason: String? = null
+    /** Note one step of connecting, for the radio log on the status screen. */
+    private fun note(what: String) {
+        Log.i(TAG, what)
+        synchronized(events) {
+            events.addLast("${clock.format(java.util.Date())}  $what")
+            while (events.size > 80) events.removeFirst()
+        }
+    }
     private var toRadio: BluetoothGattCharacteristic? = null
     private var fromRadio: BluetoothGattCharacteristic? = null
     private var fromNum: BluetoothGattCharacteristic? = null
@@ -70,6 +82,7 @@ class BleTransport(
         if (closed) return
         val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         if (adapter == null || !adapter.isEnabled) {
+            if (status != "Bluetooth is off") note("Bluetooth is off; waiting")
             status = "Bluetooth is off"
             retryLater()
             return
@@ -78,14 +91,20 @@ class BleTransport(
             adapter.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
             status = "Radio address is not valid: $address"
+            note(status)
             return
         }
+        failReason = null
+        linkUp = false
         status = "Connecting to the radio…"
+        val bond = when (device.bondState) { BluetoothDevice.BOND_BONDED -> "paired"; BluetoothDevice.BOND_BONDING -> "pairing"; else -> "not paired" }
+        note("Connecting to $address ($bond)")
         @Suppress("DEPRECATION")   // still the call that works on Android 7 through 16
         val g = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
         gatt = g
         if (g == null) {
             status = "Bluetooth is not ready; trying again"
+            note(status)
             retryLater()
         } else {
             watchConnecting(g)
@@ -127,11 +146,15 @@ class BleTransport(
         after(5000) { if (!closed && !ready) connect() }
     }
 
-    /** Android sometimes never answers a connection attempt; start again if it hangs. */
+    /**
+     * Android sometimes never answers a connection attempt; start again if it hangs. This only
+     * covers making the link: once it is up, reading the radio's settings and the list of radios
+     * it has heard can take well over a minute on a busy mesh, and must not be cut short.
+     */
     private fun watchConnecting(g: BluetoothGatt) {
         after(40_000) {
-            if (!closed && !ready && gatt === g) {
-                Log.w(TAG, "connecting took too long; trying again")
+            if (!closed && !linkUp && gatt === g) {
+                note("No answer from the radio after 40 s; trying again")
                 runCatching { g.close() }
                 gatt = null
                 status = "Lost the radio; reconnecting"
@@ -157,17 +180,31 @@ class BleTransport(
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, st: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED && st == BluetoothGatt.GATT_SUCCESS) {
+                linkUp = true
+                status = "Reading the radio's settings…"
+                note("Bluetooth link is up; setting up")
                 later(ops) { setUp(g) }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED || st != BluetoothGatt.GATT_SUCCESS) {
                 // Disconnected, or a connection that came up with an error (often status 133
                 // just after the radio's last connection closed): start over in a moment.
+                val meaning = when (st) {
+                    0 -> ", closed normally"
+                    8 -> ", the radio stopped answering"
+                    19 -> ", the radio hung up"
+                    22 -> ", this phone hung up"
+                    133 -> ", connection refused or failed"
+                    147 -> ", the radio did not answer"
+                    else -> ""
+                }
+                note("Link down (Bluetooth status $st$meaning)")
                 ready = false
+                linkUp = false
                 done(false)
                 disconnected?.countDown()
                 runCatching { g.close() }
                 if (gatt === g) gatt = null
                 if (!closed) {
-                    status = "Lost the radio; reconnecting"
+                    status = failReason?.let { "$it. Trying again" } ?: "Lost the radio; reconnecting"
                     retryLater()
                 }
             }
@@ -201,7 +238,7 @@ class BleTransport(
     }
 
     private fun setUp(g: BluetoothGatt) {
-        op { g.requestMtu(512) }    // fine if refused: frames are small
+        if (!op { g.requestMtu(512) }) note("Radio kept the small packet size")   // fine: frames are small
         if (!op(20) { g.discoverServices() }) return fail(g, "Could not read the radio's services")
         val service = g.getService(SERVICE) ?: return fail(g, "That device is not a Meshtastic radio")
         toRadio = service.getCharacteristic(TORADIO)
@@ -211,7 +248,7 @@ class BleTransport(
         if (toRadio == null || fromRadio == null) return fail(g, "Radio is missing TORADIO/FROMRADIO")
         g.setCharacteristicNotification(num, true)
         num.getDescriptor(CCCD)?.let { d ->
-            op {
+            val ok = op {
                 if (Build.VERSION.SDK_INT >= 33) {
                     g.writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
                 } else {
@@ -221,17 +258,21 @@ class BleTransport(
                     g.writeDescriptor(d)
                 }
             }
+            if (!ok) note("Radio did not turn on new-message alerts")
         }
         // Ask for the radio's info (and its node number), then read everything it has queued.
+        note("Asking the radio for its settings")
         if (!write(MeshtasticProto.wantConfig())) return fail(g, "Pair the radio in Android's Bluetooth settings first (PIN on its screen)")
-        drain()
+        val n = drain()
         ready = true
         status = "Connected" + (if (nodeId.isNotEmpty()) " ($nodeId)" else "")
+        note("Connected: read $n items from the radio" + (if (nodeId.isNotEmpty()) "; it is $nodeId" else ""))
     }
 
     private fun fail(g: BluetoothGatt, why: String) {
+        failReason = why
         status = why
-        Log.w(TAG, why)
+        note("Gave up: $why")
         g.disconnect()
     }
 
@@ -252,15 +293,24 @@ class BleTransport(
         }
     }
 
-    /** Read FROMRADIO until the radio has nothing more. Runs on the ops thread. */
-    private fun drain() {
-        val g = gatt ?: return
-        val c = fromRadio ?: return
-        repeat(500) {
+    /** Read FROMRADIO until the radio has nothing more; returns how many items. Runs on the ops thread. */
+    private fun drain(): Int {
+        val g = gatt ?: return 0
+        val c = fromRadio ?: return 0
+        var count = 0
+        repeat(2000) {
             readValue = null
-            if (!op { g.readCharacteristic(c) }) return
-            val bytes = readValue ?: return
-            if (bytes.isEmpty()) return
+            if (!op { g.readCharacteristic(c) }) {
+                if (!ready) note("A read from the radio failed after $count items")
+                return count
+            }
+            val bytes = readValue ?: return count
+            if (bytes.isEmpty()) return count
+            count++
+            if (!ready && count % 100 == 0) {
+                status = "Reading the radio's settings… ($count)"
+                note("Read $count items so far")
+            }
             when (val msg = runCatching { MeshtasticProto.parseFromRadio(bytes) }.getOrNull()) {
                 is MeshtasticProto.FromRadio.MyInfo -> {
                     nodeId = MeshtasticProto.nodeIdOf(msg.nodeNum)
@@ -274,6 +324,7 @@ class BleTransport(
                 else -> {}
             }
         }
+        return count
     }
 
     override fun send(frame: ByteArray, dest: String) {
@@ -285,6 +336,7 @@ class BleTransport(
     }
 
     override fun close() {
+        note("MeshLearn stopped; letting go of the radio")
         closed = true
         ready = false
         val g = gatt
@@ -305,6 +357,12 @@ class BleTransport(
 
     companion object {
         private const val TAG = "BleTransport"
+        // Kept across restarts of MeshLearn, so "Try again" does not wipe what happened.
+        private val events = java.util.ArrayDeque<String>()
+        private val clock = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+
+        /** The latest connection steps, oldest first. */
+        fun recentEvents(): List<String> = synchronized(events) { events.toList() }
         val SERVICE: UUID = UUID.fromString(MeshtasticProto.SERVICE_UUID)
         val TORADIO: UUID = UUID.fromString(MeshtasticProto.TORADIO_UUID)
         val FROMRADIO: UUID = UUID.fromString(MeshtasticProto.FROMRADIO_UUID)

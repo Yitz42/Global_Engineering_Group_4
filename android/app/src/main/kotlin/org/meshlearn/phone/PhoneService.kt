@@ -100,6 +100,7 @@ class PhoneService : Service() {
         fun count(sql: String) = runCatching { p.db.one(sql)?.long("n") }.getOrNull() ?: 0L
         return state.copy(
             radio = radio, radioOk = radioOk, nodeId = p.nodeId,
+            radioLog = BleTransport.recentEvents(),
             pending = q["pending"] ?: 0, framesSent = q["frames_sent"] ?: 0,
             unbatched = count("SELECT COUNT(*) AS n FROM submissions WHERE msg_id IS NULL"),
             assignments = count("SELECT COUNT(*) AS n FROM assignments"),
@@ -169,6 +170,7 @@ class PhoneService : Service() {
         val unbatched: Long = 0,
         val assignments: Long = 0,
         val lastHeard: Double = 0.0,
+        val radioLog: List<String> = emptyList(),
         val error: String = "",
     )
 

@@ -900,6 +900,25 @@ class MainActivity : Activity() {
             },
         ))
 
+        // Each step of connecting to the radio, for whoever helps when it won't connect.
+        val logText = label("", 13f, BODY).apply { typeface = Typeface.MONOSPACE; setLineSpacing(0f, 1.15f) }
+        val radioDetails = expander("Radio details", "Each step of connecting, to send if it won't connect",
+            column(10).apply {
+                setPadding(dp(14), 0, dp(14), dp(14))
+                addView(logText)
+                addView(bigButton("Send radio details") {
+                    val st = snapshot()
+                    val report = "MeshLearn radio details\nPhone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}\n" +
+                        "Radio: ${settings.bleName} (${settings.bleAddress}), channel ${settings.channel}\nNow: ${st.radio}\n\n" +
+                        BleTransport.recentEvents().joinToString("\n")
+                    val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "MeshLearn radio details")
+                        .putExtra(Intent.EXTRA_TEXT, report)
+                    runCatching { startActivity(Intent.createChooser(send, "Send the radio details")) }
+                })
+            })
+        c.addView(radioDetails)
+
         val power = TextView(this).apply {
             textSize = 16f
             gravity = Gravity.CENTER
@@ -938,12 +957,14 @@ class MainActivity : Activity() {
                 none -> radioTile.set("Not set up", MUTED)
                 !st.running -> radioTile.set("Paused", MUTED)
                 st.radioOk -> radioTile.set("Connected", GREEN_TEXT)
-                st.radio.startsWith("Connecting") -> radioTile.set("Connecting", AMBER_TEXT, warn = true)
+                st.radio.startsWith("Connecting") || st.radio.startsWith("Reading") -> radioTile.set("Connecting", AMBER_TEXT, warn = true)
                 st.radio.startsWith("Bluetooth is off") -> radioTile.set("Bluetooth off", AMBER_TEXT, warn = true)
                 else -> radioTile.set("Not found", AMBER_TEXT, warn = true)
             }
             why.text = "Right now: ${st.radio}"
             why.visibility = if (st.radio.isNotEmpty()) View.VISIBLE else View.GONE
+            radioDetails.visibility = if (settings.radioMode == "ble") View.VISIBLE else View.GONE
+            logText.text = BleTransport.recentEvents().takeLast(30).joinToString("\n").ifEmpty { "Nothing yet. Start MeshLearn to connect." }
             schoolTile.set(if (st.lastHeard > 0) ago(st.lastHeard).replaceFirstChar { it.uppercase() } else "Not yet")
             val waiting = st.pending + st.unbatched
             waitingTile.set(if (waiting == 0L) "Nothing" else plural(waiting, "message"))
