@@ -126,6 +126,8 @@ class Phone:
 
     def say_hello(self) -> None:
         usage = shutil.disk_usage(self.data_dir)
+        # Only the newest hello matters: a phone restarted often must not queue a pile of them.
+        self.messenger.drop_pending(self.hub_id, protocol.HELLO)
         self.messenger.send(self.hub_id, protocol.HELLO, {
             "n": self.name, "f": usage.free // (1024 * 1024), "l": len(self.library_items()),
             "sw": __version__, "inv": self.inventory(),

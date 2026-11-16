@@ -83,6 +83,8 @@ class Phone(
         db.all("SELECT id, version FROM assignments").associate { it.str("id")!! to it.str("version")!! }
 
     fun sayHello() {
+        // Only the newest hello matters: a phone restarted often must not queue a pile of them.
+        messenger.dropPending(hubId, Protocol.HELLO)
         messenger.send(hubId, Protocol.HELLO, linkedMapOf(
             "n" to name, "f" to dataDir.usableSpace / (1024 * 1024), "l" to libraryItems().size.toLong(),
             "sw" to VERSION, "inv" to inventory(),

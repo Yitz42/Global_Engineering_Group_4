@@ -19,6 +19,7 @@ import org.meshlearn.core.Transport
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -45,6 +46,7 @@ class BleTransport(
     private val pacer = Pacer(minIntervalS)
     private val ops = Executors.newSingleThreadExecutor { Thread(it, "ble-ops").apply { isDaemon = true } }
     private val rx = Executors.newSingleThreadExecutor { Thread(it, "ble-rx").apply { isDaemon = true } }
+    private val timer = Executors.newSingleThreadScheduledExecutor { Thread(it, "ble-timer").apply { isDaemon = true } }
     private var onFrame: FrameHandler = { _, _ -> }
     @Volatile private var gatt: BluetoothGatt? = null
     @Volatile private var ready = false
@@ -57,6 +59,7 @@ class BleTransport(
     @Volatile private var latch: CountDownLatch? = null
     @Volatile private var opOk = false
     @Volatile private var readValue: ByteArray? = null
+    @Volatile private var disconnected: CountDownLatch? = null
 
     override fun start(onFrame: FrameHandler) {
         this.onFrame = onFrame
@@ -79,14 +82,61 @@ class BleTransport(
         }
         status = "Connecting to the radio…"
         @Suppress("DEPRECATION")   // still the call that works on Android 7 through 16
-        gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        val g = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        gatt = g
+        if (g == null) {
+            status = "Bluetooth is not ready; trying again"
+            retryLater()
+        } else {
+            watchConnecting(g)
+        }
+    }
+
+    /**
+     * Run [block] on [executor] without ever crashing the app: once [close] has stopped the
+     * threads, or interrupted a wait, the work is simply dropped. (An exception escaping a
+     * thread-pool task ends the whole app on Android.)
+     */
+    private fun later(executor: java.util.concurrent.ExecutorService, block: () -> Unit) {
+        try {
+            executor.execute {
+                try {
+                    block()
+                } catch (e: InterruptedException) {
+                    // closing
+                } catch (e: Exception) {
+                    if (!closed) Log.w(TAG, "radio task failed", e)
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            // closed
+        }
+    }
+
+    /** Run [block] on the operations thread after [ms], keeping that thread free meanwhile. */
+    private fun after(ms: Long, block: () -> Unit) {
+        try {
+            timer.schedule({ later(ops, block) }, ms, TimeUnit.MILLISECONDS)
+        } catch (e: RejectedExecutionException) {
+            // closed
+        }
     }
 
     private fun retryLater() {
         if (closed) return
-        ops.execute {
-            Thread.sleep(5000)
-            if (!closed && !ready) connect()
+        after(5000) { if (!closed && !ready) connect() }
+    }
+
+    /** Android sometimes never answers a connection attempt; start again if it hangs. */
+    private fun watchConnecting(g: BluetoothGatt) {
+        after(40_000) {
+            if (!closed && !ready && gatt === g) {
+                Log.w(TAG, "connecting took too long; trying again")
+                runCatching { g.close() }
+                gatt = null
+                status = "Lost the radio; reconnecting"
+                connect()
+            }
         }
     }
 
@@ -107,11 +157,14 @@ class BleTransport(
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, st: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED && st == BluetoothGatt.GATT_SUCCESS) {
-                ops.execute { setUp(g) }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                later(ops) { setUp(g) }
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED || st != BluetoothGatt.GATT_SUCCESS) {
+                // Disconnected, or a connection that came up with an error (often status 133
+                // just after the radio's last connection closed): start over in a moment.
                 ready = false
                 done(false)
-                g.close()
+                disconnected?.countDown()
+                runCatching { g.close() }
                 if (gatt === g) gatt = null
                 if (!closed) {
                     status = "Lost the radio; reconnecting"
@@ -139,11 +192,11 @@ class BleTransport(
 
         @Deprecated("Android 12 and older")
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
-            if (c.uuid == FROMNUM) ops.execute { drain() }
+            if (c.uuid == FROMNUM) later(ops) { drain() }
         }
 
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
-            if (c.uuid == FROMNUM) ops.execute { drain() }
+            if (c.uuid == FROMNUM) later(ops) { drain() }
         }
     }
 
@@ -216,7 +269,7 @@ class BleTransport(
                 is MeshtasticProto.FromRadio.Packet -> if (msg.portnum == MeshtasticProto.PRIVATE_APP) {
                     val src = MeshtasticProto.nodeIdOf(msg.from)
                     val payload = msg.payload
-                    rx.execute { runCatching { onFrame(payload, src) }.onFailure { Log.w(TAG, "frame handler failed", it) } }
+                    later(rx) { onFrame(payload, src) }
                 }
                 else -> {}
             }
@@ -234,8 +287,18 @@ class BleTransport(
     override fun close() {
         closed = true
         ready = false
-        runCatching { gatt?.disconnect() }
-        runCatching { gatt?.close() }
+        val g = gatt
+        if (g != null) {
+            // Let the radio hear the goodbye before letting go: closing at once can leave the
+            // radio thinking this phone is still connected, so the next connection fails.
+            val bye = CountDownLatch(1)
+            disconnected = bye
+            runCatching { g.disconnect() }
+            runCatching { bye.await(1500, TimeUnit.MILLISECONDS) }
+            runCatching { g.close() }
+            gatt = null
+        }
+        timer.shutdownNow()
         ops.shutdownNow()
         rx.shutdownNow()
     }

@@ -63,6 +63,10 @@ class Messenger(
         return msgId
     }
 
+    /** Forget queued messages of one type that a newer one replaces. Returns how many. */
+    fun dropPending(dest: String, type: String): Int =
+        db.execute("DELETE FROM outbox WHERE dest = ? AND type = ? AND status = 'pending'", dest, type)
+
     fun status(): Map<String, Long> {
         val counts = linkedMapOf("pending" to 0L, "acked" to 0L, "failed" to 0L)
         for (r in db.all("SELECT status, COUNT(*) AS n FROM outbox GROUP BY status")) {

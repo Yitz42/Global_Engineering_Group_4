@@ -696,7 +696,8 @@ class MainActivity : Activity() {
     }
 
     private fun checkScreen(): View {
-        if (PhoneService.instance == null) startService()
+        // Start MeshLearn, or restart it so it uses the settings just chosen.
+        if (PhoneService.instance == null) startService() else restartService()
         val c = content()
         c.addView(h1("Checking everything works"))
         val intro = label("", 17f, BODY)
@@ -818,6 +819,8 @@ class MainActivity : Activity() {
         }
         val c = column(12).apply { setPadding(dp(16), dp(8), dp(16), dp(16)) }
 
+        MeshLearnApp.lastCrash(this)?.let { report -> c.addView(crashCard(report)) }
+
         val stateIcon = icon(R.drawable.ic_check, GREEN, 30)
         val stateBadge = FrameLayout(this).apply {
             addView(stateIcon, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER))
@@ -861,11 +864,13 @@ class MainActivity : Activity() {
             trying = true
             retry.text = "Looking for the radio…"
             look(retry, false)
-            PhoneService.stop(this)
-            ui.postDelayed({ startService() }, 800)
-            ui.postDelayed({ trying = false; retry.text = "Try again"; look(retry, true) }, 8000)
+            restartService {
+                ui.postDelayed({ trying = false; retry.text = "Try again"; look(retry, true) }, 10_000)
+            }
         }
+        val why = label("", 15f, AMBER_TEXT, true)
         val trouble = column(8).apply {
+            addView(why)
             addView(label("Try these", 18f, INK, true).apply { setPadding(0, dp(6), 0, 0) })
             addView(numbered(listOf("Check the radio is switched on and its light blinks.", "Charge it, or plug it in.",
                 "Move it within a few steps of this phone.")))
@@ -933,8 +938,12 @@ class MainActivity : Activity() {
                 none -> radioTile.set("Not set up", MUTED)
                 !st.running -> radioTile.set("Paused", MUTED)
                 st.radioOk -> radioTile.set("Connected", GREEN_TEXT)
+                st.radio.startsWith("Connecting") -> radioTile.set("Connecting", AMBER_TEXT, warn = true)
+                st.radio.startsWith("Bluetooth is off") -> radioTile.set("Bluetooth off", AMBER_TEXT, warn = true)
                 else -> radioTile.set("Not found", AMBER_TEXT, warn = true)
             }
+            why.text = "Right now: ${st.radio}"
+            why.visibility = if (st.radio.isNotEmpty()) View.VISIBLE else View.GONE
             schoolTile.set(if (st.lastHeard > 0) ago(st.lastHeard).replaceFirstChar { it.uppercase() } else "Not yet")
             val waiting = st.pending + st.unbatched
             waitingTile.set(if (waiting == 0L) "Nothing" else plural(waiting, "message"))
@@ -957,6 +966,38 @@ class MainActivity : Activity() {
             }
         }
         return page(SOFT, header, c, bottom)
+    }
+
+    /** "MeshLearn stopped unexpectedly", with a way to send the details on. */
+    private fun crashCard(report: String): View {
+        fun small(text: String, fill: Int, fg: Int, onClick: () -> Unit) = TextView(this).apply {
+            this.text = text
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(fg)
+            gravity = Gravity.CENTER
+            minHeight = dp(44)
+            setPadding(dp(14), 0, dp(14), 0)
+            background = ripple(fill, 10, if (fill == Color.WHITE) LINE else 0, if (fill == Color.WHITE) 1 else 0)
+            tap(this, onClick)
+        }
+        return column(10).apply {
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = shape(Color.WHITE, 16, AMBER_LINE, 2)
+            addView(titled("MeshLearn stopped unexpectedly", "Sending the details helps get it fixed. They contain no student work.", 17f))
+            addView(row(8).apply {
+                addView(small("Send details", AMBER_DARK, Color.WHITE) {
+                    val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "MeshLearn crash report")
+                        .putExtra(Intent.EXTRA_TEXT, report)
+                    runCatching { startActivity(Intent.createChooser(send, "Send the crash details")) }
+                })
+                addView(small("Dismiss", Color.WHITE, INK) {
+                    MeshLearnApp.clearCrash(this@MainActivity)
+                    render()
+                })
+            })
+        }
     }
 
     private fun askToPause() {
@@ -1164,10 +1205,26 @@ class MainActivity : Activity() {
     }
 
     private fun restartIfRunning() {
-        if (PhoneService.instance != null) {
-            PhoneService.stop(this)
-            ui.postDelayed({ PhoneService.start(this) }, 800)
+        if (PhoneService.instance != null) restartService()
+    }
+
+    /**
+     * Stop MeshLearn, wait until it has really let go of the radio, then start it again.
+     * Starting too soon makes the radio refuse the new Bluetooth connection.
+     */
+    private fun restartService(then: () -> Unit = {}) {
+        PhoneService.stop(this)
+        val until = System.currentTimeMillis() + 10_000
+        val waitForStop = object : Runnable {
+            override fun run() {
+                if (PhoneService.instance != null && System.currentTimeMillis() < until) {
+                    ui.postDelayed(this, 200)
+                } else {
+                    ui.postDelayed({ startService(); then() }, 1500)
+                }
+            }
         }
+        ui.postDelayed(waitForStop, 200)
     }
 
     // -- storage ------------------------------------------------------------------

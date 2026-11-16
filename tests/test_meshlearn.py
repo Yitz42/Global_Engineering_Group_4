@@ -174,6 +174,17 @@ class MessengerTests(unittest.TestCase):
         self.addCleanup(mb.stop)
         return ma, mb
 
+    def test_a_new_hello_replaces_one_still_waiting(self):
+        # Nothing listens on this port, so messages stay queued.
+        t = UdpSimTransport("a", free_port(socket.SOCK_DGRAM), {"b": ("127.0.0.1", free_port(socket.SOCK_DGRAM))})
+        m = Messenger(t, os.path.join(self.tmp, "a.db"), lambda msg: None, retry_s=60, max_retry_s=60)
+        self.addCleanup(t.close)
+        for i in range(3):
+            m.drop_pending("b", protocol.HELLO)
+            m.send("b", protocol.HELLO, {"n": "phone %d" % i})
+        m.send("b", protocol.SUBMIT, {"a": 1, "s": "Ana", "r": []})
+        self.assertEqual(m.status()["pending"], 2)   # the last hello and the work
+
     def test_delivers_through_heavy_loss_exactly_once(self):
         ma, _ = self.pair(0.4)
         ids = [ma.send("b", protocol.SUBMIT, {"i": i, "pad": os.urandom(150).hex()}) for i in range(5)]

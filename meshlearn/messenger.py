@@ -105,6 +105,14 @@ class Messenger:
         self._wake.set()
         return msg_id
 
+    def drop_pending(self, dest: str, msg_type: str) -> int:
+        """Forget queued messages of one type that a newer one replaces. Returns how many."""
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM outbox WHERE dest = ? AND type = ? AND status = 'pending'", (dest, msg_type))
+            self._db.commit()
+            return cur.rowcount
+
     def status(self) -> Dict[str, int]:
         with self._lock:
             rows = self._db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status").fetchall()

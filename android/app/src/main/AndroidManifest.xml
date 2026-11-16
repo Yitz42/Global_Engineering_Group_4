@@ -23,6 +23,7 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
     <application
+        android:name=".MeshLearnApp"
         android:label="MeshLearn Phone"
         android:icon="@drawable/ic_launcher"
         android:allowBackup="false"
