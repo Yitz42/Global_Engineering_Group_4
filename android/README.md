@@ -65,9 +65,12 @@ Install `meshtastic` first (as in `requirements-radio.txt`) to include its proto
   This found one real crash on Android 7: `java.util.Base64` (Android 8+) in the shared dictionary,
   now hex.
 
+- A real Android phone: the new setup screens found and connected to a real Meshtastic radio over
+  Bluetooth.
+
 ## Not yet tested
 
-- On a real Android phone and with real radios over Bluetooth: the Bluetooth code follows Meshtastic's
-  documented BLE API but has not talked to a radio yet. The Wi-Fi radio option is the fallback.
+- A whole school day on real radios: work going from a real phone to the teacher hub by radio and
+  grades coming back, the hotspot with many students, and range between villages.
 - Real old phones: makers' battery savers that stop background apps (set the app to "unrestricted"),
   slow memory cards, and Bluetooth on old chipsets. Android 7.0 is the oldest version supported.
