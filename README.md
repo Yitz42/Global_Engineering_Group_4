@@ -75,7 +75,8 @@ The five students on the demo phone (Lena, Ana, Bruno, Kofi, Mateus) send their 
    pip install meshtastic
    python3 -m meshlearn hub --radio-serial /dev/ttyUSB0 --radio-channel 3      # Windows: --radio-serial COM3
    ```
-   Open http://localhost:8000. On the **Phones** page, add each community phone by its radio node id (for example `!a1b2c3d4`). Phones also register themselves the first time they check in.
+   Open http://localhost:8000. A new hub offers **Add example lessons** (nine lessons in mathematics, science and reading) to test with.
+   The **Phones and radio** page shows this hub's radio id to type into each phone. Phones register themselves the first time they check in.
    Add `--host 0.0.0.0` if phones will copy assignments from this laptop over school Wi-Fi.
 4. **Student phone:** follow [docs/android-setup.md](docs/android-setup.md) to install Termux, put the data on the microSD card, pair the phone with its radio over Bluetooth, and start:
    ```bash
@@ -247,6 +248,8 @@ meshlearn/
   courses.py         courses and numbered units; courses.json holds the starter courses
   comprehension.py   scores per unit and course, mistake kinds, timing signals (sandbox rules)
   hub.py             teacher dashboard, open/hide per phone, course pack export
+  hubui.py           the hub's sidebar and everyday pages: Today, Marking, Assignments, Phones and radio,
+                     and the example lessons a new hub can start from
   hubpages.py        hub pages for courses, comprehension and learning data (export / import)
   hublang.py         hub pages for the school's language: choose it, translate words, share them
   language.py        the words students see, in the school's language, falling back to English
