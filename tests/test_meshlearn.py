@@ -335,6 +335,39 @@ class EndToEndTests(EndToEndBase):
         self.assertIn("7 / 7", self.get(self.pport, "/results"))
         self.assertIn("Ana", self.get(self.hport, f"/assignments/{aid}/grades.csv"))
 
+    def test_teacher_pages_examples_and_marking(self):
+        """A new hub starts from the example lessons; work comes in, is marked on the Marking page, and goes back."""
+        self.assertIn("Add example lessons", self.get(self.hport, "/"))
+        today = self.post(self.hport, "/examples", {})
+        self.assertIn("Added 9 example lessons", today)
+        self.assertIn("Needs you", today)
+        self.assertEqual(self.hub.add_examples(), 0)   # a second press adds nothing
+        self.assertTrue(all(not a.get("due") or a["due"] >= time.strftime("%Y-%m-%d")
+                            for a in (self.hub.get_assignment(x["id"]) for x in self.hub.example_lessons())))
+        garden = self.hub.get_assignment("a-garden")
+        self.assertTrue(any(q.get("model") for q in garden["questions"]))
+        self.assertNotIn("model", json.dumps(self.hub.packed_for_phone("a-garden")))   # marking notes stay on the hub
+        # Copied over Wi-Fi, then opened by radio for students: one packet each.
+        self.phone.sync_from_hub(f"http://127.0.0.1:{self.hport}")
+        self.assertIn("copied to 1 of 1, not open", self.get(self.hport, "/assignments"))
+        self.post(self.hport, "/assignments/open-all", {})
+        self.assertTrue(wait_for(self.phone_open("a-garden"), timeout=30))
+        self.post(self.pport, "/login", {"student": "Ana"})
+        self.assertIn("Done!", self.post(self.pport, "/a/a-garden", {
+            "q1": "24", "q2": "20", "q3": "3000", "q4": "Count my steps along each side."}))
+        self.assertTrue(wait_for(lambda: self.hub.db.one("SELECT 1 FROM submissions WHERE student = 'Ana'")))
+        marking = self.get(self.hport, "/marking")
+        self.assertIn("Count my steps", marking)
+        self.assertIn("Your model answer", marking)
+        sub = self.hub.db.one("SELECT sub_id FROM submissions WHERE student = 'Ana'")["sub_id"]
+        self.assertIn("Nothing to mark", self.post(self.hport, "/marking", {"sid": sub, "qid": "q4", "mark": "3"}))
+        self.assertTrue(wait_for(lambda: self.phone.db.one("SELECT complete FROM submissions WHERE student = 'Ana'")["complete"] == 1))
+        phones = self.get(self.hport, "/phones")
+        self.assertIn("Test phone", phones)
+        self.assertIn("Set up a new phone", phones)
+        for path in ("/", "/assignments", "/comprehension", "/courses", "/library", "/language"):
+            self.assertIn("aria-label='Main'", self.get(self.hport, path))
+
     def test_hidden_assignments_are_not_shown(self):
         aid = self.hub.create_assignment(load_sample())["id"]
         self.phone.sync_from_hub(f"http://127.0.0.1:{self.hport}")

@@ -105,6 +105,13 @@ class Messenger:
         self._wake.set()
         return msg_id
 
+    def pending_by_dest(self) -> Dict[str, int]:
+        """How many messages are still waiting for each destination."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT dest, COUNT(*) FROM outbox WHERE status = 'pending' GROUP BY dest").fetchall()
+        return {dest: n for dest, n in rows}
+
     def drop_pending(self, dest: str, msg_type: str) -> int:
         """Forget queued messages of one type that a newer one replaces. Returns how many."""
         with self._lock:

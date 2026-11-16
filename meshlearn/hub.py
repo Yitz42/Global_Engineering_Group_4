@@ -27,6 +27,7 @@ from . import protocol
 from .db import Database
 from .hublang import HubLanguage
 from .hubpages import HubPages
+from .hubui import HubUI
 from .messenger import Messenger
 from .web import App, Request, Response, esc, json_response, page, redirect
 
@@ -74,7 +75,7 @@ def _when(ts: Optional[float]) -> str:
     return time.strftime("%b %d, %H:%M", time.localtime(ts)) if ts else "never"
 
 
-class Hub(HubPages, HubLanguage):
+class Hub(HubUI, HubPages, HubLanguage):
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
@@ -84,6 +85,7 @@ class Hub(HubPages, HubLanguage):
         self.load_course_file()
         self.app = App("hub", max_body=32 * 1024 * 1024)  # learning-data files can be large
         self._routes()
+        self._ui_routes()
         self._page_routes()
         self._language_routes()
 
@@ -351,17 +353,10 @@ class Hub(HubPages, HubLanguage):
 
     # -- web ------------------------------------------------------------------
 
-    def _nav(self) -> str:
-        return ("<a href='/'>Home</a><a href='/courses'>Courses</a><a href='/comprehension'>Comprehension</a>"
-                "<a href='/assignments/new'>New assignment</a><a href='/phones'>Phones</a><a href='/library'>Card library</a>"
-                "<a href='/language'>Language</a>")
-
-    def _page(self, title: str, body: str) -> str:
-        return page(title, body, self._nav(), site="MeshLearn Teacher Hub", wide=True)  # used on a laptop
+    # The page frame (_page) and the Today, Marking, Assignments and Phones pages are in hubui.py.
 
     def _routes(self) -> None:
         app = self.app
-        app.add_route("GET", "/", self.dashboard)
         app.add_route("GET", "/assignments/new", self.new_assignment)
         app.add_route("POST", "/api/assignments", self.api_create)
         app.add_route("GET", "/api/assignments/<aid>", self.api_get)
@@ -374,7 +369,6 @@ class Hub(HubPages, HubLanguage):
         app.add_route("GET", "/assignments/<aid>/grades.csv", self.grades_csv)
         app.add_route("GET", "/submissions/<sid>", self.submission_detail)
         app.add_route("POST", "/submissions/<sid>/grade", self.submission_grade)
-        app.add_route("GET", "/phones", self.phones)
         app.add_route("POST", "/phones", self.phones_add)
         app.add_route("POST", "/mesh/retry", self.mesh_retry)
         app.add_route("GET", "/api/status", lambda r: json_response(self.messenger.status()))
@@ -388,53 +382,6 @@ class Hub(HubPages, HubLanguage):
         app.add_route("POST", "/library/download", self.library_download_start)
         app.add_route("POST", "/library/download/cancel", self.library_download_cancel)
         app.add_route("GET", "/api/library/progress", self.library_progress)
-
-    def dashboard(self, req: Request) -> Response:
-        rows = self.db.all(
-            "SELECT a.id, a.data, (SELECT COUNT(*) FROM submissions s WHERE s.assignment_id = a.id) AS subs, "
-            "(SELECT COUNT(*) FROM submissions s WHERE s.assignment_id = a.id AND (s.grade IS NULL OR s.grade LIKE '%\"complete\": false%')) AS to_grade "
-            "FROM assignments a ORDER BY a.created DESC"
-        )
-        phones = self.db.all("SELECT * FROM phones ORDER BY name")
-        status = self.messenger.status()
-        stats = (
-            "<div class='grid'>"
-            f"<div class='card'><div class='stat'>{len(rows)}</div>assignments</div>"
-            f"<div class='card'><div class='stat'>{sum(r['subs'] for r in rows)}</div>submissions received</div>"
-            f"<div class='card'><div class='stat'>{sum(r['to_grade'] for r in rows)}</div>need your grading</div>"
-            f"<div class='card'><div class='stat'>{status['pending']}</div>messages waiting to send"
-            f"<div class='muted'>{status['frames_sent']} radio packets sent since start</div>"
-            "<form method='post' action='/mesh/retry'><button class='secondary'>Retry now</button></form></div>"
-            "</div>"
-        )
-        if rows:
-            items = "".join(
-                f"<tr><td><a href='/assignments/{esc(r['id'])}'>{esc(json.loads(r['data'])['title'])}</a></td>"
-                f"<td>{esc(self._placement(json.loads(r['data'])) or json.loads(r['data']).get('subject') or '')}</td>"
-                f"<td>{r['subs']}</td><td>{r['to_grade']}</td></tr>"
-                for r in rows
-            )
-            table = f"<table><tr><th>Assignment</th><th>Course and unit</th><th>Submissions</th><th>To grade</th></tr>{items}</table>"
-        else:
-            table = "<p class='muted'>No assignments yet. <a href='/assignments/new'>Create the first one</a>.</p>"
-        phone_list = "".join(
-            f"<li>{esc(p['name'])} <span class='muted'>({esc(p['node_id'])}) · last heard {_when(p['last_seen'])}</span></li>"
-            for p in phones
-        ) or "<li class='muted'>No phones yet. <a href='/phones'>Add one</a>.</li>"
-        pack = (
-            "<h2>Load assignments onto phones (no radio needed)</h2><div class='card'>"
-            "<p>Give phones a copy of every assignment in advance, so the radio only has to carry answers, grades, "
-            "and one-packet open/close messages.</p>"
-            "<p><strong>Over school Wi-Fi:</strong> put the phone on the same network as this laptop, open the phone's "
-            "status page, and enter this hub's address.</p>"
-            "<p><strong>By memory card:</strong> download the course pack and unzip it into the phone's MeshLearn folder.</p>"
-            f"<p class='muted'>{self.language_summary()}. Phones get it with these copies.</p>"
-            "<a class='button secondary' href='/pack.zip'>Download course pack (zip)</a></div>"
-        )
-        courses = "<h2>Courses</h2>" + self._course_cards(self.comprehension_records())
-        body = (f"{stats}{courses}<h2>Latest assignments</h2>{table}{pack}<h2>Student phones</h2><ul>{phone_list}</ul>"
-                + self.learning_data_panel())
-        return Response(self._page("Home", body))
 
     def _builder(self, edit_id: str, preset_course: str = "", preset_unit: str = "") -> str:
         courses = [{"id": c["id"], "title": c["title"], "units": c["units"]} for c in self.courses() if not c.get("comingSoon")]
@@ -558,7 +505,7 @@ class Hub(HubPages, HubLanguage):
                f"<a class='button secondary' href='/assignments/{esc(aid)}/grades.csv'>Download grades (CSV)</a>"
                if subs else "<p class='muted'>Nothing yet.</p>")
         )
-        return Response(self._page(assignment["title"], body))
+        return Response(self._page(assignment["title"], body, current="assignments"))
 
     def assignment_action(self, req: Request, open_: bool) -> Response:
         aid = req.params["aid"]
@@ -623,7 +570,7 @@ class Hub(HubPages, HubLanguage):
             "<button>Save grades and send result to phone</button></form>"
             + (f"<p><a href='/assignments/{esc(assignment['id'])}'>Back to assignment</a></p>" if assignment else "")
         )
-        return Response(self._page(f"Submission from {s['student']}", body))
+        return Response(self._page(f"Submission from {s['student']}", body, current="marking"))
 
     def submission_grade(self, req: Request) -> Response:
         sid = req.params["sid"]
@@ -642,22 +589,6 @@ class Hub(HubPages, HubLanguage):
         self._send_results(row["phone"], [sid])
         return redirect(f"/submissions/{sid}?saved=1")
 
-    def phones(self, req: Request) -> Response:
-        rows = "".join(
-            f"<tr><td>{esc(p['name'])}</td><td>{esc(p['node_id'])}</td><td>{_when(p['last_seen'])}</td></tr>"
-            for p in self.db.all("SELECT * FROM phones ORDER BY name")
-        )
-        body = (
-            (f"<table><tr><th>Name</th><th>Radio node id</th><th>Last heard</th></tr>{rows}</table>" if rows
-             else "<p class='muted'>No phones yet. Phones also appear here on their own when they first check in.</p>")
-            + "<h2>Add a phone</h2><form method='post' action='/phones' class='card'>"
-            "<label for='name'>Name (e.g. village or family)</label><input type='text' id='name' name='name' required>"
-            "<label for='node_id'>Radio node id</label><input type='text' id='node_id' name='node_id' "
-            "placeholder='!a1b2c3d4 (or phone-1 in the simulator)' required>"
-            "<button>Add phone</button></form>"
-        )
-        return Response(self._page("Student phones", body))
-
     def phones_add(self, req: Request) -> Response:
         node_id = req.form.get("node_id", "").strip()[:40]
         if node_id:
@@ -666,7 +597,7 @@ class Hub(HubPages, HubLanguage):
 
     def mesh_retry(self, req: Request) -> Response:
         self.messenger.retry_now()
-        return redirect("/")
+        return redirect("/phones")
 
     # -- card library ---------------------------------------------------------
 

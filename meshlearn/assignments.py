@@ -110,6 +110,10 @@ def normalize_assignment(data: dict) -> dict:
             except (TypeError, ValueError):
                 max_chars = 600
             clean["max_chars"] = max(50, min(max_chars, MAX_LONG_CHARS))
+            # For the teacher's marking screen only: never packed for phones (see _Q_KEYS).
+            model = _clean_str(q.get("model"), MAX_LONG_CHARS)
+            if model:
+                clean["model"] = model
         questions.append(clean)
 
     return {
