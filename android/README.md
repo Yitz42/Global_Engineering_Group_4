@@ -42,11 +42,15 @@ Install `meshtastic` first (as in `requirements-radio.txt`) to include its proto
 
 ## Setting up a phone
 
-1. Install the app, open it, and fill in **Setup**: the phone's name, the teacher hub's radio id
-   (`!a1b2c3d4`), the private channel index.
-2. Pair the radio in Android's Bluetooth settings (PIN on its screen), then **Find my radio** and **Save**.
-3. Press **Start** and turn on the phone's Wi-Fi hotspot. The screen shows the address students open.
-4. Load assignments from **Phone status** (over school Wi-Fi from the hub, or a course pack on the card).
+1. Install the app and open it. Setup goes one step per screen: the phone's name, finding the radio
+   over Bluetooth (or a Wi-Fi radio, or none yet), the school's radio id (`!a1b2c3d4`) and private
+   channel, then a check that starts MeshLearn and shows what still needs doing (usually the hotspot).
+2. If Android asks for a PIN while pairing, it is on the radio's screen (123456 on radios without one).
+3. The last screen shows students how to join. After that the app opens on a status screen: whether
+   everything works, the radio, when the school last answered, what is waiting, and what to try when
+   the radio is lost. Settings (the gear) changes any step, where files are kept, and the technical options.
+4. Add lessons from **Add lessons and books**: from the teacher's laptop over school Wi-Fi, or a course
+   pack on the memory card (or copied over USB).
 
 ## Tested so far
 

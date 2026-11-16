@@ -27,6 +27,7 @@ class Messenger(
     private val log = Logger.getLogger("Messenger")
     @Volatile var framesSent = 0L
         private set
+    @Volatile private var heardAt = 0.0
     private val assembler = Assembler()
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -69,6 +70,12 @@ class Messenger(
         }
         counts["frames_sent"] = framesSent
         return counts
+    }
+
+    /** When a whole message (an ACK counts) last arrived, in epoch seconds; 0 if never. */
+    fun lastHeard(): Double {
+        val saved = runCatching { db.one("SELECT MAX(received) AS t FROM seen")?.double("t") }.getOrNull() ?: 0.0
+        return maxOf(heardAt, saved)
     }
 
     fun messageStatus(msgId: Long?): String? {
@@ -177,6 +184,7 @@ class Messenger(
             return
         }
         val message = result.message ?: return
+        heardAt = now()
         when (message.type) {
             Protocol.ACK -> {
                 db.execute("UPDATE outbox SET status = 'acked' WHERE msg_id = ?", (message.payload["id"] as? Number)?.toLong())

@@ -64,7 +64,8 @@ class Phone(
         messenger.stop()
     }
 
-    private fun flush() = synchronized(flushLock) { flushNow = true; flushLock.notifyAll() }
+    /** Batch students' saved work into a radio message now instead of waiting. */
+    fun flush() = synchronized(flushLock) { flushNow = true; flushLock.notifyAll() }
 
     private fun installStarterLibrary() {
         val target = File(libraryDir, "starter")

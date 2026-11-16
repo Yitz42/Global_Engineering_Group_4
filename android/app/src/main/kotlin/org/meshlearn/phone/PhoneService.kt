@@ -18,6 +18,7 @@ import org.meshlearn.core.NoRadioTransport
 import org.meshlearn.core.Phone
 import org.meshlearn.core.TcpRadioTransport
 import org.meshlearn.core.Transport
+import org.meshlearn.core.long
 import java.io.File
 
 /**
@@ -90,11 +91,35 @@ class PhoneService : Service() {
             is NoRadioTransport -> "No radio set up: work is saved and waits"
             else -> ""
         }
+        val radioOk = when (val t = transport) {
+            is BleTransport -> t.status.startsWith("Connected")
+            is TcpRadioTransport -> t.status.startsWith("Connected")
+            else -> false
+        }
         val q = runCatching { p.messenger.status() }.getOrDefault(emptyMap())
-        return state.copy(radio = radio, nodeId = p.nodeId, pending = q["pending"] ?: 0, framesSent = q["frames_sent"] ?: 0)
+        fun count(sql: String) = runCatching { p.db.one(sql)?.long("n") }.getOrNull() ?: 0L
+        return state.copy(
+            radio = radio, radioOk = radioOk, nodeId = p.nodeId,
+            pending = q["pending"] ?: 0, framesSent = q["frames_sent"] ?: 0,
+            unbatched = count("SELECT COUNT(*) AS n FROM submissions WHERE msg_id IS NULL"),
+            assignments = count("SELECT COUNT(*) AS n FROM assignments"),
+            lastHeard = runCatching { p.messenger.lastHeard() }.getOrDefault(0.0),
+        )
     }
 
-    fun retryNow() = phone?.messenger?.retryNow()
+    /** Send students' saved work now: batch it, and retry anything waiting. */
+    fun sendNow() {
+        phone?.flush()
+        phone?.messenger?.retryNow()
+    }
+
+    /** Read course packs put in the assignments folder (memory card or cable). Returns how many. */
+    fun reloadPacks(): Int {
+        val p = phone ?: return 0
+        val n = p.loadPackFolder()
+        if (p.hubId.isNotBlank()) p.sayHello()
+        return n
+    }
 
     private fun startInForeground() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -137,9 +162,13 @@ class PhoneService : Service() {
         val port: Int = 8080,
         val dataDir: String = "",
         val radio: String = "",
+        val radioOk: Boolean = false,
         val nodeId: String = "",
         val pending: Long = 0,
         val framesSent: Long = 0,
+        val unbatched: Long = 0,
+        val assignments: Long = 0,
+        val lastHeard: Double = 0.0,
         val error: String = "",
     )
 

@@ -56,6 +56,10 @@ class Settings(context: Context) {
     var wantRunning: Boolean
         get() = prefs.getBoolean("want_running", false)
         set(v) = prefs.edit().putBoolean("want_running", v).apply()
+    /** Whether first-time setup was finished (phones set up before it existed count as done). */
+    var setupDone: Boolean
+        get() = prefs.getBoolean("setup_done", hubId.isNotBlank())
+        set(v) = prefs.edit().putBoolean("setup_done", v).apply()
     /** Where MeshLearn keeps its files: CARD, PHONE, or "" (the card when there is one). */
     var storage: String
         get() = prefs.getString("storage", "")!!
@@ -99,9 +103,22 @@ class Settings(context: Context) {
         /** The MeshLearn folder: where students' work, lessons and books are kept. */
         fun dataDir(context: Context): File = currentPlace(context).folder.apply { mkdirs() }
 
+        /**
+         * This phone's address on its own hotspot, or null when the hotspot looks off. Android
+         * gives apps no reliable way to ask, so this goes by the hotspot's usual network names.
+         */
+        fun hotspotAddress(): String? = runCatching {
+            NetworkInterface.getNetworkInterfaces().toList()
+                .filter { it.isUp && !it.isLoopback && HOTSPOT.any { p -> it.name.startsWith(p) } }
+                .flatMap { iface -> iface.inetAddresses.toList().filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress } }
+                .firstOrNull()
+        }.getOrNull()
+
+        private val HOTSPOT = listOf("ap", "swlan", "softap")
+
         /** The phone's own addresses students can type, hotspot first. */
         fun localAddresses(): List<String> {
-            val preferred = listOf("ap", "swlan", "softap", "wlan")
+            val preferred = HOTSPOT + "wlan"
             return runCatching {
                 NetworkInterface.getNetworkInterfaces().toList()
                     .filter { it.isUp && !it.isLoopback }
