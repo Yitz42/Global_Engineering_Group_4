@@ -6,7 +6,10 @@ does in Termux, and talks to the same Python teacher hub, but it can also:
 - reach its LoRa radio over **Bluetooth** directly (Python's Bluetooth library does not run on Android),
   or over Wi-Fi if the radio is on the hotspot;
 - keep running all day with the screen off (a foreground service), and start again after a reboot;
-- keep its data on the microSD card without Termux (Android/data/org.meshlearn.phone/files/meshlearn).
+- keep its data on the microSD card or the phone's own storage, without Termux
+  (Android/data/org.meshlearn.phone/files/meshlearn on either). It uses the card when there is one;
+  the setup screen can switch, moving students' work and lessons (and the books, if there is room)
+  and keeping the old databases as a backup.
 
 Students still use any browser: the phone serves the same pages on its hotspot.
 

@@ -28,6 +28,7 @@ class PhoneService : Service() {
     private var phone: Phone? = null
     private var server: NanoHTTPD? = null
     private var transport: Transport? = null
+    private var outbox: AndroidDb? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -59,7 +60,10 @@ class PhoneService : Service() {
         val p = Phone(
             dataDir, s.hubId.trim(), s.phoneName.trim().ifEmpty { "Student phone" },
             makeDb = { f, schema -> AndroidDb(f, schema) },
-            messengerFactory = { handler -> Messenger(t, AndroidDb(File(dataDir, "outbox.db"), ""), handler, retryS = 30.0) },
+            messengerFactory = { handler ->
+                val db = AndroidDb(File(dataDir, "outbox.db"), "").also { outbox = it }
+                Messenger(t, db, handler, retryS = 30.0)
+            },
             kiwixUrl = s.kiwixUrl, batchS = s.batchSeconds.toDouble(), adminPin = s.adminPin,
         )
         p.start()
@@ -118,8 +122,10 @@ class PhoneService : Service() {
         runCatching { server?.stop() }
         runCatching { phone?.stop() }
         runCatching { phone?.db?.close() }
+        runCatching { outbox?.close() }   // closed too, so the folder can be moved
         runCatching { wakeLock?.release() }
         phone = null
+        outbox = null
         server = null
         instance = null
         state = state.copy(running = false)

@@ -31,6 +31,8 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import org.meshlearn.core.StorageMove
+import java.io.File
 
 /**
  * The teacher's screen on the phone: is it running, what address students open, is the radio
@@ -45,6 +47,10 @@ class MainActivity : Activity() {
     private val fields = LinkedHashMap<String, EditText>()
     private lateinit var modeGroup: RadioGroup
     private lateinit var autostart: CheckBox
+    private lateinit var storageGroup: RadioGroup
+    private lateinit var storageNote: TextView
+    private lateinit var folderNote: TextView
+    private var settingStorage = false   // true while the screen itself checks a storage button
 
     private val refresh = object : Runnable {
         override fun run() {
@@ -62,6 +68,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        showStorage()   // a memory card may have been put in or taken out
         ui.post(refresh)
     }
 
@@ -142,6 +149,21 @@ class MainActivity : Activity() {
         col.addView(field("channel", "Radio channel index (use your private channel, not 0)", "3", number = true))
         col.addView(field("hops", "Most relays a packet may take (blank: the radio's setting)", "", number = true))
 
+        col.addView(heading("Where MeshLearn keeps its files"))
+        col.addView(note("Students' saved work, lessons and books. Changing this moves them now; it does not wait for Save."))
+        storageGroup = RadioGroup(this).apply {
+            addView(RadioButton(context).apply { id = STORE_CARD })
+            addView(RadioButton(context).apply { id = STORE_PHONE })
+            setOnCheckedChangeListener { _, id ->
+                if (settingStorage) return@setOnCheckedChangeListener
+                val kind = if (id == STORE_CARD) Settings.CARD else Settings.PHONE
+                Settings.places(this@MainActivity).firstOrNull { it.kind == kind }?.let { askToMove(it) }
+            }
+        }
+        col.addView(storageGroup)
+        storageNote = note("")
+        col.addView(storageNote)
+
         col.addView(heading("Advanced"))
         col.addView(field("batch", "Seconds to collect students' work before sending", "120", number = true))
         col.addView(field("pin", "Teacher PIN for loading assignments from another device (optional)", ""))
@@ -150,8 +172,9 @@ class MainActivity : Activity() {
         autostart = CheckBox(this).apply { text = "Start again when the phone turns on" }
         col.addView(autostart)
         col.addView(button("Save") { save() })
-        col.addView(note("\nMemory card folder for the library and course packs:\n${Settings.dataDir(this)}\n" +
-            "Put collections in its 'library' folder and course packs in 'assignments' (with a card reader, or over school Wi-Fi from the status page)."))
+        folderNote = note("")
+        col.addView(folderNote)
+        showStorage()
 
         // Open at the top with nothing focused (otherwise the first text box grabs focus and scrolls the status away).
         col.isFocusableInTouchMode = true
@@ -201,6 +224,103 @@ class MainActivity : Activity() {
         startActivity(Intent(this, StudentSiteActivity::class.java)
             .putExtra(StudentSiteActivity.EXTRA_URL, "http://127.0.0.1:${settings.port}$path")
             .putExtra(StudentSiteActivity.EXTRA_TITLE, title))
+    }
+
+    // -- storage ------------------------------------------------------------------
+
+    private fun placeName(kind: String) = if (kind == Settings.CARD) "the memory card" else "this phone"
+
+    /** The two choices with their free space, the one in use checked, and where the folder is. */
+    private fun showStorage() {
+        val places = Settings.places(this)
+        val current = Settings.currentPlace(this)
+        val card = places.firstOrNull { it.kind == Settings.CARD }
+        val phone = places.first { it.kind == Settings.PHONE }
+        settingStorage = true
+        storageGroup.findViewById<RadioButton>(STORE_CARD).apply {
+            visibility = if (card != null) View.VISIBLE else View.GONE
+            if (card != null) text = "Memory card · ${size(card.free)} free of ${size(card.total)}"
+        }
+        storageGroup.findViewById<RadioButton>(STORE_PHONE).text = "This phone · ${size(phone.free)} free of ${size(phone.total)}"
+        storageGroup.check(if (current.kind == Settings.CARD) STORE_CARD else STORE_PHONE)
+        settingStorage = false
+        storageNote.text = when {
+            settings.storage == Settings.CARD && card == null ->
+                "The memory card is not in. MeshLearn is using this phone's storage until it is back; " +
+                    "work saved on the card stays there."
+            card == null -> "No memory card in, so everything is on this phone."
+            else -> ""
+        }
+        storageNote.visibility = if (storageNote.text.isEmpty()) View.GONE else View.VISIBLE
+        val fill = if (current.kind == Settings.CARD) "with a card reader" else "over a USB cable from a computer"
+        folderNote.text = "\nMeshLearn's folder, on ${placeName(current.kind)}:\n${current.folder}\n" +
+            "Put collections in its 'library' folder and course packs in 'assignments' ($fill, or over school Wi-Fi from the status page)."
+    }
+
+    private fun size(bytes: Long) = org.meshlearn.core.Html.size(bytes.toDouble())
+
+    private fun askToMove(to: Settings.Place) {
+        val from = Settings.currentPlace(this)
+        if (to.kind == from.kind) return
+        val work = StorageMove.bytesToMove(from.folder, books = false)
+        val books = StorageMove.sizeOf(File(from.folder, StorageMove.LIBRARY))
+        if (work > to.free) {
+            AlertDialog.Builder(this).setTitle("Not enough room")
+                .setMessage("Students' work and lessons need ${size(work)}; ${placeName(to.kind)} has ${size(to.free)} free. Nothing was moved.")
+                .setPositiveButton("OK", null).show()
+            showStorage()
+            return
+        }
+        val fits = work + books <= to.free
+        val withBooks = CheckBox(this).apply {
+            text = if (fits) "Also move the books (${size(books)})" else "Also move the books (${size(books)}: not enough room)"
+            isChecked = fits && books > 0
+            isEnabled = fits && books > 0
+            if (books == 0L) visibility = View.GONE
+        }
+        val box = LinearLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(withBooks) }
+        AlertDialog.Builder(this)
+            .setTitle("Keep MeshLearn's files on ${placeName(to.kind)}?")
+            .setMessage("Students' saved work, waiting messages and lessons (${size(work)}) move there now. " +
+                "MeshLearn stops for a moment while they move." +
+                (if (books > 0) "\n\nBooks left behind are not shown to students until they are copied there." else ""))
+            .setView(box)
+            .setPositiveButton("Move") { _, _ -> moveFiles(from, to, withBooks.isChecked) }
+            .setNegativeButton("Cancel") { _, _ -> showStorage() }
+            .setOnCancelListener { showStorage() }
+            .show()
+    }
+
+    private fun moveFiles(from: Settings.Place, to: Settings.Place, books: Boolean) {
+        val wasRunning = PhoneService.instance != null
+        val progress = TextView(this).apply { setPadding(dp(20), dp(12), dp(20), dp(12)); text = "Stopping MeshLearn…" }
+        val dialog = AlertDialog.Builder(this).setTitle("Moving to ${placeName(to.kind)}").setView(progress).setCancelable(false).show()
+        Thread {
+            if (wasRunning) {
+                runOnUiThread { PhoneService.stop(this) }
+                val until = System.currentTimeMillis() + 15_000
+                while (PhoneService.instance != null && System.currentTimeMillis() < until) Thread.sleep(100)
+            }
+            val result = runCatching {
+                if (PhoneService.instance != null) throw IllegalStateException("MeshLearn did not stop")
+                StorageMove.move(from.folder, to.folder, books, to.free) { name -> runOnUiThread { progress.text = "Copying $name…" } }
+            }
+            runOnUiThread {
+                dialog.dismiss()
+                result.onSuccess {
+                    settings.storage = to.kind
+                    Toast.makeText(this, "Moved. MeshLearn now keeps its files on ${placeName(to.kind)}.", Toast.LENGTH_LONG).show()
+                }.onFailure { e ->
+                    val why = if (e is StorageMove.NotEnoughRoom) "It needs ${size(e.needed)} and there is ${size(e.free)} free."
+                        else (e.message ?: e.javaClass.simpleName)
+                    AlertDialog.Builder(this).setTitle("Nothing was moved")
+                        .setMessage("$why\n\nMeshLearn still keeps everything on ${placeName(from.kind)}.")
+                        .setPositiveButton("OK", null).show()
+                }
+                showStorage()
+                if (wasRunning) PhoneService.start(this)
+            }
+        }.start()
     }
 
     // -- settings -----------------------------------------------------------------
@@ -333,5 +453,7 @@ class MainActivity : Activity() {
         private const val MODE_BLE = 101
         private const val MODE_WIFI = 102
         private const val MODE_NONE = 103
+        private const val STORE_CARD = 201
+        private const val STORE_PHONE = 202
     }
 }

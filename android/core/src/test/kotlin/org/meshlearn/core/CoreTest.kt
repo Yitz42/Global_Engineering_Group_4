@@ -242,6 +242,55 @@ class CoreTest {
         assertNull(ignored.headers["Set-Cookie"])
     }
 
+    /** Moving between the memory card and the phone: work always moves, books only if asked, nothing lost on failure. */
+    @Test fun storageMoveKeepsWorkSafe() {
+        val root = tmp()
+        val card = File(root, "card/meshlearn")
+        val phone = File(root, "phone/meshlearn")
+        fun put(dir: File, path: String, text: String) = File(dir, path).apply { parentFile.mkdirs(); writeText(text) }
+        put(card, "phone.db", "students' work")
+        put(card, "outbox.db", "waiting messages")
+        put(card, "assignments/a1.json", "{}")
+        put(card, "library/wiki.zim", "x".repeat(5000))
+        put(phone, "library/copied-by-cable.epub", "book")   // already on the phone: must survive
+
+        // Not enough room: nothing changes anywhere.
+        try {
+            StorageMove.move(card, phone, books = true, freeAtTarget = 100)
+            throw AssertionError("should not fit")
+        } catch (e: StorageMove.NotEnoughRoom) {
+            assertTrue(e.needed > 5000)
+        }
+        assertTrue(File(card, "phone.db").exists() && !File(phone, "phone.db").exists())
+
+        // Work and lessons only: books stay on the card, the old databases are kept as a backup.
+        StorageMove.move(card, phone, books = false, freeAtTarget = Long.MAX_VALUE)
+        assertEquals("students' work", File(phone, "phone.db").readText())
+        assertEquals("waiting messages", File(phone, "outbox.db").readText())
+        assertTrue(File(phone, "assignments/a1.json").exists())
+        assertTrue(!File(card, "phone.db").exists() && File(card, "phone.db" + StorageMove.BACKUP_SUFFIX).exists())
+        assertTrue(!File(card, "assignments").exists())
+        assertTrue(File(card, "library/wiki.zim").exists() && !File(phone, "library/wiki.zim").exists())
+
+        // Back to the card with the books: they merge with what is there, and the phone's backup stays put.
+        put(phone, "phone.db", "more work")
+        StorageMove.move(phone, card, books = true, freeAtTarget = Long.MAX_VALUE)
+        assertEquals("more work", File(card, "phone.db").readText())
+        assertTrue(File(card, "library/wiki.zim").exists() && File(card, "library/copied-by-cable.epub").exists())
+        assertTrue(!File(phone, "library").exists())
+
+        // A copy that fails part way leaves the old place untouched and still the one in use.
+        File(root, "blocker").writeText("a file where a folder must go")
+        try {
+            StorageMove.move(card, File(root, "blocker"), books = false, freeAtTarget = Long.MAX_VALUE)
+            throw AssertionError("should fail")
+        } catch (e: Exception) {
+            // expected: the copy could not be written
+        }
+        assertEquals("more work", File(card, "phone.db").readText())
+        assertTrue(File(card, "outbox.db").exists() && File(card, "assignments/a1.json").exists())
+    }
+
     @Test fun dueDatesInWords() {
         val today = java.util.Calendar.getInstance().apply { set(2026, java.util.Calendar.NOVEMBER, 15, 10, 30) }
         assertEquals("Due today" to "soon", Html.dueLabel("2026-11-15", false, today))
