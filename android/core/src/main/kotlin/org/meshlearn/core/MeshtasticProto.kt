@@ -20,11 +20,12 @@ object MeshtasticProto {
     const val PRIVATE_APP = 256
     const val BROADCAST = 0xFFFFFFFFL
 
-    // Bluetooth service and characteristics of a Meshtastic radio.
+    // Bluetooth service and characteristics of a Meshtastic radio, as in Meshtastic's own
+    // Python library (meshtastic/ble_interface.py). CoreTest checks them character by character.
     const val SERVICE_UUID = "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
     const val TORADIO_UUID = "f75c76d2-129e-4dad-a1dd-7866124401e7"
     const val FROMRADIO_UUID = "2c55e69e-4993-11ed-b878-0242ac120002"
-    const val FROMNUM_UUID = "ed9da18b-a800-4f66-a670-aa4821fd3fd6"
+    const val FROMNUM_UUID = "ed9da18c-a800-4f66-a670-aa7547e34453"
 
     private val random = SecureRandom()
 

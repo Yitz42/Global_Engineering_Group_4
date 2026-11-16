@@ -18,6 +18,14 @@ class CoreTest {
 
     private fun canon(v: Any?) = Json.dumps(v, sortKeys = true)
 
+    /** The radio's Bluetooth IDs, copied from Meshtastic's ble_interface.py. One wrong character and the phone can't talk to it. */
+    @Test fun bluetoothIdsMatchMeshtastic() {
+        assertEquals("6ba1b218-15a8-461f-9fa8-5dcae273eafd", MeshtasticProto.SERVICE_UUID)
+        assertEquals("f75c76d2-129e-4dad-a1dd-7866124401e7", MeshtasticProto.TORADIO_UUID)
+        assertEquals("2c55e69e-4993-11ed-b878-0242ac120002", MeshtasticProto.FROMRADIO_UUID)
+        assertEquals("ed9da18c-a800-4f66-a670-aa7547e34453", MeshtasticProto.FROMNUM_UUID)
+    }
+
     @Test fun zdictMatchesPython() {
         assertEquals((vectors["zdict_len"] as Number).toInt(), Zdict.BYTES.size)
     }
