@@ -294,18 +294,19 @@ def grade_question(q: dict, value: str) -> Optional[float]:
 
 
 def grade(assignment: dict, answers: Dict[str, str], manual: Optional[Dict[str, float]] = None) -> dict:
-    """Grade a submission. `manual` holds teacher scores for long answers."""
+    """Grade a submission. `manual` holds the teacher's scores: for long answers, and for any
+    question the teacher re-marked (an answer the key did not foresee, say). Those win."""
     manual = manual or {}
     per_question: List[dict] = []
     total = 0.0
     needs_manual = False
     for q in assignment["questions"]:
         value = answers.get(q["id"], "")
-        score = grade_question(q, value)
-        if score is None:
-            if q["id"] in manual:
-                score = max(0.0, min(float(manual[q["id"]]), q["points"]))
-            else:
+        if q["id"] in manual:
+            score = max(0.0, min(float(manual[q["id"]]), q["points"]))
+        else:
+            score = grade_question(q, value)
+            if score is None:
                 needs_manual = True
         if score is not None:
             total += score

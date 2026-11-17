@@ -75,6 +75,18 @@ def _when(ts: Optional[float]) -> str:
     return time.strftime("%b %d, %H:%M", time.localtime(ts)) if ts else "never"
 
 
+def _key_text(q: dict) -> str:
+    """The right answer of an auto-marked question, in words, for the teacher."""
+    if q["type"] == "choice" and isinstance(q.get("answer"), int) and q["answer"] < len(q.get("options", [])):
+        return q["options"][q["answer"]]
+    if q["type"] == "number" and "answer" in q:
+        tol = q.get("tolerance") or 0
+        return f"{q['answer']:g}" + (f" (± {tol:g})" if tol else "")
+    if q["type"] == "text" and q.get("accept"):
+        return " or ".join(q["accept"])
+    return ""
+
+
 class Hub(HubUI, HubPages, HubLanguage):
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
@@ -543,6 +555,7 @@ class Hub(HubUI, HubPages, HubLanguage):
         answers = json.loads(s["answers"])
         grade = json.loads(s["grade"]) if s["grade"] else None
         scores = {q["id"]: q["score"] for q in (grade or {}).get("questions", [])}
+        manual = json.loads(s["manual"] or "{}")
         rows = ""
         for q in (assignment or {"questions": []})["questions"]:
             given = answers.get(q["id"], "")
@@ -551,23 +564,34 @@ class Hub(HubUI, HubPages, HubLanguage):
             else:
                 shown = given
             score = scores.get(q["id"])
+            current = "" if score is None else f"{score:g}"
+            # Every mark can be changed: written answers always, and auto-marked ones when the
+            # key did not foresee a good answer (or accepted a wrong one).
+            box = (f"<input type='number' name='m_{esc(q['id'])}' min='0' max='{q['points']:g}' step='0.5' "
+                   f"value='{current}' style='width:90px' aria-label='Points for {esc(q['prompt'][:40])}'> / {q['points']:g}")
             if q["type"] == "long":
-                current = "" if score is None else f"{score:g}"
-                cell = (f"<input type='number' name='m_{esc(q['id'])}' min='0' max='{q['points']:g}' step='0.5' "
-                        f"value='{current}' aria-label='Points for {esc(q['prompt'][:40])}'> / {q['points']:g}")
+                note = ""
+            elif q["id"] in manual:
+                note = "<div class='small warn'>Changed by you</div>"
             else:
                 mark = "good" if score else "bad"
-                cell = f"<span class='{mark}'>{(score or 0):g} / {q['points']:g}</span>"
-            rows += f"<tr><td>{esc(q['prompt'])}</td><td>{esc(shown)}</td><td>{cell}</td></tr>"
+                note = f"<div class='small {mark}'>{'Right' if score else 'Wrong'}, marked by MeshLearn</div>"
+            key = _key_text(q)
+            answer_cell = esc(shown) or "<em class='muted'>(left blank)</em>"
+            if key:
+                answer_cell += f"<div class='small'>Right answer: {esc(key)}</div>"
+            rows += f"<tr><td>{esc(q['prompt'])}</td><td>{answer_cell}</td><td>{box}{note}</td></tr>"
         total = f"{grade['score']:g} / {grade['max']:g}" if grade else "—"
+        phone = self._phone_names().get(s["phone"], s["phone"])
         body = (
-            (f"<p class='good'>{esc(notice)}</p>" if notice else "")
-            + f"<p class='muted'>{esc(assignment['title'] if assignment else s['assignment_id'])} · from {esc(s['phone'])} · "
+            (f"<div class='notice'>{esc(notice)}</div>" if notice else "")
+            + f"<p class='muted'>{esc(assignment['title'] if assignment else s['assignment_id'])} · from {esc(phone)} · "
             f"submitted {_when(s['submitted_at'])}</p>"
             f"<form method='post' action='/submissions/{esc(s['sub_id'])}/grade'>"
-            f"<table><tr><th>Question</th><th>Answer</th><th>Points</th></tr>{rows}</table>"
+            f"<table class='plain'><tr><th>Question</th><th>Answer</th><th>Points</th></tr>{rows}</table>"
             f"<p><strong>Total: {total}</strong></p>"
-            "<button>Save grades and send result to phone</button></form>"
+            "<p class='small'>Change any mark, then save. The new result goes to the student's phone by radio.</p>"
+            "<button>Save marks and send result to phone</button></form>"
             + (f"<p><a href='/assignments/{esc(assignment['id'])}'>Back to assignment</a></p>" if assignment else "")
         )
         return Response(self._page(f"Submission from {s['student']}", body, current="marking"))
@@ -581,6 +605,16 @@ class Hub(HubUI, HubPages, HubLanguage):
                     manual[key[2:]] = float(value)
                 except ValueError:
                     pass
+        row = self.db.one("SELECT * FROM submissions WHERE sub_id = ?", (sid,))
+        if row is None:
+            return redirect("/")
+        # An auto-marked question only becomes the teacher's mark when it was actually changed.
+        assignment = self.get_assignment(row["assignment_id"], row["version"]) or {"questions": []}
+        answers, before = json.loads(row["answers"]), json.loads(row["manual"] or "{}")
+        for q in assignment["questions"]:
+            if q["type"] != "long" and q["id"] in manual and q["id"] not in before:
+                if manual[q["id"]] == asg.grade_question(q, answers.get(q["id"], "")):
+                    del manual[q["id"]]
         try:
             self.grade_submission(sid, manual)
         except KeyError:

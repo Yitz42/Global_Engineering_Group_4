@@ -362,6 +362,14 @@ class EndToEndTests(EndToEndBase):
         sub = self.hub.db.one("SELECT sub_id FROM submissions WHERE student = 'Ana'")["sub_id"]
         self.assertIn("Nothing to mark", self.post(self.hport, "/marking", {"sid": sub, "qid": "q4", "mark": "3"}))
         self.assertTrue(wait_for(lambda: self.phone.db.one("SELECT complete FROM submissions WHERE student = 'Ana'")["complete"] == 1))
+        # The teacher can change an auto-marked question too; untouched ones stay MeshLearn's.
+        page = self.post(self.hport, f"/submissions/{sub}/grade",
+                         {"m_q1": "0", "m_q2": "1", "m_q3": "1", "m_q4": "3"})
+        self.assertIn("Changed by you", page)
+        self.assertIn("Right answer: 24", page)
+        manual = json.loads(self.hub.db.one("SELECT manual FROM submissions WHERE sub_id = ?", (sub,))["manual"])
+        self.assertEqual(set(manual), {"q1", "q4"})
+        self.assertEqual(json.loads(self.hub.db.one("SELECT grade FROM submissions WHERE sub_id = ?", (sub,))["grade"])["score"], 5)
         phones = self.get(self.hport, "/phones")
         self.assertIn("Test phone", phones)
         self.assertIn("Set up a new phone", phones)
