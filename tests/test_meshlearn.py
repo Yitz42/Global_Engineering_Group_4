@@ -155,6 +155,21 @@ class AssignmentTests(unittest.TestCase):
             asg.normalize_assignment({"title": "x", "questions": [{"type": "choice", "prompt": "?", "options": ["a"], "answer": 0}]})
 
 
+class SendCountdownTests(unittest.TestCase):
+    def test_next_send_in_follows_the_batch_wait(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        t = UdpSimTransport("p", free_port(socket.SOCK_DGRAM), {"hub": ("127.0.0.1", free_port(socket.SOCK_DGRAM))})
+        phone = Phone(os.path.join(tmp, "card"), "hub", "P", lambda h: Messenger(t, os.path.join(tmp, "o.db"), h), batch_s=120)
+        self.addCleanup(t.close)
+        self.assertIsNone(phone.next_send_in())
+        a = asg.normalize_assignment(load_sample())
+        phone.submit(a, "Ana", {q["id"]: "1" for q in a["questions"]})
+        self.assertTrue(110 < phone.next_send_in() <= 120)
+        phone.flush_submissions(force=True)
+        self.assertIsNone(phone.next_send_in())   # batched: now it is the radio's turn
+
+
 class MessengerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -353,8 +368,13 @@ class EndToEndTests(EndToEndBase):
         self.post(self.hport, "/assignments/open-all", {})
         self.assertTrue(wait_for(self.phone_open("a-garden"), timeout=30))
         self.post(self.pport, "/login", {"student": "Ana"})
-        self.assertIn("Done!", self.post(self.pport, "/a/a-garden", {
-            "q1": "24", "q2": "20", "q3": "3000", "q4": "Count my steps along each side."}))
+        home = self.get(self.pport, "/")
+        self.assertIn("Do this next", home)
+        self.assertIn("Coming up", home)
+        done = self.post(self.pport, "/a/a-garden", {
+            "q1": "24", "q2": "20", "q3": "3000", "q4": "Count my steps along each side."})
+        self.assertIn("Done!", done)
+        self.assertIn("class='sendin'", done)   # when it goes to the teacher
         self.assertTrue(wait_for(lambda: self.hub.db.one("SELECT 1 FROM submissions WHERE student = 'Ana'")))
         marking = self.get(self.hport, "/marking")
         self.assertIn("Count my steps", marking)
@@ -362,6 +382,9 @@ class EndToEndTests(EndToEndBase):
         sub = self.hub.db.one("SELECT sub_id FROM submissions WHERE student = 'Ana'")["sub_id"]
         self.assertIn("Nothing to mark", self.post(self.hport, "/marking", {"sid": sub, "qid": "q4", "mark": "3"}))
         self.assertTrue(wait_for(lambda: self.phone.db.one("SELECT complete FROM submissions WHERE student = 'Ana'")["complete"] == 1))
+        results = self.get(self.pport, "/results")
+        self.assertIn("4 out of 4 right", results)
+        self.assertIn("class='squares'", results)
         # The teacher can change an auto-marked question too; untouched ones stay MeshLearn's.
         page = self.post(self.hport, f"/submissions/{sub}/grade",
                          {"m_q1": "0", "m_q2": "1", "m_q3": "1", "m_q4": "3"})

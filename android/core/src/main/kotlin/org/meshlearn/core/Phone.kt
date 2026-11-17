@@ -532,14 +532,49 @@ class Phone(
             cards.append("<a class='card' href='/c/$href'><h2>${esc(courseTitle)}</h2>" +
                 "<p class='muted'>${esc(description(course, w))}</p>$progress${level(summary.level, summary.score, w)}</a>")
         }
-        val lead = if (todo.isEmpty()) w("home.caught_up") else w.n("home.todo", todo.size)
-        val todoHtml = if (todo.isEmpty()) "" else "<h2>${esc(w("home.todo_heading"))}</h2>" +
-            todo.take(5).joinToString("") { (a, course) -> assignmentCard(a, null, w, course) } +
-            (if (todo.size > 5) "<p class='meta'>${esc(w("home.more", "n" to todo.size - 5))}</p>" else "")
-        val body = "<p class='lead'>${esc(lead)}</p>" + todoHtml + "<h2>${esc(w("home.courses"))}</h2>" +
+        val body = homeTop(todo, mine, w) + "<h2>${esc(w("home.courses"))}</h2>" +
             (if (cards.isNotEmpty()) "<div class='grid'>$cards</div>" else "<p class='muted'>${esc(w("home.no_courses"))}</p>") +
             "<form method='post' action='/logout'><button class='secondary'>${esc(w("home.change_name"))}</button></form>"
         return Response(page(req, w("home.title", "name" to student), body))
+    }
+
+    /** How much is done, the one thing to do next as a big card, then the rest (Ages 8 to 11 design). */
+    private fun homeTop(todo: List<Pair<Map<String, Any?>, String>>, mine: Map<String, Row>, w: Strings): String {
+        val total = todo.size + courseTree().sumOf { c -> assignmentsIn(c["id"].toString()).count { it["id"] in mine } }
+        val lead = if (todo.isEmpty()) w("home.caught_up") else w.n("home.todo", todo.size)
+        val out = StringBuilder("<p class='lead'>${esc(lead)}</p>")
+        if (total > 0) {
+            val done = total - todo.size
+            val text = esc(w("home.week_done", "done" to done, "total" to total))
+            out.append("<div class='week'><div class='wk'><strong>${esc(w("home.week"))}</strong><span class='meta'>$text</span></div>" +
+                "<div class='bar' role='img' aria-label='$text'><span style='width:${done * 100 / total}%'></span></div></div>")
+        }
+        if (todo.isEmpty()) {
+            return out.toString() + "<div class='card'><p class='grade good' style='margin-top:0'>${esc(w("home.all_done"))}</p>" +
+                "<p>${esc(w("home.all_done_text"))}</p>" +
+                "<a class='button secondary' href='/library'>${esc(w("tab.library"))}</a></div>"
+        }
+        val (a, courseTitle) = todo[0]
+        val practice = a["mode"] == "practice"
+        val qs = Assignments.questions(a)
+        val meta = listOf(courseTitle, w.n("card.questions", qs.size), Html.minutesFor(qs, w)).filter { it.isNotEmpty() }.joinToString(" · ")
+        val dueText = Html.dueLabel(a["due"]?.toString(), turnedIn = false, words = w).first
+        out.append("<section class='next' aria-labelledby='next-label'><span class='label' id='next-label'>${esc(w("home.next"))}</span>" +
+            "<h2>${esc(a["title"])}</h2><p class='meta'>${esc(meta)}</p>" +
+            (if (dueText.isNotEmpty()) "<p class='due'>${esc(dueText)}</p>" else "") +
+            "<a class='button' href='/a/${esc(a["id"])}'>${esc(if (practice) w("card.practice") else w("card.start"))} →</a></section>")
+        if (todo.size > 1) {
+            out.append("<h2>${esc(w("home.coming_up"))}</h2>")
+            for ((b, course) in todo.subList(1, minOf(todo.size, 5))) {
+                val due = Html.dueLabel(b["due"]?.toString(), turnedIn = false, words = w).first
+                val m = listOf(course, due.ifEmpty { if (b["mode"] == "practice") w("card.practice_tag") else "" })
+                    .filter { it.isNotEmpty() }.joinToString(" · ")
+                out.append("<a class='row' href='/a/${esc(b["id"])}'><span class='grow'><strong>${esc(b["title"])}</strong>" +
+                    "<span class='meta'>${esc(m)}</span></span><span class='chev' aria-hidden='true'>›</span></a>")
+            }
+            if (todo.size > 5) out.append("<p class='meta'>${esc(w("home.more", "n" to todo.size - 5))}</p>")
+        }
+        return out.toString()
     }
 
     fun coursePage(req: Request): Response {
@@ -706,32 +741,61 @@ class Phone(
             return Response(page(req, w("practice.title"), body))
         }
         val body = "<div class='card'><p class='good grade'>${esc(w("submitted.done"))}</p>" +
-            "<p>${esc(w("submitted.radio"))}</p>" +
+            "${sendCountdown(w)}<p>${esc(w("submitted.no_wait"))}</p>" +
             "<p class='meta'>${esc(w("submitted.later"))}</p></div>" +
             "<a class='button big' href='/'>${esc(w("nav.back_home"))}</a>" + clearDraft
         return Response(page(req, w("submitted.title"), body))
+    }
+
+    /** Seconds until saved work goes out by radio; null when nothing is waiting to be batched. */
+    fun nextSendIn(): Double? {
+        val rows = db.all("SELECT submitted_at FROM submissions WHERE msg_id IS NULL ORDER BY submitted_at LIMIT ?", MAX_BATCH)
+        if (rows.isEmpty()) return null
+        if (rows.size >= MAX_BATCH) return 0.0
+        return maxOf(0.0, (rows[0].double("submitted_at") ?: 0.0) + batchS - Messenger.now())
+    }
+
+    /** "It goes to your teacher in about 1:45.", counting down in the browser (COUNTDOWN_JS). */
+    private fun sendCountdown(w: Strings): String {
+        val left = nextSendIn()
+        if (left == null || left < 1) return "<p class='sendin'>${esc(w("submitted.sending"))}</p>"
+        val s = (left + 0.5).toLong()
+        val words = w("submitted.sends_in", "time" to "{time}")
+        val now = words.replace("{time}", "${s / 60}:${(s % 60).toString().padStart(2, '0')}")
+        return "<p class='sendin' id='sendin' aria-live='polite' data-in='$s' data-words='${esc(words)}' " +
+            "data-now='${esc(w("submitted.sending"))}'>${esc(now)}</p><script>${Html.COUNTDOWN_JS}</script>"
     }
 
     fun results(req: Request): Response {
         val w = words(req)
         val student = student(req) ?: return Response.redirect("/")
         val out = StringBuilder()
-        for (s in db.all("SELECT * FROM submissions WHERE student = ? ORDER BY submitted_at DESC", student)) {
-            val title = getAssignment(s.str("assignment_id")!!)?.get("title") ?: s.str("assignment_id")
+        val rows = db.all("SELECT * FROM submissions WHERE student = ? ORDER BY submitted_at DESC", student)
+        rows.forEachIndexed { i, s ->
+            val a: Map<String, Any?> = getAssignment(s.str("assignment_id")!!)
+                ?: mapOf("title" to s.str("assignment_id"), "questions" to emptyList<Any?>())
             val sent = when (messenger.messageStatus(s.long("msg_id"))) {
                 "acked" -> "<span class='pill good'>${esc(w("results.acked"))}</span>"
                 "pending" -> "<span class='pill warn'>${esc(w("results.pending"))}</span>"
                 "failed" -> "<span class='pill bad'>${esc(w("results.failed"))}</span>"
                 else -> "<span class='pill'>${esc(w("results.saved"))}</span>"
             }
-            val grade = when {
-                s["score"] == null -> "<p class='meta'>${esc(w("results.not_graded"))}</p>"
-                (s.long("complete") ?: 0L) != 0L -> "<p class='grade'>${g(s.double("score"))} / ${g(s.double("max"))}</p>"
-                else -> "<p class='grade'>${esc(w("results.so_far", "score" to g(s.double("score")), "max" to g(s.double("max"))))}</p>" +
-                    "<p class='meta'>${esc(w("results.still_grading"))}</p>"
+            if (i == 0) {
+                out.append(newestResult(s, a, sent, w) + (if (rows.size > 1) "<h2>${esc(w("results.earlier"))}</h2>" else ""))
+                return@forEachIndexed
             }
-            out.append("<div class='card'><h3 style='margin:0'>${esc(title)}</h3>" +
-                "<p class='meta'>${esc(w("results.turned_in", "when" to w.whenText(s.double("submitted_at"))))}</p>$grade$sent</div>")
+            val course = courseTitleOf(a, w)
+            if (s["score"] == null) {
+                out.append("<div class='row wait'><span class='grow'><strong>${esc(a["title"])}</strong>" +
+                    "<span class='meta'>${esc(course)}</span></span><span class='end small'>$sent</span></div>")
+                return@forEachIndexed
+            }
+            val complete = (s.long("complete") ?: 0L) != 0L
+            val end = if (complete) "<span class='end'>${g(s.double("score"))} / ${g(s.double("max"))}</span>"
+                else "<span class='end small'>${esc(w("results.reading"))}</span>"
+            val meta = listOf(course, w.whenText(s.double("submitted_at"))).filter { it.isNotEmpty() }.joinToString(" · ")
+            out.append("<div class='row${if (complete) "" else " wait"}'><span class='grow'><strong>${esc(a["title"])}</strong>" +
+                "<span class='meta'>${esc(meta)}</span></span>$end</div>")
         }
         val records = myRecords(student)
         val progress = StringBuilder()
@@ -743,10 +807,65 @@ class Phone(
             progress.append("<div class='card'><h3 style='margin:0'>${esc(title(course, w))} " +
                 "${level(summary.level, summary.score, w)}</h3><ul class='units'>$units</ul></div>")
         }
-        val body = (if (progress.isNotEmpty()) "<h2>${esc(w("results.how"))}</h2>$progress" else "") +
-            "<h2>${esc(w("results.everything"))}</h2>" +
-            (if (out.isNotEmpty()) out.toString() else "<p class='muted'>${esc(w("results.nothing"))}</p>")
+        val body = (if (out.isNotEmpty()) out.toString() else "<p class='muted'>${esc(w("results.nothing"))}</p>") +
+            (if (progress.isNotEmpty()) "<h2>${esc(w("results.how"))}</h2>$progress" else "")
         return Response(page(req, w("results.title"), body))
+    }
+
+    private fun courseTitleOf(a: Map<String, Any?>, w: Strings): String {
+        val course = courseTree().firstOrNull { it["id"] != "" && it["id"] == a["course"] }
+        return if (course != null) title(course, w) else (a["course_title"]?.toString() ?: "")
+    }
+
+    /** The latest work as a big card: how many right, a square per question, and the first one missed. */
+    private fun newestResult(s: Row, a: Map<String, Any?>, sent: String, w: Strings): String {
+        val detail = Json.parse(s.str("detail") ?: "{}").asMap() ?: emptyMap()
+        val answers = Json.parse(s.str("answers") ?: "{}").asMap() ?: emptyMap()
+        val graded = s["score"] != null
+        val squares = StringBuilder()
+        var right = 0
+        var missed = ""
+        val qs = Assignments.questions(a)
+        qs.forEachIndexed { idx, q ->
+            val score = if (graded) (detail[q["id"].toString()] as? Number)?.toDouble() else null
+            val points = (q["points"] as? Number)?.toDouble()?.takeIf { it > 0 } ?: 1.0
+            val (cls, mark) = when {
+                score == null -> "wait" to "…"
+                score >= points -> { right++; "right" to "✓" }
+                score > 0 -> "part" to "½"
+                else -> {
+                    if (missed.isEmpty()) {
+                        var given = answers[q["id"].toString()]?.toString() ?: ""
+                        val options = q["options"].asList() ?: emptyList()
+                        if (q["type"] == "choice" && given.isNotEmpty() && given.all { it.isDigit() } && given.toInt() < options.size) {
+                            given = options[given.toInt()].toString()
+                        }
+                        missed = "<div class='missed'><strong>${idx + 1}. ${esc(q["prompt"])}</strong>" +
+                            "<span class='meta'>${esc(w("results.you_said", "answer" to given.ifEmpty { "—" }))}</span></div>"
+                    }
+                    "wrong" to "✗"
+                }
+            }
+            squares.append("<span class='$cls' aria-hidden='true'>$mark</span>")
+        }
+        val total = qs.size
+        val headline = when {
+            !graded -> "<p class='meta'>${esc(w("results.not_graded"))}</p>"
+            (s.long("complete") ?: 0L) != 0L -> "<p class='bigscore${if (total > 0 && right * 10 >= total * 7) " good" else ""}'>" +
+                "${esc(w("results.right", "right" to right, "total" to total))}</p>" +
+                "<p class='meta'>${g(s.double("score"))} / ${g(s.double("max"))}</p>"
+            else -> "<p class='bigscore'>${esc(w("results.so_far", "score" to g(s.double("score")), "max" to g(s.double("max"))))}</p>" +
+                "<p class='meta'>${esc(w("results.still_grading"))}</p>"
+        }
+        val grid = if (squares.isNotEmpty() && graded)
+            "<div class='squares' role='img' aria-label='${esc(w("results.right", "right" to right, "total" to total))}'>$squares</div>" else ""
+        val again = if (a["mode"] == "practice" && a["id"] != null && a["open"] == true)
+            "<a class='button big' href='/a/${esc(a["id"])}'>${esc(w("results.try_again"))}</a>" else ""
+        val meta = listOf(courseTitleOf(a, w), w("results.turned_in", "when" to w.whenText(s.double("submitted_at"))))
+            .filter { it.isNotEmpty() }.joinToString(" · ")
+        return "<section class='card' aria-labelledby='newest'><span class='new' id='newest'>${esc(w("results.newest"))}</span>" +
+            "<h2 style='margin:10px 0 2px;color:var(--ink)'>${esc(a["title"])}</h2>" +
+            "<p class='meta'>${esc(meta)}</p>$headline$grid$missed$sent$again</section>"
     }
 
     fun library(req: Request): Response {

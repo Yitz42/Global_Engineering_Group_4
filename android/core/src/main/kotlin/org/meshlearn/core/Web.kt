@@ -178,6 +178,46 @@ form.lang button{margin:0;padding:6px 14px;font-size:15px;background:transparent
 [dir=rtl] button,[dir=rtl] .button{margin:8px 0 0 8px}
 [dir=rtl] button.big,[dir=rtl] .button.big,[dir=rtl] form.search button,[dir=rtl] form.lang button{margin:8px 0 0}
 [dir=rtl] th,[dir=rtl] td{text-align:right}
+.week{margin:0 0 14px}
+.week .wk{display:flex;justify-content:space-between;gap:8px;font-size:16px}
+.week .bar{height:14px;margin:6px 0 0}
+.next{background:var(--accent);color:var(--accent-ink);border-radius:22px;padding:20px;margin:0 0 16px}
+.next .label{font-size:15px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;opacity:.85}
+.next h2{margin:8px 0 6px;font-size:23px;line-height:1.25;color:inherit}
+.next .meta{color:inherit;opacity:.9}
+.next .due{color:inherit}
+.next .button{display:block;text-align:center;background:var(--card);color:var(--accent);font-size:20px;padding:16px;border-radius:16px;margin:14px 0 0}
+.row{display:flex;align-items:center;gap:12px;background:var(--card);border:2px solid var(--line);border-radius:18px;padding:12px 14px;margin:8px 0;color:var(--ink);text-decoration:none}
+.row.wait{border-style:dashed;background:transparent}
+.row .grow{flex:1;min-width:0;display:flex;flex-direction:column}
+.row .meta{margin:0}
+.row .end{font-weight:700;text-align:right}
+.row .end.small{font-weight:400;font-size:15px;color:var(--muted)}
+.chev{color:var(--muted);font-size:22px}
+.squares{display:grid;grid-template-columns:repeat(auto-fill,minmax(40px,1fr));gap:6px;margin:10px 0}
+.squares span{display:flex;align-items:center;justify-content:center;height:40px;border-radius:10px;font-weight:800}
+.squares .right{background:var(--good);color:var(--card)}
+.squares .part{background:var(--warn);color:var(--card)}
+.squares .wrong{border:3px solid var(--bad);color:var(--bad)}
+.squares .wait{border:2px dashed var(--line);color:var(--muted)}
+.new{display:inline-block;padding:2px 10px;border-radius:99px;background:var(--accent);color:var(--accent-ink);font-size:14px;font-weight:800}
+.bigscore{font-size:24px;font-weight:800;margin:6px 0}
+.missed{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:10px 0 0}
+.missed strong{display:block}
+.sendin{font-weight:700}
+"""
+
+    /**
+     * Counts down to when the phone sends the student's work by radio (data-in seconds from now),
+     * then says it is on its way. Kept identical to COUNTDOWN_JS in web.py. Plain ES5.
+     */
+    const val COUNTDOWN_JS = """
+(function(){var el=document.getElementById('sendin');if(!el)return;
+var left=parseInt(el.getAttribute('data-in'),10)||0,t0=new Date().getTime();
+function tick(){var s=Math.max(0,Math.round(left-(new Date().getTime()-t0)/1000));
+if(s<=0){el.textContent=el.getAttribute('data-now');return;}
+var m=Math.floor(s/60),r=s%60;el.textContent=el.getAttribute('data-words').replace('{time}',m+':'+(r<10?'0':'')+r);
+setTimeout(tick,1000);}tick();})();
 """
 
     /**

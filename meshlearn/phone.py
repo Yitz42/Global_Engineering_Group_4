@@ -34,7 +34,7 @@ from . import protocol
 from .db import Database
 from .language import Strings
 from .messenger import Messenger
-from .web import (ASSIGNMENT_JS, CLEAR_DRAFT_JS, STUDENT_CSS, App, Request, Response, due_label, esc, file_response,
+from .web import (ASSIGNMENT_JS, CLEAR_DRAFT_JS, COUNTDOWN_JS, STUDENT_CSS, App, Request, Response, due_label, esc, file_response,
                   minutes_for, page, redirect)
 
 log = logging.getLogger(__name__)
@@ -310,6 +310,16 @@ class Phone:
             self.db.execute("UPDATE submissions SET msg_id = ? WHERE sub_id = ?", (msg_id, r["sub_id"]))
         return msg_id
 
+    def next_send_in(self) -> Optional[float]:
+        """Seconds until saved work goes out by radio; None when nothing is waiting to be batched."""
+        rows = self.db.all("SELECT submitted_at FROM submissions WHERE msg_id IS NULL ORDER BY submitted_at LIMIT ?",
+                           (MAX_BATCH,))
+        if not rows:
+            return None
+        if len(rows) >= MAX_BATCH:
+            return 0.0
+        return max(0.0, rows[0]["submitted_at"] + self.batch_s - time.time())
+
     def _batch_loop(self) -> None:
         while self._running:
             try:
@@ -546,17 +556,45 @@ class Phone:
                 f"<p class='muted'>{esc(self._description(course, w))}</p>{progress}"
                 f"{self._level(summary['level'], summary['score'], w)}</a>"
             )
-        lead = w("home.caught_up") if not todo else w.n("home.todo", len(todo))
-        todo_html = ""
-        if todo:
-            todo_html = (f"<h2>{esc(w('home.todo_heading'))}</h2>"
-                         + "".join(self._assignment_card(a, None, w, title) for a, title in todo[:5])
-                         + (f"<p class='meta'>{esc(w('home.more', n=len(todo) - 5))}</p>" if len(todo) > 5 else ""))
-        body = (f"<p class='lead'>{esc(lead)}</p>" + todo_html + f"<h2>{esc(w('home.courses'))}</h2>"
+        body = (self._home_top(todo, mine, w) + f"<h2>{esc(w('home.courses'))}</h2>"
                 + (f"<div class='grid'>{cards}</div>" if cards else
                    f"<p class='muted'>{esc(w('home.no_courses'))}</p>")
                 + f"<form method='post' action='/logout'><button class='secondary'>{esc(w('home.change_name'))}</button></form>")
         return Response(self._page(req, w("home.title", name=student), body))
+
+    def _home_top(self, todo: List[tuple], mine: dict, w: Strings) -> str:
+        """How much is done, the one thing to do next as a big card, then the rest (Ages 8 to 11 design)."""
+        total = len(todo) + sum(1 for course in self.course_tree() for a in self._assignments_in(course["id"]) if a["id"] in mine)
+        lead = w("home.caught_up") if not todo else w.n("home.todo", len(todo))
+        out = f"<p class='lead'>{esc(lead)}</p>"
+        if total:
+            done = total - len(todo)
+            text = esc(w("home.week_done", done=done, total=total))
+            out += (f"<div class='week'><div class='wk'><strong>{esc(w('home.week'))}</strong><span class='meta'>{text}</span></div>"
+                    f"<div class='bar' role='img' aria-label='{text}'><span style='width:{done * 100 // total}%'></span></div></div>")
+        if not todo:
+            return out + (f"<div class='card'><p class='grade good' style='margin-top:0'>{esc(w('home.all_done'))}</p>"
+                          f"<p>{esc(w('home.all_done_text'))}</p>"
+                          f"<a class='button secondary' href='/library'>{esc(w('tab.library'))}</a></div>")
+        a, course_title = todo[0]
+        practice = a.get("mode") == "practice"
+        meta = " · ".join(x for x in (course_title, w.n("card.questions", len(a["questions"])),
+                                      minutes_for(a["questions"], w)) if x)
+        due_text, _ = due_label(a.get("due", ""), False, words=w)
+        out += (f"<section class='next' aria-labelledby='next-label'><span class='label' id='next-label'>{esc(w('home.next'))}</span>"
+                f"<h2>{esc(a['title'])}</h2><p class='meta'>{esc(meta)}</p>"
+                + (f"<p class='due'>{esc(due_text)}</p>" if due_text else "")
+                + f"<a class='button' href='/a/{esc(a['id'])}'>{esc(w('card.practice') if practice else w('card.start'))} →</a></section>")
+        if len(todo) > 1:
+            out += f"<h2>{esc(w('home.coming_up'))}</h2>"
+            for a, course_title in todo[1:5]:
+                due_text, _ = due_label(a.get("due", ""), False, words=w)
+                meta = " · ".join(x for x in (course_title, due_text or (w("card.practice_tag") if a.get("mode") == "practice" else "")) if x)
+                out += (f"<a class='row' href='/a/{esc(a['id'])}'><span class='grow'><strong>{esc(a['title'])}</strong>"
+                        f"<span class='meta'>{esc(meta)}</span></span><span class='chev' aria-hidden='true'>›</span></a>")
+            if len(todo) > 5:
+                out += f"<p class='meta'>{esc(w('home.more', n=len(todo) - 5))}</p>"
+        return out
 
     def course_page(self, req: Request) -> Response:
         w = self.words(req)
@@ -720,10 +758,21 @@ class Phone:
                     f"<a class='button big secondary' href='/'>{esc(w('nav.back_home'))}</a>" + clear_draft)
             return Response(self._page(req, w("practice.title"), body))
         body = (f"<div class='card'><p class='good grade'>{esc(w('submitted.done'))}</p>"
-                f"<p>{esc(w('submitted.radio'))}</p>"
+                f"{self._send_countdown(w)}<p>{esc(w('submitted.no_wait'))}</p>"
                 f"<p class='meta'>{esc(w('submitted.later'))}</p></div>"
                 f"<a class='button big' href='/'>{esc(w('nav.back_home'))}</a>" + clear_draft)
         return Response(self._page(req, w("submitted.title"), body))
+
+    def _send_countdown(self, w: Strings) -> str:
+        """'It goes to your teacher in about 1:45.', counting down in the browser (COUNTDOWN_JS)."""
+        left = self.next_send_in()
+        if left is None or left < 1:
+            return f"<p class='sendin'>{esc(w('submitted.sending'))}</p>"
+        s = int(left + 0.5)
+        words = w("submitted.sends_in", time="{time}")
+        return (f"<p class='sendin' id='sendin' aria-live='polite' data-in='{s}' data-words='{esc(words)}' "
+                f"data-now='{esc(w('submitted.sending'))}'>{esc(words.replace('{time}', f'{s // 60}:{s % 60:02d}'))}</p>"
+                f"<script>{COUNTDOWN_JS}</script>")
 
     def results(self, req: Request) -> Response:
         w = self.words(req)
@@ -732,22 +781,27 @@ class Phone:
             return redirect("/")
         rows = self.db.all("SELECT * FROM submissions WHERE student = ? ORDER BY submitted_at DESC", (student,))
         out = ""
-        for s in rows:
-            a = self.get_assignment(s["assignment_id"]) or {"title": s["assignment_id"]}
+        for i, s in enumerate(rows):
+            a = self.get_assignment(s["assignment_id"]) or {"title": s["assignment_id"], "questions": []}
             delivery = self.messenger.message_status(s["msg_id"])
             sent = {"acked": f"<span class='pill good'>{esc(w('results.acked'))}</span>",
                     "pending": f"<span class='pill warn'>{esc(w('results.pending'))}</span>",
                     "failed": f"<span class='pill bad'>{esc(w('results.failed'))}</span>"}.get(
                 delivery, f"<span class='pill'>{esc(w('results.saved'))}</span>")
+            if i == 0:
+                out += self._newest_result(s, a, sent, w) + (f"<h2>{esc(w('results.earlier'))}</h2>" if len(rows) > 1 else "")
+                continue
+            course = self._course_title_of(a, w)
             if s["score"] is None:
-                grade = f"<p class='meta'>{esc(w('results.not_graded'))}</p>"
-            elif s["complete"]:
-                grade = f"<p class='grade'>{s['score']:g} / {s['max']:g}</p>"
+                out += (f"<div class='row wait'><span class='grow'><strong>{esc(a['title'])}</strong>"
+                        f"<span class='meta'>{esc(course)}</span></span><span class='end small'>{sent}</span></div>")
+                continue
+            if s["complete"]:
+                end = f"<span class='end'>{s['score']:g} / {s['max']:g}</span>"
             else:
-                so_far = w("results.so_far", score=format(s["score"], "g"), max=format(s["max"], "g"))
-                grade = f"<p class='grade'>{esc(so_far)}</p><p class='meta'>{esc(w('results.still_grading'))}</p>"
-            out += (f"<div class='card'><h3 style='margin:0'>{esc(a['title'])}</h3>"
-                    f"<p class='meta'>{esc(w('results.turned_in', when=w.when(s['submitted_at'])))}</p>{grade}{sent}</div>")
+                end = f"<span class='end small'>{esc(w('results.reading'))}</span>"
+            out += (f"<div class='row{'' if s['complete'] else ' wait'}'><span class='grow'><strong>{esc(a['title'])}</strong>"
+                    f"<span class='meta'>{esc(' · '.join(x for x in (course, w.when(s['submitted_at'])) if x))}</span></span>{end}</div>")
         records = self.my_records(student)
         progress = ""
         for course in self.course_tree():
@@ -758,10 +812,57 @@ class Phone:
                             for u in summary["units"] if u["answered"])
             progress += (f"<div class='card'><h3 style='margin:0'>{esc(self._title(course, w))} "
                          f"{self._level(summary['level'], summary['score'], w)}</h3><ul class='units'>{units}</ul></div>")
-        body = ((f"<h2>{esc(w('results.how'))}</h2>" + progress if progress else "")
-                + f"<h2>{esc(w('results.everything'))}</h2>"
-                + (out or f"<p class='muted'>{esc(w('results.nothing'))}</p>"))
+        body = ((out or f"<p class='muted'>{esc(w('results.nothing'))}</p>")
+                + (f"<h2>{esc(w('results.how'))}</h2>" + progress if progress else ""))
         return Response(self._page(req, w("results.title"), body))
+
+    def _course_title_of(self, a: dict, w: Strings) -> str:
+        course = next((c for c in self.course_tree() if c["id"] and c["id"] == a.get("course")), None)
+        return self._title(course, w) if course else a.get("course_title", "")
+
+    def _newest_result(self, s, a: dict, sent: str, w: Strings) -> str:
+        """The latest work as a big card: how many right, a square per question, and the first one missed."""
+        detail = json.loads(s["detail"] or "{}")
+        answers = json.loads(s["answers"] or "{}")
+        squares, right, missed = "", 0, ""
+        for n, q in enumerate(a.get("questions", []), start=1):
+            score = detail.get(q["id"]) if s["score"] is not None else None
+            points = q.get("points", 1) or 1
+            if score is None:
+                cls, mark = "wait", "…"
+            elif score >= points:
+                cls, mark = "right", "✓"
+                right += 1
+            elif score > 0:
+                cls, mark = "part", "½"
+            else:
+                cls, mark = "wrong", "✗"
+                if not missed:
+                    given = answers.get(q["id"], "")
+                    if q["type"] == "choice" and given.isdigit() and int(given) < len(q.get("options", [])):
+                        given = q["options"][int(given)]
+                    missed = (f"<div class='missed'><strong>{n}. {esc(q['prompt'])}</strong>"
+                              f"<span class='meta'>{esc(w('results.you_said', answer=given or '—'))}</span></div>")
+            squares += f"<span class='{cls}' aria-hidden='true'>{mark}</span>"
+        total = len(a.get("questions", []))
+        if s["score"] is None:
+            headline = f"<p class='meta'>{esc(w('results.not_graded'))}</p>"
+        elif s["complete"]:
+            well = total and right * 10 >= total * 7
+            headline = (f"<p class='bigscore{' good' if well else ''}'>{esc(w('results.right', right=right, total=total))}</p>"
+                        f"<p class='meta'>{s['score']:g} / {s['max']:g}</p>")
+        else:
+            so_far = w("results.so_far", score=format(s["score"], "g"), max=format(s["max"], "g"))
+            headline = f"<p class='bigscore'>{esc(so_far)}</p><p class='meta'>{esc(w('results.still_grading'))}</p>"
+        grid = (f"<div class='squares' role='img' aria-label='{esc(w('results.right', right=right, total=total))}'>{squares}</div>"
+                if squares and s["score"] is not None else "")
+        again = (f"<a class='button big' href='/a/{esc(a['id'])}'>{esc(w('results.try_again'))}</a>"
+                 if a.get("mode") == "practice" and a.get("id") and a.get("open") else "")
+        course = self._course_title_of(a, w)
+        return (f"<section class='card' aria-labelledby='newest'><span class='new' id='newest'>{esc(w('results.newest'))}</span>"
+                f"<h2 style='margin:10px 0 2px;color:var(--ink)'>{esc(a['title'])}</h2>"
+                f"<p class='meta'>{esc(' · '.join(x for x in (course, w('results.turned_in', when=w.when(s['submitted_at']))) if x))}</p>"
+                f"{headline}{grid}{missed}{sent}{again}</section>")
 
     def library(self, req: Request) -> Response:
         w = self.words(req)

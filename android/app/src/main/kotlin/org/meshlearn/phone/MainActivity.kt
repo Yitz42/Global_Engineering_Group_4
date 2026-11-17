@@ -839,6 +839,9 @@ class MainActivity : Activity() {
         val schoolTile = Tile("School")
         val waitingTile = Tile("Waiting")
         c.addView(row(8).apply { listOf(radioTile, schoolTile, waitingTile).forEach { addView(fill(it.view)) } })
+        // When saved students' work goes out: the phone collects work for a while, then sends it together.
+        val sendLine = label("", 15f, BODY).apply { setPadding(dp(4), 0, dp(4), 0) }
+        c.addView(sendLine)
 
         val hotspotTip = row(12).apply {
             setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -968,6 +971,13 @@ class MainActivity : Activity() {
             schoolTile.set(if (st.lastHeard > 0) ago(st.lastHeard).replaceFirstChar { it.uppercase() } else "Not yet")
             val waiting = st.pending + st.unbatched
             waitingTile.set(if (waiting == 0L) "Nothing" else plural(waiting, "message"))
+            sendLine.visibility = if (st.running && st.sendsIn >= 0) View.VISIBLE else View.GONE
+            if (st.sendsIn >= 0) {
+                val s = st.sendsIn.toLong()
+                sendLine.text = if (s < 1) "Sending students' work by radio now…"
+                    else "${plural(st.unbatched, "piece")} of students' work go${if (st.unbatched == 1L) "es" else ""} by radio in about " +
+                        String.format(java.util.Locale.US, "%d:%02d", s / 60, s % 60) + ". Tap \"Send students' work now\" to send it straight away."
+            }
             trouble.visibility = if (radioDown || trying) View.VISIBLE else View.GONE
             hotspotTip.visibility = if (st.running && hotspot == null) View.VISIBLE else View.GONE
             val addr = hotspot ?: Settings.localAddresses().firstOrNull()

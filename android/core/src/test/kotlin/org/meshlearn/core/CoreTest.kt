@@ -207,6 +207,7 @@ class CoreTest {
         fun block(start: String) = webPy.substringAfter(start).substringBefore("\"\"\"").trim()
         assertEquals(block("STUDENT_CSS = \"\"\""), Html.STUDENT_CSS.trim())
         assertEquals(block("ASSIGNMENT_JS = r\"\"\""), Html.ASSIGNMENT_JS.trim())
+        assertEquals(block("COUNTDOWN_JS = r\"\"\""), Html.COUNTDOWN_JS.trim())
     }
 
     /** The school's words, from the same files the Python phone reads, give the same pages. */

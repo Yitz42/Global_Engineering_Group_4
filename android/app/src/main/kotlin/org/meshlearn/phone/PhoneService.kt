@@ -105,6 +105,7 @@ class PhoneService : Service() {
             unbatched = count("SELECT COUNT(*) AS n FROM submissions WHERE msg_id IS NULL"),
             assignments = count("SELECT COUNT(*) AS n FROM assignments"),
             lastHeard = runCatching { p.messenger.lastHeard() }.getOrDefault(0.0),
+            sendsIn = runCatching { p.nextSendIn() }.getOrNull() ?: -1.0,
         )
     }
 
@@ -170,6 +171,8 @@ class PhoneService : Service() {
         val unbatched: Long = 0,
         val assignments: Long = 0,
         val lastHeard: Double = 0.0,
+        /** Seconds until saved students' work is sent by radio; -1 when none is waiting. */
+        val sendsIn: Double = -1.0,
         val radioLog: List<String> = emptyList(),
         val error: String = "",
     )
