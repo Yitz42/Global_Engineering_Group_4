@@ -70,14 +70,24 @@ The five students on the demo phone (Lena, Ana, Bruno, Kofi, Mateus) send their 
 
 1. **Get radios.** See [docs/hardware.md](docs/hardware.md) for recommended boards, antennas, power, and the right frequency band for the US, Brazil, Germany, and Kenya.
 2. **Flash Meshtastic** on each radio (https://flasher.meshtastic.org), set the region, and give MeshLearn its own private channel on every radio ([docs/hardware.md](docs/hardware.md#6-setting-up-the-radios) shows how). Then check the pair on a desk with `python3 -m meshlearn radio-test` ([bench test](docs/hardware.md#7-bench-test-with-two-radios)).
-3. **Teacher hub:** plug a radio into the laptop by USB and run:
-   ```bash
-   pip install meshtastic
-   python3 -m meshlearn hub --radio-serial /dev/ttyUSB0 --radio-channel 3      # Windows: --radio-serial COM3
-   ```
-   Open http://localhost:8000. A new hub offers **Add example lessons** (nine lessons in mathematics, science and reading) to test with.
+3. **Teacher hub:** plug a radio into the laptop by USB, then double-click the start file in the MeshLearn folder:
+   - **Mac:** `start-hub.command`. The first time, macOS may refuse to open it: right-click it, choose **Open**, then **Open** again.
+   - **Windows:** `start-hub.bat`.
+   - **Linux:** run `bash start-hub.command`.
+
+   The first start needs internet for about a minute. It installs the radio software into a private `.venv` folder, so nothing else on the computer changes. After that the hub works offline.
+
+   Each start finds the radio's USB port and the channel named MeshLearn by itself, then opens the hub in the browser. Keep the window open while you work; closing it stops the hub. If two radios are plugged in, it asks which one is the hub's.
+
+   A new hub offers **Add example lessons** (nine lessons in mathematics, science and reading) to test with.
    The **Phones and radio** page shows this hub's radio id to type into each phone. Phones register themselves the first time they check in.
-   Add `--host 0.0.0.0` if phones will copy assignments from this laptop over school Wi-Fi.
+
+   The start file lets other devices on the school Wi-Fi reach the hub, so phones can copy assignments from it. To run the hub by hand, use:
+   ```bash
+   python3 -m pip install meshtastic
+   python3 -m meshlearn hub --radio-serial --host 0.0.0.0      # or name the port: --radio-serial /dev/cu.usbmodem1101, COM3
+   ```
+   Add `--radio-channel 3` to use a channel slot other than the one named MeshLearn.
 4. **Student phone:** follow [docs/android-setup.md](docs/android-setup.md) to install Termux, put the data on the microSD card, pair the phone with its radio over Bluetooth, and start:
    ```bash
    python -m meshlearn phone --data ~/storage/external-1/meshlearn --hub '!a1b2c3d4' --name "North village" --radio-ble Meshtastic_e023 --radio-channel 3
@@ -239,9 +249,12 @@ Moving a due date or hiding an assignment is always 1 packet.
 ## Project layout
 
 ```
+start-hub.command    double-click start for the teacher hub on a Mac (or bash start-hub.command on Linux)
+start-hub.bat        the same on Windows
 meshlearn/
   protocol.py        message format: dictionary compression, framing, missing-piece reports
   transport.py       simulated radio (UDP) and real Meshtastic radios (Bluetooth, USB or Wi-Fi)
+  radioports.py      finds the radio plugged in by USB, and the channel named MeshLearn on it
   messenger.py       store-and-forward delivery: acks, selective resend, de-duplication
   radiotest.py       bench test for two real radios on one computer (radio-test)
   assignments.py     question types, compact format, version stamps, answer checking, grading

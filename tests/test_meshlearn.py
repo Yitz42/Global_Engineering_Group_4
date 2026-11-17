@@ -3,6 +3,7 @@
 Run with: python -m unittest discover -s tests -v
 """
 
+import contextlib
 import functools
 import http.server
 import io
@@ -19,9 +20,10 @@ import urllib.parse
 import urllib.request
 import zipfile
 from http.cookiejar import CookieJar
+from unittest import mock
 
 from meshlearn import assignments as asg
-from meshlearn import catalog, comprehension, courses, library, protocol
+from meshlearn import catalog, comprehension, courses, library, protocol, radioports
 from meshlearn.hub import Hub
 from meshlearn.messenger import Messenger
 from meshlearn.phone import Phone
@@ -168,6 +170,46 @@ class SendCountdownTests(unittest.TestCase):
         self.assertTrue(110 < phone.next_send_in() <= 120)
         phone.flush_submissions(force=True)
         self.assertIsNone(phone.next_send_in())   # batched: now it is the radio's turn
+
+
+class RadioPortTests(unittest.TestCase):
+    """Starting the hub without knowing the radio's port or its MeshLearn channel slot."""
+
+    @staticmethod
+    def port(device, vid):
+        return type("Port", (), {"device": device, "vid": vid})()
+
+    def test_finds_the_radio_among_other_serial_ports(self):
+        ports = [self.port("/dev/cu.Bluetooth-Incoming-Port", None), self.port("/dev/cu.debug-console", None),
+                 self.port("/dev/cu.usbmodem1101", 0x303A), self.port("/dev/tty.usbmodem1101", 0x303A),
+                 self.port("/dev/cu.usbserial-0001", 0x9999)]
+        self.assertEqual(radioports.find_radio_ports(ports), ["/dev/cu.usbmodem1101"])
+        # A board with a chip not on the list is still offered when nothing better is plugged in.
+        self.assertEqual(radioports.find_radio_ports([self.port("COM7", 0x9999)]), ["COM7"])
+        self.assertEqual(radioports.find_radio_ports([self.port("COM1", None)]), [])
+
+    def test_choose_port(self):
+        self.assertEqual(radioports.choose_radio_port(["COM5"]), "COM5")
+        with self.assertRaisesRegex(radioports.NoRadioFound, "No radio is plugged in"):
+            radioports.choose_radio_port([])
+        answers = iter(["9", "2"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(radioports.choose_radio_port(["COM3", "COM5"], ask=lambda _: next(answers)), "COM5")
+
+    def test_meshlearn_channel_by_name(self):
+        def ch(index, name, role=2):
+            return type("Ch", (), {"index": index, "role": role, "settings": type("S", (), {"name": name})()})()
+        self.assertEqual(radioports.meshlearn_channel([ch(0, "", 1), ch(1, "Family"), ch(3, "MeshLearn")]), 3)
+        self.assertIsNone(radioports.meshlearn_channel([ch(0, "", 1), ch(3, "meshlearn", role=0)]))
+        self.assertIsNone(radioports.meshlearn_channel(None))
+
+    def test_hub_explains_a_missing_radio(self):
+        from meshlearn import __main__ as cli
+        err = io.StringIO()
+        with mock.patch.object(cli, "choose_radio_port", side_effect=radioports.NoRadioFound("No radio is plugged in.")), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["hub", "--radio-serial", "--data", tempfile.mkdtemp()]), 1)
+        self.assertIn("No radio is plugged in", err.getvalue())
 
 
 class MessengerTests(unittest.TestCase):

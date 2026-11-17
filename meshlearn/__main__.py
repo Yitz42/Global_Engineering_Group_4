@@ -16,6 +16,7 @@ from .hub import Hub
 from .library import run as run_library
 from .messenger import Messenger
 from .phone import Phone
+from .radioports import NoRadioFound, choose_radio_port
 from .transport import MeshtasticTransport, UdpSimTransport, parse_peers
 
 SAMPLE_ASSIGNMENT = os.path.join(os.path.dirname(__file__), "sample_assignment.json")
@@ -24,10 +25,13 @@ SAMPLE_ASSIGNMENT = os.path.join(os.path.dirname(__file__), "sample_assignment.j
 def _add_radio_args(p: argparse.ArgumentParser, default_node: str, default_port: int) -> None:
     g = p.add_argument_group("radio link (pick one)")
     g.add_argument("--radio-ble", metavar="NAME", help="real Meshtastic radio over Bluetooth: its name (e.g. Meshtastic_a8a2) or address")
-    g.add_argument("--radio-serial", metavar="DEVICE", help="real Meshtastic radio on USB, e.g. /dev/ttyUSB0 or COM3")
+    g.add_argument("--radio-serial", metavar="DEVICE", nargs="?", const="auto",
+                   help="real Meshtastic radio on USB, e.g. /dev/ttyUSB0 or COM3; on its own (or 'auto'), "
+                        "finds the radio that is plugged in")
     g.add_argument("--radio-host", metavar="IP", help="real Meshtastic radio over Wi-Fi (TCP), e.g. 192.168.43.20")
-    g.add_argument("--radio-channel", type=int, default=0, metavar="INDEX",
-                   help="real radio: channel index to send on; use a private channel, not 0 (the public default)")
+    g.add_argument("--radio-channel", type=int, metavar="INDEX",
+                   help="real radio: channel index to send on (default: the channel named MeshLearn, else 0, "
+                        "the public one)")
     g.add_argument("--radio-hops", type=int, metavar="N", help="real radio: most relays a packet may take (default: the node's)")
     g.add_argument("--sim-node", default=default_node, help=f"simulator: this node's name (default {default_node})")
     g.add_argument("--sim-port", type=int, default=default_port, help=f"simulator: UDP port to listen on (default {default_port})")
@@ -36,10 +40,31 @@ def _add_radio_args(p: argparse.ArgumentParser, default_node: str, default_port:
     g.add_argument("--sim-loss", type=float, default=0.0, help="simulator: fraction of packets to drop (0-1)")
 
 
+class _Stop(Exception):
+    """Can't start; the message says what to do."""
+
+
 def _transport(args):
     if args.radio_ble or args.radio_serial or args.radio_host:
-        return MeshtasticTransport(device=args.radio_serial, host=args.radio_host, ble=args.radio_ble,
-                                   channel=args.radio_channel, hop_limit=args.radio_hops), 30.0
+        device = args.radio_serial
+        if device == "auto":
+            try:
+                device = choose_radio_port()
+            except NoRadioFound as exc:
+                raise _Stop(str(exc)) from None
+            print(f"Found the radio on {device}.")
+        try:
+            transport = MeshtasticTransport(device=device, host=args.radio_host, ble=args.radio_ble,
+                                            channel=args.radio_channel, hop_limit=args.radio_hops)
+        except RuntimeError as exc:
+            raise _Stop(str(exc)) from None
+        except Exception as exc:
+            where = device or args.radio_host or args.radio_ble
+            raise _Stop(f"Couldn't talk to the radio on {where} ({exc}). If another program has it open "
+                        "(an earlier hub still running, the Meshtastic app or website), close that and start "
+                        "again. Otherwise unplug the radio, plug it back in, and start again.") from None
+        print(f"Radio {transport.node_id or '(id unknown)'} on {transport.channel_note}.")
+        return transport, 30.0
     return UdpSimTransport(args.sim_node, args.sim_port, parse_peers(args.sim_peer), drop_rate=args.sim_loss), 3.0
 
 
@@ -63,7 +88,12 @@ def cmd_hub(args) -> int:
     hub = Hub(os.path.join(args.data, "hub.db"), _messenger_factory(transport, os.path.join(args.data, "outbox.db"), retry))
     hub.messenger.start()
     server = hub.app.serve_in_thread(args.host, args.port)
-    print(f"Teacher hub on http://localhost:{args.port}  (radio node: {transport.node_id or 'unknown'})")
+    url = f"http://localhost:{args.port}"
+    print(f"Teacher hub on {url}  (radio node: {transport.node_id or 'unknown'})")
+    if args.open:
+        print("Leave this window open while you use MeshLearn. To stop the hub, close it or press Ctrl+C.")
+        import webbrowser
+        webbrowser.open(url)
     _wait_forever(server.shutdown, hub.messenger.stop)
     return 0
 
@@ -218,6 +248,7 @@ def main(argv=None) -> int:
     h.add_argument("--data", default="hub-data", help="folder for the hub database")
     h.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to reach the dashboard from other devices")
     h.add_argument("--port", type=int, default=8000)
+    h.add_argument("--open", action="store_true", help="open the hub in the web browser once it is running")
     _add_radio_args(h, "hub", 47001)
     h.set_defaults(func=cmd_hub)
 
@@ -264,6 +295,9 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     try:
         return args.func(args)
+    except _Stop as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except OSError as exc:
         if exc.errno != errno.EADDRINUSE:
             raise

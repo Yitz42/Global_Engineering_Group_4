@@ -69,7 +69,9 @@ Any Android phone that meets these will do; donated or second-hand phones are id
    meshtastic --port /dev/ttyUSB1 --ch-add MeshLearn          # each other radio
    meshtastic --port /dev/ttyUSB1 --ch-index 3 --ch-set psk base64:<the psk>
    ```
-   Then start the hub and phone with `--radio-channel 3` (the slot number).
+   Keep the name MeshLearn: the hub, and the phone started from Termux, find the channel by that name. To use a channel with another name, start them with `--radio-channel 3` (its slot number).
+
+   **Windows:** if the computer doesn't see a radio plugged in by USB, install the driver for the radio's USB chip. Most boards use the CP210x chip (Silicon Labs' "CP210x USB to UART" driver) or the CH340/CH9102 chip (WCH's "CH341SER" driver). Boards with an ESP32-S3 chip need no driver.
 4. **Phone's radio:** leave Bluetooth on (the default). Pair it with the phone, typing the PIN shown on the radio's screen, and note its Bluetooth name (for example `Meshtastic_e023`). The phone connects with `--radio-ble <that name>`. Make sure the Meshtastic app on that phone is closed: a radio accepts one Bluetooth connection at a time.
 5. **Relay:** set Device role to `ROUTER`.
 6. Write down each radio's node id (looks like `!a1b2c3d4`). The hub needs the phone radio's id, and the phone needs the hub radio's id.

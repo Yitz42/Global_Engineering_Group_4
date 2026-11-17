@@ -147,12 +147,12 @@ class MeshtasticTransport(Transport):
 
     channel is the node's channel index to send on. Use a private channel (its own
     key) rather than 0, the public default, so other people's mesh doesn't carry
-    MeshLearn traffic. hop_limit caps relays (0 = direct only; None = the node's
-    setting).
+    MeshLearn traffic. None picks the channel named MeshLearn, else 0. hop_limit
+    caps relays (0 = direct only; None = the node's setting).
     """
 
     def __init__(self, device: Optional[str] = None, host: Optional[str] = None, min_interval_s: float = 3.0,
-                 channel: int = 0, hop_limit: Optional[int] = None, ble: Optional[str] = None):
+                 channel: Optional[int] = None, hop_limit: Optional[int] = None, ble: Optional[str] = None):
         try:
             from pubsub import pub  # installed with meshtastic
             try:
@@ -178,6 +178,15 @@ class MeshtasticTransport(Transport):
             self._iface = SerialInterface(devPath=device)
         info = self._iface.getMyNodeInfo() or {}
         self.node_id = (info.get("user") or {}).get("id", "")
+        if channel is None:
+            from .radioports import meshlearn_channel
+            found = meshlearn_channel(getattr(getattr(self._iface, "localNode", None), "channels", None))
+            self.channel = 0 if found is None else found
+            self.channel_note = (f"channel {found}, named MeshLearn" if found is not None else
+                                 "channel 0, the public one: this radio has no channel named MeshLearn "
+                                 "(docs/hardware.md shows how to add one)")
+        else:
+            self.channel_note = f"channel {channel}"
         self._on_frame: Optional[FrameHandler] = None
 
     def start(self, on_frame: FrameHandler) -> None:
