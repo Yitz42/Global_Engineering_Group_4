@@ -94,12 +94,20 @@ class MainActivity : Activity() {
             editing = savedInstanceState.getBoolean("editing")
         } else {
             stack.add(if (settings.setupDone) Screen.STATUS else Screen.WELCOME)
+            if (settings.setupDone && intent?.getStringExtra(EXTRA_SCREEN) == SCREEN_SETTINGS) stack.add(Screen.SETTINGS)
         }
         if (Build.VERSION.SDK_INT >= 33) {
             // Apps for Android 16+ get back gestures here, not in onBackPressed.
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { back() }
         }
         render()
+    }
+
+    /** Already open behind the student site: "Phone settings" there brings it back on Settings. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getStringExtra(EXTRA_SCREEN) == SCREEN_SETTINGS && settings.setupDone) reset(Screen.STATUS, Screen.SETTINGS)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1502,6 +1510,9 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        /** Which screen to open on, from another part of the app. */
+        const val EXTRA_SCREEN = "screen"
+        const val SCREEN_SETTINGS = "settings"
         private const val STORE_CARD = 201
         private const val STORE_PHONE = 202
 
