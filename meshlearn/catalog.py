@@ -6,6 +6,8 @@ wikis...). This module downloads that list once, keeps it on the hub so it
 works offline afterwards, and rates each collection for school use with
 transparent rules, so the teacher sees learning material first.
 
+Kolibri's public channels (kolibri.py) are listed beside them.
+
 It also runs the download of a teacher's chosen collections onto a memory card
 in the background.
 """
@@ -22,7 +24,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
-from . import library
+from . import kolibri, library
 
 CATALOG_ALL = library.KIWIX_CATALOG + "?count=-1"
 
@@ -57,6 +59,8 @@ LEVELS = {3: "Core learning", 2: "Learning reference", 1: "General interest", 0:
 RULES: List[Tuple[str, str, int]] = [
     (r"^name:(pokepedia|pokewiki|bulbagarden|zh\.minecraft|minecraft|zdoom|granbluefantasy|dandwiki|frackinuniverse|bitcoin)", "Games and hobbies", 0),
     (r"^tag:(gaming|fandom)$", "Games and hobbies", 0),
+    (r"^tag:(african-storybook|book-dash|pratham-books|global-digital-library-book|nal-ibali|the-passionfruit)", "Picture books and stories", 3),
+    (r"^tag:(tess|eenet|how-to-get-started-with-kolibri|using-studio|project-based-learning-with-kolibri|eld-teacher)", "For teachers", 2),
     (r"^category:phet$", "Science simulations", 3),
     (r"^category:wikibooks$|^name:(libretexts|milneopentextbooks|openstax|openmusictheory|learningstatistic|jeffe\.cs|ethanweed)", "Textbooks", 3),
     (r"^category:(wikiversity|mooc)$|^name:(khanacademy|crashcourse|artofproblemsolving|oer4schools|ubongo|kolibri|avanti|diksha|madrasa|moldova-ministry-education|cest-pas-sorcier|biologycourses|voa_learning|genomicseducation|science-in-the-bath|ncase)|^tag:(openedx|kolibri|khan-academy)$", "Courses and lessons", 3),
@@ -89,17 +93,24 @@ EDU_WORDS = re.compile(
 AGE_RULES: List[Tuple[str, Tuple[int, int]]] = [
     (r"^category:stack_exchange$|^name:devdocs", (16, 99)),          # before keyword clues like "teachers"
     (r"^name:(booksdash|prunelle|africanstorybook|ubongo|wikimini)", (3, 9)),
+    (r"^tag:(african-storybook|book-dash|nal-ibali|the-passionfruit)", (3, 9)),
+    (r"^tag:ubongo", (5, 12)),
+    (r"^tag:(pratham-books|global-digital-library-book)", (3, 12)),
+    (r"^tag:(tess|eenet|how-to-get-started-with-kolibri|using-studio|project-based-learning-with-kolibri|eld-teacher)", (19, 99)),
+    (r"^tag:khan-academy-standardized", (14, 18)),
+    (r"^tag:(ck-12|open-?stax|mit-blossoms)", (12, 18)),
+    (r"^tag:engageny", (5, 18)),
     (r"^name:ted_mul_kids$", (6, 12)),
     (r"^name:klexikon", (6, 12)),
     (r"^name:vikidia_pt", (8, 14)),                                     # "para crianças e adolescentes"
     (r"^category:vikidia$", (8, 13)),
     (r"^name:voa_fr", (8, 12)),
     (r"^name:diksha-std5", (9, 11)),
-    (r"^name:khanacademy", (6, 18)),
+    (r"^name:khanacademy|^tag:khan-academy", (6, 18)),
     (r"^name:libretexts\.org_\w+_k12", (5, 18)),
     (r"^name:artofproblemsolving", (11, 18)),
     (r"^name:scratch-wiki", (8, 16)),
-    (r"^category:phet$", (8, 99)),
+    (r"^category:phet$|^tag:phet", (8, 99)),
     (r"^name:ted_mul_ted-ed$", (12, 18)),
     (r"^name:(oer4schools|edutechwiki)", (19, 99)),                    # for teachers
     (r"^name:libretexts|^category:mooc$|^tag:openedx$|^name:(biologycourses|milneopentextbooks|jeffe\.cs|stacks\.math)", (17, 99)),
@@ -221,6 +232,13 @@ class Catalog:
 
     def refresh(self) -> int:
         entries = fetch_catalog()
+        try:
+            extra = kolibri.fetch_channels()
+            for e in extra:
+                _rate(e)
+        except Exception:  # Kolibri is extra: keep the Kiwix list, and the Kolibri one from last time
+            extra = [e for e in self.entries if e["category"] == "kolibri"]
+        entries += extra
         with self._lock:
             self.entries, self.fetched_at = entries, time.time()
             tmp = self.cache_path + ".tmp"
@@ -266,7 +284,9 @@ class Catalog:
         groups = list(by_name.values())
         for g in groups:
             g["options"].sort(key=lambda o: (order.get(o["flavour"], 99), o["size"]))
-        groups.sort(key=lambda g: (not g["fits"], -g["level"], g["label"], g["options"][0]["size"]))
+        # Looking for one language, courses made in it come before toolkits translated into dozens.
+        groups.sort(key=lambda g: (not g["fits"], -g["level"], g["label"], bool(lang) and g["lang"].count(",") > 2,
+                                   g["options"][0]["size"]))
         return groups
 
     def labels(self, lang: str = "", min_level: int = 0) -> List[str]:
@@ -330,14 +350,32 @@ def selection_item(entry: dict) -> dict:
             "license": "See the collection's source"}
 
 
+def without_repeats(items: List[dict]) -> List[dict]:
+    """The items with each lesson file counted once: the same video can sit under several chosen topics."""
+    seen, out = set(), []
+    for item in items:
+        if not item.get("details"):
+            out.append(item)
+            continue
+        keep = [n for n, (_url, name) in enumerate(item["files"]) if name not in seen]
+        seen.update(item["files"][n][1] for n in keep)
+        out.append(dict(item, files=[item["files"][n] for n in keep], details=[item["details"][n] for n in keep],
+                        size=sum(item["details"][n]["size"] for n in keep)))
+    return out
+
+
+def total_bytes(items: List[dict]) -> int:
+    return sum(i["size"] for i in without_repeats(items))
+
+
 class DownloadJob(threading.Thread):
     """Copies chosen collections onto a card folder, resuming partial files."""
 
     def __init__(self, items: List[dict], dest_root: str):
         super().__init__(name="library-download", daemon=True)
-        self.items = items
+        self.items = without_repeats(items)
         self.library_dir = os.path.join(dest_root, "library")
-        self.total = sum(i["size"] for i in items)
+        self.total = sum(i["size"] for i in self.items)
         self.done_bytes = 0      # finished collections
         self.item_bytes = 0      # finished files of the current collection
         self.file_bytes = 0      # the file being downloaded now
@@ -358,33 +396,43 @@ class DownloadJob(threading.Thread):
         try:
             os.makedirs(self.library_dir, exist_ok=True)
             for item in self.items:
-                folder = os.path.join(self.library_dir, item["folder"])
-                os.makedirs(folder, exist_ok=True)
-                per_file = item["size"] if len(item["files"]) == 1 else 0
-                self.item_bytes = 0
-                for url, filename in item["files"]:
-                    if self._cancel.is_set():
-                        self.state = "cancelled"
-                        return
-                    self.current = f"{item['title']}: {filename}"
-                    self.file_bytes = 0
-                    path = os.path.join(folder, filename)
-                    library.download(url, path, per_file, log=lambda line: None, cancel=self._cancel,
-                                     progress=self._on_bytes)
-                    if self._cancel.is_set():
-                        self.state = "cancelled"
-                        return
-                    self.item_bytes += os.path.getsize(path) if os.path.exists(path) else 0
-                    self.file_bytes = 0
+                done = False
+                try:
+                    done = self._copy(item)
+                finally:
+                    if done or item.get("details"):  # lessons are useful one by one: list those that made it
+                        self._write_index(item)
+                if not done:
+                    self.state = "cancelled"
+                    return
                 self.done_bytes += item["size"]
                 self.item_bytes = 0
                 self.finished.append(item["title"])
-                self._write_index(item)
             self.state = "done"
             self.current = ""
         except Exception as exc:  # report to the teacher instead of dying silently
             self.state = "failed"
             self.error = str(exc)
+
+    def _copy(self, item: dict) -> bool:
+        """Download one collection's files. False if the teacher stopped it."""
+        folder = os.path.join(self.library_dir, item["folder"])
+        os.makedirs(folder, exist_ok=True)
+        self.item_bytes = 0
+        for n, (url, filename) in enumerate(item["files"]):
+            if self._cancel.is_set():
+                return False
+            detail = item["details"][n] if item.get("details") else None
+            size = detail["size"] if detail else item["size"] if len(item["files"]) == 1 else 0
+            self.current = f"{item['title']}: {detail['title'] if detail else filename}"
+            self.file_bytes = 0
+            path = os.path.join(folder, filename)
+            library.download(url, path, size, log=lambda line: None, cancel=self._cancel, progress=self._on_bytes)
+            if self._cancel.is_set():
+                return False
+            self.item_bytes += os.path.getsize(path) if os.path.exists(path) else 0
+            self.file_bytes = 0
+        return True
 
     def _write_index(self, item: dict) -> None:
         index_path = os.path.join(self.library_dir, "index.json")
@@ -393,15 +441,24 @@ class DownloadJob(threading.Thread):
                 index = json.load(fh)
         except (OSError, ValueError):
             index = []
+        for e in index:  # always "/": a card written on Windows is read on Android
+            e["file"] = e["file"].replace("\\", "/")
         by_file = {e["file"]: e for e in index}
         folder = os.path.join(self.library_dir, item["folder"])
         titles = library.gutenberg_titles(folder) if item["kind"] == "txt" else {}
-        for url, filename in item["files"]:
-            rel = os.path.join(item["folder"], filename)
-            by_file[rel] = {"title": titles.get(filename, item["title"]), "file": rel, "collection": item["label"],
-                            "kind": item["kind"], "lang": item["lang"], "source": url, "license": item["license"]}
-        with open(index_path, "w", encoding="utf-8") as fh:
+        for n, (url, filename) in enumerate(item["files"]):
+            rel = f"{item['folder']}/{filename}"
+            entry = {"title": titles.get(filename, item["title"]), "file": rel, "collection": item["label"],
+                     "kind": item["kind"], "lang": item["lang"], "source": url, "license": item["license"]}
+            if item.get("details"):
+                if not os.path.exists(os.path.join(folder, filename)):
+                    continue
+                entry.update({k: v for k, v in item["details"][n].items() if k != "size"})
+            by_file[rel] = entry
+        tmp = index_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(list(by_file.values()), fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, index_path)
 
     def progress(self) -> dict:
         done = min(self.done_bytes + self.item_bytes + self.file_bytes, self.total)
@@ -413,7 +470,7 @@ def remaining_bytes(items: List[dict], dest_root: str) -> int:
     """Bytes still to download, counting files (or partial files) already on the card."""
     library_dir = os.path.join(dest_root, "library")
     remaining = 0
-    for item in items:
+    for item in without_repeats(items):
         have = 0
         for _url, filename in item["files"]:
             path = os.path.join(library_dir, item["folder"], filename)

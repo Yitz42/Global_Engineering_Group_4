@@ -146,6 +146,8 @@
   "library.nothing": "Nothing found. Try a shorter word.",
   "library.kiwix": "open with the Kiwix app",
   "library.other": "Other",
+  "library.courses": "Courses",
+  "library.lessons": "Lessons: {n}",
   "library.no_file": "That file is not in the library.",
   "kind.page": "Page",
   "kind.text": "Text",

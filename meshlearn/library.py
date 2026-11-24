@@ -285,10 +285,12 @@ def write_index(dest_root: str, choices: List[Choice], lang: str) -> None:
                 existing = json.load(fh)
         except (OSError, ValueError):
             existing = []
+    for e in existing:  # always "/": a card written on Windows is read on Android
+        e["file"] = e["file"].replace("\\", "/")
     by_file = {e["file"]: e for e in existing}
     for choice in choices:
         for url, filename in choice.option.files:
-            rel = os.path.join(choice.package.key, filename)
+            rel = f"{choice.package.key}/{filename}"
             title = choice.option.title
             if choice.option.kind == "txt":
                 title = gutenberg_titles(os.path.join(dest_root, choice.package.key)).get(filename, filename)

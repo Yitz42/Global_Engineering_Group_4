@@ -25,6 +25,7 @@ from . import courses as crs
 from . import library
 from . import protocol
 from .db import Database
+from .hubkolibri import HubKolibri
 from .hublang import HubLanguage
 from .hubpages import HubPages
 from .hubui import HubUI
@@ -87,11 +88,12 @@ def _key_text(q: dict) -> str:
     return ""
 
 
-class Hub(HubUI, HubPages, HubLanguage):
+class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
         self.catalog = cat.Catalog(os.path.join(os.path.dirname(os.path.abspath(db_path)), "catalog.json"))
+        self.kolibri_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "kolibri")
         self.download_job: Optional[cat.DownloadJob] = None
         self._migrate()
         self.load_course_file()
@@ -394,6 +396,7 @@ class Hub(HubUI, HubPages, HubLanguage):
         app.add_route("POST", "/library/download", self.library_download_start)
         app.add_route("POST", "/library/download/cancel", self.library_download_cancel)
         app.add_route("GET", "/api/library/progress", self.library_progress)
+        self.add_kolibri_routes(app)
 
     def _builder(self, edit_id: str, preset_course: str = "", preset_unit: str = "") -> str:
         courses = [{"id": c["id"], "title": c["title"], "units": c["units"]} for c in self.courses() if not c.get("comingSoon")]
@@ -699,7 +702,7 @@ class Hub(HubUI, HubPages, HubLanguage):
         notice = req.query.get("msg", "")
         selected = {i["key"]: i for i in self.selection()}
         budget = self.library_budget()
-        used = sum(i["size"] for i in selected.values())
+        used = cat.total_bytes(list(selected.values()))
 
         # -- plan panel
         pct = min(100, round(100 * used / budget)) if budget else 100
@@ -758,7 +761,7 @@ class Hub(HubUI, HubPages, HubLanguage):
         if not self.catalog.entries:
             browse = ("<div class='card'><p>The list of available collections has not been downloaded yet. "
                       "Connect this laptop to the internet once, then:</p>"
-                      "<form method='post' action='/library/refresh'><button>Download the list (about 4 MB)</button></form></div>")
+                      "<form method='post' action='/library/refresh'><button>Download the list (about 5 MB)</button></form></div>")
         else:
             try:
                 min_level = int(level)
@@ -794,6 +797,11 @@ class Hub(HubUI, HubPages, HubLanguage):
                                            g["label"], 2, "eng", [(g, "Add", g["key"] in selected)], here, show_lang=not lang,
                                            ages=g["ages"], age_est=False, fits=g_fits)
             for g in shown:
+                if g["category"] == "kolibri":
+                    items += self._library_row(g["title"], g["summary"], g["label"], g["level"], g["lang"], [], here,
+                                               show_lang=not lang, ages=g["ages"], age_est=g["age_est"], fits=g["fits"],
+                                               channel=g["options"][0], selected=selected)
+                    continue
                 options = []
                 for o in g["options"]:
                     item = cat.selection_item(o)
@@ -811,8 +819,11 @@ class Hub(HubUI, HubPages, HubLanguage):
                 nav = (f"<p>{link(page_no - 1, '← Previous') if page_no > 1 else ''} "
                        f"<span class='muted'>Page {page_no} of {pages}</span> {link(page_no + 1, 'Next →') if page_no < pages else ''}</p>")
             when = time.strftime("%b %d, %Y", time.localtime(self.catalog.fetched_at)) if self.catalog.fetched_at else "?"
+            no_kolibri = ("" if any(e["category"] == "kolibri" for e in self.catalog.entries) else
+                          "<p class='muted'>Kolibri courses, such as Khan Academy in many languages, can be listed too: "
+                          "press <strong>Update the list</strong>.</p>")
             browse = (
-                filters
+                filters + no_kolibri
                 + f"<p class='muted'>{len(groups)} collection{'' if len(groups) == 1 else 's'} match · list from {when} · "
                 "<form method='post' action='/library/refresh' style='display:inline'><button class='secondary'>Update the list</button></form></p>"
                 + (f"<table><tr><th>Collection</th><th>Add to card</th></tr>{items}</table>" if items else "<p class='muted'>Nothing matches.</p>")
@@ -820,7 +831,7 @@ class Hub(HubUI, HubPages, HubLanguage):
             )
         body = (
             (f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "")
-            + "<p class='muted'>Choose what goes on each phone's memory card. Material that suits the students' ages and "
+            + "<p class='muted'>Choose what goes on each phone's memory card, from Kiwix and Kolibri. Material that suits the students' ages and "
             "learning material are listed first. Age ranges come from each collection's name and description. "
             "Everything is free and works without internet once it is on the card.</p>"
             + "<h2>This card</h2>" + plan + "<h2>Available collections</h2>" + browse
@@ -828,7 +839,7 @@ class Hub(HubUI, HubPages, HubLanguage):
         return Response(self._page("Card library", body))
 
     def _library_row(self, title, summary, label, level, lang, options, here, show_lang,
-                     ages=None, age_est=False, fits=True) -> str:
+                     ages=None, age_est=False, fits=True, channel=None, selected=None) -> str:
         badge_class = {3: "good", 2: "", 1: "muted", 0: "bad"}.get(level, "")
         age_badge = ""
         if ages:
@@ -842,6 +853,11 @@ class Hub(HubUI, HubPages, HubLanguage):
         else:
             langs = ""
         buttons = ""
+        if channel:
+            n = sum(1 for key in selected if key.startswith(channel["name"] + ":"))
+            buttons = (f"<a class='button secondary' href='/library/kolibri?id={esc(channel['channel'])}'>Choose topics…</a>"
+                       + (f" <span class='good'>✓ {n} chosen</span>" if n else "")
+                       + f"<div class='muted'>from Kolibri · {self._gb(channel['size'])} for everything</div>")
         for item, text, chosen in options:
             if chosen:
                 buttons += (f"<form method='post' action='/library/remove' style='display:inline'>"
@@ -909,7 +925,8 @@ class Hub(HubUI, HubPages, HubLanguage):
             return redirect("/library?" + urlencode({"msg": "Update the list from the hub laptop itself."}))
         try:
             count = self.catalog.refresh()
-            msg = f"Downloaded the list: {count} collections available."
+            courses = sum(1 for e in self.catalog.entries if e["category"] == "kolibri")
+            msg = f"Downloaded the list: {count - courses} Kiwix collections and {courses} Kolibri channels available."
         except Exception as exc:
             msg = f"Could not download the list ({exc}). Is this laptop online?"
         return redirect("/library?" + urlencode({"msg": msg}))
@@ -917,7 +934,7 @@ class Hub(HubUI, HubPages, HubLanguage):
     def library_download_page(self, req: Request) -> Response:
         job = self.download_job
         selected = self.selection()
-        total = sum(i["size"] for i in selected)
+        total = cat.total_bytes(selected)
         if job and job.is_alive():
             p = job.progress()
             pct = round(100 * p["done"] / p["total"]) if p["total"] else 0
@@ -952,12 +969,13 @@ class Hub(HubUI, HubPages, HubLanguage):
             "<a href='/library'>Change the selection</a></p>"
             "<div class='card'><ol>"
             "<li>Put the phone's microSD card in this laptop's card reader.</li>"
-            "<li>Enter the phone's MeshLearn folder on the card. With Termux this is "
-            "<code>&lt;card&gt;/Android/data/com.termux/files/meshlearn</code>.</li>"
+            "<li>Enter the phone's MeshLearn folder on the card. With the MeshLearn app this is "
+            "<code>&lt;card&gt;/Android/data/org.meshlearn.phone/files/meshlearn</code> (with Termux, "
+            "<code>com.termux</code> in place of <code>org.meshlearn.phone</code>).</li>"
             "<li>Start. Large collections take a while; you can stop and resume later.</li></ol>"
             "<form method='post' action='/library/download'>"
             f"<label for='dest'>MeshLearn folder on the card{space}</label>"
-            f"<input type='text' id='dest' name='dest' value='{esc(dest)}' placeholder='/Volumes/SDCARD/Android/data/com.termux/files/meshlearn' required>"
+            f"<input type='text' id='dest' name='dest' value='{esc(dest)}' placeholder='/Volumes/SDCARD/Android/data/org.meshlearn.phone/files/meshlearn' required>"
             "<button>Start copying</button></form></div>"
             "<p class='muted'>Needs internet on this laptop. Files that are already on the card are skipped.</p>"
         )

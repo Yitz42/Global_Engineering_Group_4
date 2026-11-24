@@ -868,18 +868,56 @@ class Phone(
             "<p class='meta'>${esc(meta)}</p>$headline$grid$missed$sent$again</section>"
     }
 
+    /** Books and lessons on the card. Whole courses (entries with a "shelf", such as a Kolibri channel) get
+     *  one card each here and a page of their own, so a thousand videos don't fill this one. */
     fun library(req: Request): Response {
         val w = words(req)
         val query = (req.query["q"] ?: "").trim().lowercase()
-        var items = libraryItems()
+        val shelf = req.query["shelf"] ?: ""
+        val part = req.query["c"] ?: ""
+        var items: List<Map<String, Any?>> = libraryItems()
+        val body = StringBuilder("<label for='q'>${esc(w("library.search_label"))}</label><form method='get' action='/library' class='search'>" +
+            "<input type='text' id='q' name='q' value='${esc(query)}'><button>${esc(w("library.search"))}</button></form>")
         if (query.isNotEmpty()) {
-            items = items.filter { query in ("${it["title"] ?: ""} ${it["collection"] ?: ""}").lowercase() }.toMutableList()
+            items = items.filter { query in "${it["title"] ?: ""} ${it["collection"] ?: ""} ${it["shelf"] ?: ""}".lowercase() }
+            body.append("<p class='meta'>${esc(w("library.showing", "q" to query))} <a href='/library'>${esc(w("library.show_all"))}</a></p>")
+            body.append(libraryGroups(w, items))
+        } else if (shelf.isNotEmpty()) {
+            items = items.filter { it["shelf"] == shelf }
+            val parts = items.groupBy { it["collection"]?.toString()?.ifEmpty { null } ?: w("library.other") }
+            val link = "/library?shelf=" + quote(shelf)
+            val chosen = parts[part]
+            if (chosen != null) {
+                body.append("<p class='meta'><a href='/library'>${esc(w("library.title"))}</a> › " +
+                    "<a href='$link'>${esc(shelf)}</a></p>" + libraryGroups(w, chosen))
+            } else {
+                body.append("<p class='meta'><a href='/library'>${esc(w("library.title"))}</a></p><h2>${esc(shelf)}</h2>")
+                if (items.size <= SHELF_FLAT || parts.size == 1) body.append(libraryGroups(w, items))
+                else for ((name, entries) in parts) {
+                    body.append(libraryCard("$link&amp;c=${quote(name)}", name, w("library.lessons", "n" to entries.size)))
+                }
+            }
+        } else {
+            val shelves = items.mapNotNull { it["shelf"]?.toString()?.ifEmpty { null } }.groupingBy { it }.eachCount().toSortedMap()
+            if (shelves.isNotEmpty()) {
+                body.append("<h2>${esc(w("library.courses"))}</h2>")
+                for ((name, n) in shelves) body.append(libraryCard("/library?shelf=" + quote(name), name, w("library.lessons", "n" to n)))
+            }
+            body.append(libraryGroups(w, items.filter { it["shelf"]?.toString().isNullOrEmpty() }, byName = true))
         }
-        val groups = sortedMapOf<String, MutableList<Map<String, Any?>>>()
-        for (item in items) groups.getOrPut(item["collection"]?.toString()?.ifEmpty { null } ?: w("library.other")) { ArrayList() }.add(item)
-        val sections = StringBuilder()
-        for ((group, entries) in groups) {
-            val rows = StringBuilder()
+        if (items.isEmpty()) body.append("<p class='muted'>${esc(w("library.nothing"))}</p>")
+        return Response(page(req, w("library.title"), body.toString()))
+    }
+
+    private fun libraryCard(href: String, title: String, meta: String) =
+        "<a class='card item' href='$href'><strong>${esc(title)}</strong><span class='meta' style='display:block'>${esc(meta)}</span></a>"
+
+    /** Items under a heading per collection, in card order (the course's order) or by name. */
+    private fun libraryGroups(w: Strings, items: List<Map<String, Any?>>, byName: Boolean = false): String {
+        val groups = items.groupBy { it["collection"]?.toString()?.ifEmpty { null } ?: w("library.other") }
+        val out = StringBuilder()
+        for ((group, entries) in if (byName) groups.toSortedMap() else groups) {
+            out.append("<h2>${esc(group)}</h2>")
             for (item in entries) {
                 val file = item["file"].toString()
                 var href = "/library/files/" + quote(file.replace(File.separatorChar, '/'))
@@ -889,16 +927,14 @@ class Phone(
                     if (kiwixUrl.isNotEmpty()) href = "${esc(kiwixUrl)}/content/${quote(book)}"
                     else note = " · " + w("library.kiwix")
                 }
+                val credit = item["credit"]?.toString() ?: ""
+                if (credit.isNotEmpty()) note += " · $credit"
                 val kind = KIND_KEYS[item["kind"]?.toString() ?: ""]?.let { w(it) } ?: (item["kind"]?.toString() ?: "")
-                rows.append("<a class='card item' href='$href'><strong>${esc(item["title"])}</strong>" +
-                    "<span class='meta' style='display:block'>${esc(kind)} · ${Html.size((item["size"] as? Number)?.toDouble() ?: 0.0)}${esc(note)}</span></a>")
+                out.append(libraryCard(href, item["title"].toString(),
+                    "$kind · ${Html.size((item["size"] as? Number)?.toDouble() ?: 0.0)}$note"))
             }
-            sections.append("<h2>${esc(group)}</h2>$rows")
         }
-        val search = "<label for='q'>${esc(w("library.search_label"))}</label><form method='get' action='/library' class='search'>" +
-            "<input type='text' id='q' name='q' value='${esc(query)}'><button>${esc(w("library.search"))}</button></form>" +
-            (if (query.isNotEmpty()) "<p class='meta'>${esc(w("library.showing", "q" to query))} <a href='/library'>${esc(w("library.show_all"))}</a></p>" else "")
-        return Response(page(req, w("library.title"), search + sections.ifEmpty { "<p class='muted'>${esc(w("library.nothing"))}</p>" }))
+        return out.toString()
     }
 
     fun libraryFile(req: Request): Response {
@@ -968,6 +1004,7 @@ class Phone(
         const val VERSION = "0.1.0-android"
         const val MAX_OPEN_S = 6 * 3600.0
         const val MAX_BATCH = 20
+        const val SHELF_FLAT = 40   // a course with more lessons than this lists its topics first
         val VIEWABLE = setOf(".html", ".htm", ".txt", ".pdf", ".epub", ".png", ".jpg", ".jpeg", ".svg", ".mp3", ".mp4", ".webm", ".zim")
         /** Library file types, as the key of the word a student knows. */
         val KIND_KEYS = mapOf("html" to "kind.page", "htm" to "kind.page", "txt" to "kind.text", "pdf" to "kind.pdf",

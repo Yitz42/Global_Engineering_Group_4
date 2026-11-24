@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import tempfile
 import threading
 import time
@@ -23,7 +24,7 @@ from http.cookiejar import CookieJar
 from unittest import mock
 
 from meshlearn import assignments as asg
-from meshlearn import catalog, comprehension, courses, library, protocol, radioports
+from meshlearn import catalog, comprehension, courses, kolibri, library, protocol, radioports
 from meshlearn.hub import Hub
 from meshlearn.messenger import Messenger
 from meshlearn.phone import Phone
@@ -650,6 +651,182 @@ class CardDownloadTests(unittest.TestCase):
         self.assertIn("Vikidia", urllib.request.urlopen(f"http://127.0.0.1:{port}/library?level=3").read().decode())
         outsider = Request("POST", "/library/download", {}, {}, b"dest=/tmp", "10.0.0.7")
         self.assertIn("hub laptop itself", hub.library_download_start(outsider).headers["Location"].replace("+", " "))
+
+
+class KolibriTests(unittest.TestCase):
+    """Kolibri topics: from the channel's own list, through the hub's card selection, to the student library."""
+    CHANNEL = "c" * 32
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.storage = os.path.join(self.tmp, "mirror", "content", "storage")
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        self.hub.catalog.entries = kolibri.parse_channels([
+            {"id": self.CHANNEL, "name": "Khan Academy (Kiswahili)", "language": "sw", "included_languages": ["en", "sw"],
+             "description": "Math", "published_size": 9000, "last_published": "2023-07-06T00:00:04Z",
+             "kind_count": [{"kind_id": "topic", "count": 4}, {"kind_id": "video", "count": 5}, {"kind_id": "exercise", "count": 1}]},
+            {"id": "d" * 32, "name": "Only apps", "language": "en", "kind_count": [{"kind_id": "html5", "count": 9}]}])
+        for e in self.hub.catalog.entries:
+            catalog._rate(e)
+        self.make_channel()
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Files, directory=os.path.join(self.tmp, "mirror")))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        patch = mock.patch.object(kolibri, "STUDIO", f"http://127.0.0.1:{server.server_address[1]}")
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.port = free_port()
+        self.addCleanup(self.hub.app.serve_in_thread("127.0.0.1", self.port).shutdown)
+
+    def make_channel(self):
+        """Channel > Math > (Adding: v1, v2, exercise; Taking away: v1 again, a PDF and e-book pair, a closed video, a teacher's key)"""
+        databases = os.path.join(self.tmp, "mirror", "content", "databases")
+        os.makedirs(databases)
+        db = sqlite3.connect(os.path.join(databases, self.CHANNEL + ".sqlite3"))
+        db.executescript("""
+            CREATE TABLE content_contentnode (id TEXT, title TEXT, kind TEXT, lft INT, rght INT, level INT, parent_id TEXT,
+                license_name TEXT, license_owner TEXT, author TEXT, coach_content INT);
+            CREATE TABLE content_file (contentnode_id TEXT, local_file_id TEXT, preset TEXT, supplementary INT, thumbnail INT);
+            CREATE TABLE content_localfile (id TEXT, extension TEXT, file_size INT);""")
+        def node(id, title, kind, lft, rght, level, parent, lic="CC BY-NC-SA", coach=0):
+            db.execute("INSERT INTO content_contentnode VALUES (?,?,?,?,?,?,?,?,'Khan Academy','',?)",
+                       (id, title, kind, lft, rght, level, parent, None if kind == "topic" else lic, coach))
+        def file(node_id, letter, ext, size, preset, extra=0):
+            fid = letter * 32
+            db.execute("INSERT INTO content_file VALUES (?,?,?,?,0)", (node_id, fid, preset, extra))
+            db.execute("INSERT INTO content_localfile SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM content_localfile WHERE id=?)",
+                       (fid, ext, size, fid))
+            os.makedirs(os.path.join(self.storage, letter, letter), exist_ok=True)
+            with open(os.path.join(self.storage, letter, letter, f"{fid}.{ext}"), "wb") as fh:
+                fh.write(bytes(range(256)) * (size // 256 + 1))
+                fh.truncate(size)
+        node("root", "Khan Academy (Kiswahili)", "topic", 1, 22, 0, None)
+        node("math", "Hisabati", "topic", 2, 21, 1, "root")
+        node("add", "Kuongeza", "topic", 3, 10, 2, "math")
+        node("v1", "Kuongeza namba", "video", 4, 5, 3, "add")
+        node("v2", "Kuongeza zaidi", "video", 6, 7, 3, "add")
+        node("ex", "Mazoezi", "exercise", 8, 9, 3, "add", "Special Permissions")
+        node("sub", "Kutoa", "topic", 11, 20, 2, "math")
+        node("v1b", "Kuongeza namba", "video", 12, 13, 3, "sub")
+        node("doc", "Kitabu", "document", 14, 15, 3, "sub", "CC BY")
+        node("closed", "Imefungwa", "video", 16, 17, 3, "sub", "All Rights Reserved")
+        node("key", "Majibu", "document", 18, 19, 3, "sub", "CC BY", coach=1)
+        file("v1", "a", "mp4", 4000, "high_res_video")
+        file("v1", "b", "mp4", 1000, "low_res_video")
+        file("v1b", "b", "mp4", 1000, "low_res_video")
+        file("v1", "e", "vtt", 50, "video_subtitle", extra=1)
+        file("v2", "c", "mp4", 2000, "low_res_video")
+        file("doc", "d", "epub", 700, "epub")
+        file("doc", "f", "pdf", 600, "document")
+        file("closed", "1", "mp4", 800, "low_res_video")
+        file("key", "2", "pdf", 300, "document")
+        db.commit()
+        db.close()
+
+    def page(self, path, data=None):
+        body = urllib.parse.urlencode(data).encode() if data is not None else None
+        return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", body).read().decode()
+
+    def test_channels_become_catalog_entries(self):
+        (entry,) = self.hub.catalog.entries   # the channel with nothing a browser opens is left out
+        self.assertEqual((entry["lang"], entry["label"], entry["ages"]), ("swa", "Courses and lessons", [6, 18]))
+        self.assertIn("5 videos", entry["summary"])
+        html = self.page("/library?lang=swa")
+        self.assertIn("Choose topics", html)
+        self.assertIn(f"/library/kolibri?id={self.CHANNEL}", html)
+        many = kolibri.parse_channels([{"id": "e" * 32, "name": "Stories", "language": "mul", "included_languages": ["sw", "swa", "pt-BR", "und"],
+                                        "kind_count": [{"kind_id": "document", "count": 3}]}])
+        self.assertEqual(many[0]["lang"], "swa,por")
+
+    def test_refresh_keeps_kiwix_when_kolibri_is_down(self):
+        kiwix = catalog.parse_catalog(fake_catalog_xml())
+        with mock.patch.object(catalog, "fetch_catalog", return_value=list(kiwix)), \
+                mock.patch.object(kolibri, "fetch_channels", side_effect=OSError("down")):
+            self.assertEqual(self.hub.catalog.refresh(), len(kiwix) + 1)   # and the Kolibri entry from before
+        self.assertTrue(self.hub.catalog.find(f"kolibri:{self.CHANNEL}", ""))
+
+    def test_choose_topics_copy_and_read_them_on_the_phone(self):
+        self.assertIn("Get the list of topics", self.page(f"/library/kolibri?id={self.CHANNEL}"))
+        html = self.page("/library/kolibri/open", {"id": self.CHANNEL})
+        self.assertIn("Hisabati", html)
+        html = self.page(f"/library/kolibri?id={self.CHANNEL}&topic=math")
+        self.assertIn("2 lessons · 3 KB", html)                     # Kuongeza: the small videos, no subtitles or exercise
+        self.assertIn("Left out here: 3 exercises", html)            # exercise, closed licence, teacher's key
+        self.assertNotIn("Imefungwa", self.page(f"/library/kolibri?id={self.CHANNEL}&topic=sub"))
+
+        back = f"/library/kolibri?id={self.CHANNEL}&topic=math"
+        self.page("/library/kolibri/add", {"id": self.CHANNEL, "topic": "add", "back": back})
+        html = self.page("/library/kolibri/add", {"id": self.CHANNEL, "topic": "sub", "back": back})
+        self.assertIn("✓ Added", html)
+        # v1 sits under both topics but is copied, and counted, once: 1000 + 2000 + the PDF's 600
+        self.assertEqual(catalog.total_bytes(self.hub.selection()), 3600)
+        self.assertIn("✓ 2 chosen", self.page("/library?lang=swa"))
+
+        card = os.path.join(self.tmp, "card", "meshlearn")
+        self.assertEqual(catalog.remaining_bytes(self.hub.selection(), card), 3600)
+        job = catalog.DownloadJob(self.hub.selection(), card)
+        job.run()
+        self.assertEqual((job.state, job.progress()["done"], job.total), ("done", 3600, 3600), job.error)
+        with open(os.path.join(card, "library", "index.json"), encoding="utf-8") as fh:
+            index = json.load(fh)
+        self.assertEqual(sorted(e["file"] for e in index), [f"kolibri/{c * 32}.{x}" for c, x in (("b", "mp4"), ("c", "mp4"), ("f", "pdf"))])
+
+        phone = Phone(card, "hub", "t", lambda h: _QuietRadio())
+        port = free_port()
+        self.addCleanup(phone.app.serve_in_thread("127.0.0.1", port).shutdown)
+        get = lambda path: urllib.request.urlopen(f"http://127.0.0.1:{port}{path}").read().decode()  # noqa: E731
+        home = get("/library")
+        self.assertIn("Lessons: 3", home)
+        self.assertNotIn("Kuongeza zaidi", home)                     # behind the course's own card
+        shelf = get("/library?shelf=" + urllib.parse.quote("Khan Academy (Kiswahili)"))
+        self.assertIn("Hisabati: Kuongeza</h2>", shelf)
+        self.assertIn("Khan Academy · CC BY-NC-SA", shelf)
+        with mock.patch("meshlearn.phone.SHELF_FLAT", 1):            # a big course lists its topics first
+            shelf = get("/library?shelf=" + urllib.parse.quote("Khan Academy (Kiswahili)"))
+            self.assertNotIn("Kuongeza zaidi", shelf)
+            self.assertIn("&amp;c=Hisabati%3A%20Kuongeza", shelf)
+            self.assertIn("Kuongeza zaidi", get("/library?shelf=" + urllib.parse.quote("Khan Academy (Kiswahili)")
+                                                + "&c=" + urllib.parse.quote("Hisabati: Kuongeza")))
+        self.assertIn("Kuongeza zaidi", get("/library?q=zaidi"))
+
+        # Skipping ahead in a video
+        url = f"http://127.0.0.1:{port}/library/files/kolibri/{'c' * 32}.mp4"
+        resp = urllib.request.urlopen(urllib.request.Request(url, headers={"Range": "bytes=256-259"}))
+        self.assertEqual((resp.status, resp.headers["Content-Range"], resp.read()), (206, "bytes 256-259/2000", bytes([0, 1, 2, 3])))
+        resp = urllib.request.urlopen(url)
+        self.assertEqual((resp.status, len(resp.read()), resp.headers["Accept-Ranges"]), (200, 2000, "bytes"))
+
+    def test_a_bigger_topic_replaces_the_ones_inside_it(self):
+        self.page("/library/kolibri/open", {"id": self.CHANNEL})
+        self.page("/library/kolibri/add", {"id": self.CHANNEL, "topic": "add"})
+        self.page("/library/kolibri/add", {"id": self.CHANNEL, "topic": "root"})
+        self.page("/library/kolibri/add", {"id": self.CHANNEL, "topic": "sub"})      # already inside
+        self.assertEqual([i["title"] for i in self.hub.selection()], ["Khan Academy (Kiswahili)"])
+        self.assertIn("Included in", self.page(f"/library/kolibri?id={self.CHANNEL}&topic=sub"))
+        self.page("/library/remove", {"key": self.hub.selection()[0]["key"]})
+        with mock.patch.object(kolibri, "MAX_FILES", 1):
+            self.assertIn("pick smaller topics", self.page("/library/kolibri/add", {"id": self.CHANNEL, "topic": "root"}))
+        self.assertEqual(self.hub.selection(), [])
+
+    def test_stopped_copy_lists_the_lessons_that_made_it(self):
+        channel = kolibri.Channel(self.hub.kolibri_dir, self.CHANNEL)
+        channel.fetch()
+        item = channel.selection_item(channel.node("add"), self.hub.catalog.entries[0])
+        os.remove(os.path.join(self.storage, "c", "c", "c" * 32 + ".mp4"))
+        card = os.path.join(self.tmp, "card")
+        job = catalog.DownloadJob([item], card)
+        job.run()
+        self.assertEqual(job.state, "failed")
+        with open(os.path.join(card, "library", "index.json"), encoding="utf-8") as fh:
+            self.assertEqual([e["title"] for e in json.load(fh)], ["Kuongeza namba"])
+
+    def test_outsiders_and_odd_ids(self):
+        outsider = Request("POST", "/library/kolibri/open", {}, {}, f"id={self.CHANNEL}".encode(), "10.0.0.7")
+        self.assertIn("hub laptop itself", self.hub.kolibri_open(outsider).headers["Location"].replace("+", " "))
+        with self.assertRaises(kolibri.KolibriError):
+            kolibri.Channel(self.hub.kolibri_dir, "../../etc/passwd")
+        self.assertIn("Card library", self.page("/library/kolibri?id=../x"))
 
 
 class AgeTests(unittest.TestCase):

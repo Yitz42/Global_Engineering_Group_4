@@ -89,6 +89,19 @@ def file_response(path: str) -> Response:
     return resp
 
 
+def byte_range(header: str, size: int) -> Optional[Tuple[int, int]]:
+    """First and last byte a "Range: bytes=..." header asks for (what video players send to start or skip
+    ahead), or None to send the whole file."""
+    m = re.match(r"^bytes=(\d*)-(\d*)$", (header or "").strip())
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    if m.group(1):
+        start, end = int(m.group(1)), min(int(m.group(2) or size - 1), size - 1)
+    else:
+        start, end = max(size - int(m.group(2)), 0), size - 1
+    return (start, end) if start <= end else None
+
+
 Handler = Callable[[Request], Response]
 
 
@@ -152,25 +165,40 @@ class App:
                 except Exception:
                     log.exception("error handling %s %s", self.command, self.path)
                     response = Response(page("Something went wrong", "<p>Sorry, that did not work. Please try again.</p>"), status=500)
-                self.send_response(response.status)
                 if response.file_path:
-                    size = os.path.getsize(response.file_path)
-                    for key, value in response.headers.items():
-                        self.send_header(key, value)
-                    self.send_header("Content-Length", str(size))
-                    self.end_headers()
-                    with open(response.file_path, "rb") as fh:
-                        while True:
-                            chunk = fh.read(64 * 1024)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
+                    self._send_file(response)
                     return
+                self.send_response(response.status)
                 for key, value in response.headers.items():
                     self.send_header(key, value)
                 self.send_header("Content-Length", str(len(response.body)))
                 self.end_headers()
                 self.wfile.write(response.body)
+
+            def _send_file(self, response):
+                size = os.path.getsize(response.file_path)
+                span = byte_range(self.headers.get("Range", ""), size)
+                start, end = span or (0, size - 1)
+                self.send_response(206 if span else response.status)
+                for key, value in response.headers.items():
+                    self.send_header(key, value)
+                self.send_header("Accept-Ranges", "bytes")
+                if span:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.send_header("Content-Length", str(end - start + 1))
+                self.end_headers()
+                try:
+                    with open(response.file_path, "rb") as fh:
+                        fh.seek(start)
+                        left = end - start + 1
+                        while left > 0:
+                            chunk = fh.read(min(64 * 1024, left))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            left -= len(chunk)
+                except ConnectionError:   # a video player stops a download whenever the student skips ahead
+                    self.close_connection = True
 
             do_GET = _handle
             do_POST = _handle

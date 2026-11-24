@@ -64,6 +64,7 @@ KIND_KEYS = {"html": "kind.page", "htm": "kind.page", "txt": "kind.text", "pdf":
 VIEWABLE = {".html", ".htm", ".txt", ".pdf", ".epub", ".png", ".jpg", ".jpeg", ".svg", ".mp3", ".mp4", ".webm", ".zim"}
 STARTER_DIR = os.path.join(os.path.dirname(__file__), "starter_library")
 MAX_BATCH = 20
+SHELF_FLAT = 40   # a course with more lessons than this lists its topics first
 
 
 def _size(num: float) -> str:
@@ -865,17 +866,61 @@ class Phone:
                 f"{headline}{grid}{missed}{sent}{again}</section>")
 
     def library(self, req: Request) -> Response:
+        """Books and lessons on the card. Whole courses (entries with a "shelf", such as a Kolibri channel) get
+        one card each here and a page of their own, so a thousand videos don't fill this one."""
         w = self.words(req)
         query = (req.query.get("q") or "").strip().lower()
+        shelf, part = req.query.get("shelf") or "", req.query.get("c") or ""
         items = self.library_items()
+        body = (f"<label for='q'>{esc(w('library.search_label'))}</label><form method='get' action='/library' class='search'>"
+                f"<input type='text' id='q' name='q' value='{esc(query)}'><button>{esc(w('library.search'))}</button></form>")
         if query:
-            items = [i for i in items if query in (i.get("title", "") + " " + i.get("collection", "")).lower()]
+            items = [i for i in items if query in f"{i.get('title', '')} {i.get('collection', '')} {i.get('shelf', '')}".lower()]
+            body += f"<p class='meta'>{esc(w('library.showing', q=query))} <a href='/library'>{esc(w('library.show_all'))}</a></p>"
+            body += self._library_groups(w, items)
+        elif shelf:
+            items = [i for i in items if i.get("shelf") == shelf]
+            parts: Dict[str, List[dict]] = {}
+            for item in items:
+                parts.setdefault(item.get("collection") or w("library.other"), []).append(item)
+            link = "/library?shelf=" + quote(shelf)
+            if part in parts:
+                body += (f"<p class='meta'><a href='/library'>{esc(w('library.title'))}</a> › "
+                         f"<a href='{link}'>{esc(shelf)}</a></p>" + self._library_groups(w, parts[part]))
+            else:
+                body += f"<p class='meta'><a href='/library'>{esc(w('library.title'))}</a></p><h2>{esc(shelf)}</h2>"
+                if len(items) <= SHELF_FLAT or len(parts) == 1:
+                    body += self._library_groups(w, items)
+                else:
+                    body += "".join(self._library_card(f"{link}&amp;c={quote(name)}", name, w("library.lessons", n=len(entries)))
+                                    for name, entries in parts.items())
+        else:
+            shelves: Dict[str, int] = {}
+            for item in items:
+                if item.get("shelf"):
+                    shelves[item["shelf"]] = shelves.get(item["shelf"], 0) + 1
+            if shelves:
+                body += f"<h2>{esc(w('library.courses'))}</h2>" + "".join(
+                    self._library_card("/library?shelf=" + quote(name), name, w("library.lessons", n=shelves[name]))
+                    for name in sorted(shelves))
+            body += self._library_groups(w, [i for i in items if not i.get("shelf")], by_name=True)
+        if not items:
+            body += f"<p class='muted'>{esc(w('library.nothing'))}</p>"
+        return Response(self._page(req, w("library.title"), body))
+
+    @staticmethod
+    def _library_card(href: str, title: str, meta: str) -> str:
+        return (f"<a class='card item' href='{href}'><strong>{esc(title)}</strong>"
+                f"<span class='meta' style='display:block'>{esc(meta)}</span></a>")
+
+    def _library_groups(self, w: Strings, items: List[dict], by_name: bool = False) -> str:
+        """Items under a heading per collection, in card order (the course's order) or by name."""
         groups: Dict[str, List[dict]] = {}
         for item in items:
             groups.setdefault(item.get("collection") or w("library.other"), []).append(item)
-        sections = ""
-        for name in sorted(groups):
-            rows = ""
+        out = ""
+        for name in sorted(groups) if by_name else groups:
+            out += f"<h2>{esc(name)}</h2>"
             for item in groups[name]:
                 href = "/library/files/" + quote(item["file"].replace(os.sep, "/"))
                 note = ""
@@ -885,17 +930,12 @@ class Phone:
                         href = f"{esc(self.kiwix_url)}/content/{quote(book)}"
                     else:
                         note = " · " + w("library.kiwix")
+                if item.get("credit"):
+                    note += " · " + item["credit"]
                 key = KIND_KEYS.get(item.get("kind", ""))
                 kind = w(key) if key else item.get("kind", "")
-                rows += (f"<a class='card item' href='{href}'><strong>{esc(item['title'])}</strong>"
-                         f"<span class='meta' style='display:block'>{esc(kind)} · {_size(item.get('size', 0))}{esc(note)}</span></a>")
-            sections += f"<h2>{esc(name)}</h2>{rows}"
-        search = (f"<label for='q'>{esc(w('library.search_label'))}</label><form method='get' action='/library' class='search'>"
-                  f"<input type='text' id='q' name='q' value='{esc(query)}'><button>{esc(w('library.search'))}</button></form>"
-                  + (f"<p class='meta'>{esc(w('library.showing', q=query))} <a href='/library'>{esc(w('library.show_all'))}</a></p>"
-                     if query else ""))
-        body = search + (sections or f"<p class='muted'>{esc(w('library.nothing'))}</p>")
-        return Response(self._page(req, w("library.title"), body))
+                out += self._library_card(href, item["title"], f"{kind} · {_size(item.get('size', 0))}{note}")
+        return out
 
     def library_file(self, req: Request) -> Response:
         root = os.path.realpath(self.library_dir)

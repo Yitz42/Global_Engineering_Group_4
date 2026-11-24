@@ -398,12 +398,22 @@ class App(private val maxBody: Int = 256 * 1024) {
                 log.log(Level.WARNING, "error handling ${req.method} ${req.path}", e)
                 Response(Html.page("Something went wrong", "<p>Sorry, that did not work. Please try again.</p>"), 500)
             }
-            val out = resp.file?.let { f ->
-                newFixedLengthResponse(status(resp.status, ""), resp.contentType, FileInputStream(f), f.length())
-            } ?: newFixedLengthResponse(status(resp.status, ""), resp.contentType, resp.body.inputStream(), resp.body.size.toLong())
+            val out = resp.file?.let { f -> sendFile(f, resp, session.headers["range"] ?: "") } ?: newFixedLengthResponse(status(resp.status, ""), resp.contentType, resp.body.inputStream(), resp.body.size.toLong())
             resp.headers.forEach { (k, v) -> out.addHeader(k, v) }
             return out
         }
+    }
+
+    private fun sendFile(f: File, resp: Response, range: String): NanoHTTPD.Response {
+        val size = f.length()
+        val span = byteRange(range, size)
+        val input = FileInputStream(f)
+        if (span != null) input.channel.position(span.first)
+        val length = if (span != null) span.last - span.first + 1 else size
+        val out = NanoHTTPD.newFixedLengthResponse(status(if (span != null) 206 else resp.status, ""), resp.contentType, input, length)
+        out.addHeader("Accept-Ranges", "bytes")
+        if (span != null) out.addHeader("Content-Range", "bytes ${span.first}-${span.last}/$size")
+        return out
     }
 
     private fun status(code: Int, text: String) = object : NanoHTTPD.Response.IStatus {
@@ -412,7 +422,18 @@ class App(private val maxBody: Int = 256 * 1024) {
     }
 
     companion object {
-        private val REASONS = mapOf(200 to "OK", 303 to "See Other", 400 to "Bad Request", 404 to "Not Found",
+        /** First and last byte a "Range: bytes=..." header asks for (what video players send to start or skip
+         *  ahead), or null to send the whole file. */
+        fun byteRange(header: String, size: Long): LongRange? {
+            val m = Regex("^bytes=(\\d{0,18})-(\\d{0,18})$").find(header.trim()) ?: return null
+            val (from, to) = m.destructured
+            if (from.isEmpty() && to.isEmpty()) return null
+            val start = if (from.isNotEmpty()) from.toLong() else maxOf(size - to.toLong(), 0)
+            val end = if (from.isNotEmpty() && to.isNotEmpty()) minOf(to.toLong(), size - 1) else size - 1
+            return if (start <= end) start..end else null
+        }
+
+        private val REASONS = mapOf(200 to "OK", 206 to "Partial Content", 303 to "See Other", 400 to "Bad Request", 404 to "Not Found",
             405 to "Method Not Allowed", 413 to "Payload Too Large", 500 to "Internal Server Error")
     }
 }

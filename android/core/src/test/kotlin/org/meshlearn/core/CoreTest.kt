@@ -196,6 +196,25 @@ class CoreTest {
         assertTrue(lib.contains("Fractions"))
         assertEquals(200, phone.app.dispatch(req("GET", "/library/files/starter/fractions.html")).status)
         assertEquals(404, phone.app.dispatch(req("GET", "/library/files/../phone.db")).status)
+        // A course from Kolibri gets one card, its own page in course order, and credits.
+        val index = (1..45).joinToString(",", "[", "]") { n ->
+            """{"title":"Somo $n","file":"kolibri/$n.mp4","kind":"mp4","shelf":"Khan (Kiswahili)","collection":"${if (n < 5) "Z: Kuongeza" else "A: Kutoa"}","credit":"Khan Academy · CC BY-NC-SA"}"""
+        }
+        File(phone.libraryDir, "kolibri").mkdirs()
+        (1..45).forEach { File(phone.libraryDir, "kolibri/$it.mp4").writeText("x".repeat(10)) }
+        File(phone.libraryDir, "index.json").writeText(index)
+        val home = String(phone.app.dispatch(req("GET", "/library")).body)
+        assertTrue(home.contains("<a class='card item' href='/library?shelf=Khan") && home.contains("Lessons: 45") && !home.contains("Somo 1<"))
+        fun shelf(c: String = "") = String(phone.app.dispatch(Request("GET", "/library",
+            mapOf("shelf" to "Khan (Kiswahili)", "c" to c), emptyMap(), ByteArray(0), "127.0.0.1")).body)
+        assertTrue(shelf().indexOf("Z: Kuongeza") in 1 until shelf().indexOf("A: Kutoa") && !shelf().contains("Somo 1<"))
+        assertTrue(shelf("Z: Kuongeza").contains("Somo 4<") && !shelf("Z: Kuongeza").contains("Somo 5<"))
+        assertTrue(shelf("Z: Kuongeza").contains("Khan Academy · CC BY-NC-SA"))
+        assertEquals(2L..4L, App.byteRange("bytes=2-4", 10))
+        assertEquals(2L..9L, App.byteRange("bytes=2-", 10))
+        assertEquals(7L..9L, App.byteRange("bytes=-3", 10))
+        assertEquals(null, App.byteRange("bytes=10-", 10))
+        assertEquals(null, App.byteRange("", 10))
         // Admin actions need the phone itself or the PIN.
         assertTrue(String(phone.app.dispatch(req("POST", "/status/reload")).body).contains("Only the teacher"))
         phone.stop(); hub.stop()

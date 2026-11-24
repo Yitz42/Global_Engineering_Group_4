@@ -154,7 +154,7 @@ The hub home page's **Learning data** panel exports everything in one anonymous 
 
 ## Choosing what goes on the card
 
-The hub's **Card library** page lists every collection in the [Kiwix](https://library.kiwix.org) catalog that can go on a phone. In October 2026 that was 3,658 collections in more than 100 languages, plus a set of classic novels from Project Gutenberg. The list is downloaded once (about 4 MB) and kept on the hub, so it can be browsed offline afterwards.
+The hub's **Card library** page lists every collection in the [Kiwix](https://library.kiwix.org) catalog that can go on a phone. In October 2026 that was 3,658 collections in more than 100 languages, plus a set of classic novels from Project Gutenberg. It also lists the courses on [Kolibri](https://learningequality.org/kolibri/) that a plain browser can open (154 in November 2026). The list is downloaded once (about 5 MB) and kept on the hub, so it can be browsed offline afterwards.
 
 **Learning material comes first.** Each collection gets a label and a level, set by simple rules from its category, name, tags and description:
 
@@ -180,6 +180,13 @@ By default the page shows only collections that suit the chosen ages, at the fir
 **Fitting the card.** The teacher enters the card size, and each collection shows its versions with sizes: article intros (mini), text only (nopic), or with images (maxi). A bar tracks how much of the card the picks use and warns when they don't fit. "Suggest a starter set" fills the card automatically for English, Portuguese or German, using only collections that suit the students' ages.
 
 For young children that means picture books, children's encyclopedias, TED talks for kids and science simulations, rather than Wikiversity or university textbooks. A chosen collection outside the students' ages is flagged.
+
+**Kolibri courses, topic by topic.** Kolibri publishes courses such as Khan Academy in dozens of languages, split into topics. **Choose topics…** downloads a course's list of lessons (usually a few MB), and the teacher adds a grade or a topic at a time. For example, Khan Academy in Swahili is 1,106 videos (2.7 GB), and its first-grade maths is 31 videos (38 MB).
+
+- **What is offered:** videos, sound, PDFs and e-books with an open licence (Creative Commons or public domain). Students open them in the MeshLearn library, without the Kolibri app.
+- **What is left out:** exercises and apps, which need Kolibri; lessons with other licences; and material marked for teachers only, such as answer keys.
+- **Counted once:** a video listed under several topics is copied once. Adding a bigger topic replaces the smaller ones inside it.
+- **On the phone:** each course gets one card under **Courses** in the Library, in the course's own order, with each lesson's author and licence. Students can skip ahead in videos.
 
 **Copying to the card.** "Copy to memory card" downloads the picks straight onto a card in the laptop's card reader. It runs in the background with a progress bar, can be stopped and resumed, and skips files already on the card. The phone's Library page lists everything once the card is back in the phone.
 
@@ -271,6 +278,8 @@ meshlearn/
   phone.py           stored assignments, student website by course, timing, batching, library browser
   library.py         open-content planner and downloader
   catalog.py         full Kiwix catalog: education rating, card budget, background copy to card
+  kolibri.py         Kolibri's public courses: topics, lessons, licences and files for the card
+  hubkolibri.py      hub pages for choosing Kolibri topics
   web.py             tiny standard-library web framework
   starter_library/   three short original lessons included on every phone
   sample_assignment.json
@@ -284,7 +293,7 @@ docs/hardware.md, docs/android-setup.md
 python3 -m unittest discover -s tests -v
 ```
 
-There are 50 tests. They cover:
+They cover:
 
 - framing, corruption, and missing-piece reports;
 - lossless compact format;
@@ -298,6 +307,7 @@ There are 50 tests. They cover:
 - comprehension scoring for graded and practice work, levels, mistake kinds and timing signals;
 - learning-data export with no real names, and import that skips doubles;
 - starter sets that fit the card;
+- Kolibri topics from the channel's list to the student library: licences, repeated files, stopped copies and skipping ahead in a video;
 - copying chosen collections onto a card from a local test server.
 
 End-to-end tests run through both websites:
@@ -319,6 +329,7 @@ Tested:
 - Everything above, on Python 3.9 on macOS, using the simulated radio.
 - **Real Meshtastic radios on a desk.** A RAK4631 and a Wio Tracker L1, 1 m apart, ran the hub and phone through a full cycle with no resends, with the phone's radio on USB and then on Bluetooth (from a Mac). See the [bench test](docs/hardware.md#7-bench-test-with-two-radios).
 - The library fetcher's live lookups against the Kiwix catalog and Project Gutenberg, and a real download.
+- Kolibri: the live list, topics from two courses, a real copy of 24 Swahili lessons (checksums matched), and one of them playing in the Android app on an emulator with the lessons on its memory card. Several students watching videos from one phone has not been tried.
 
 Not yet tested:
 
