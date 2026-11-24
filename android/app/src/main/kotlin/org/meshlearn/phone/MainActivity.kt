@@ -27,6 +27,7 @@ import android.text.Editable
 import android.text.InputFilter
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -148,6 +149,10 @@ class MainActivity : Activity() {
         when {
             rescanOnResume && stack.last() == Screen.RADIO -> { rescanOnResume = false; render() }
             stack.last() == Screen.SETTINGS -> showStorage()   // a memory card may have been put in or taken out
+        }
+        // It was running and nobody paused it, but Android stopped it (a force stop, or a crash): carry on.
+        if (settings.setupDone && settings.autostart && settings.wantRunning && PhoneService.instance == null) {
+            runCatching { PhoneService.start(this) }.onFailure { Log.w("MainActivity", "could not start yet", it) }
         }
         ui.post(refresh)
     }
