@@ -370,6 +370,95 @@ class CoreTest {
         assertTrue(String(ask("GET", "/results").body).contains("From your teacher: &lt;i&gt;Say why&lt;/i&gt;"))
     }
 
+    /** Translated questions and the teacher's recordings, as the Python phone. */
+    @Test fun translationsAndRecordings() {
+        assertEquals("3df9c89daaec75f4", Voices.key("samaki", "swa"))   // the Python test has the same one
+        assertEquals(Voices.key("Ni kipi kinaogelea?", "swa"), Voices.key(" Ni kipi\u00a0 kinaogelea? ", "swa"))
+        val only = mapOf(Voices.key("3", "eng") to File("x"), Voices.key("Name one.", "eng") to File("y"))
+        assertEquals(null, Voices.find(only, "3", listOf("swa", "eng")))   // a number is read differently in each language
+        assertEquals(Voices.key("Name one.", "eng"), Voices.find(only, "Name one.", listOf("swa", "eng")))
+        val a = mapOf("id" to "a1", "title" to "Animals", "mode" to "graded", "version" to "v1", "instructions" to "Read.", "tr" to mapOf("swa" to mapOf("T" to "Wanyama")),
+            "questions" to listOf(mapOf("id" to "q1", "type" to "choice", "prompt" to "Which can swim?", "options" to listOf("fish", "goat", "3"), "points" to 1.0, "info" to "Look.",
+                "tr" to mapOf("swa" to mapOf("p" to "Ni kipi kinaogelea?", "o" to listOf("samaki", "mbuzi", ""), "n" to "Tazama.", "s" to "stamp"))),
+                mapOf("id" to "q2", "type" to "text", "prompt" to "Name one.", "points" to 1.0)))
+        val packed = Assignments.pack(a)
+        assertEquals("""{"swa":{"p":"Ni kipi kinaogelea?","o":["samaki","mbuzi",""],"n":"Tazama."}}""", Json.dumps(packed["Q"].asList()!![0].asMap()!!["x"]))
+        assertEquals("""{"swa":{"T":"Wanyama"}}""", Json.dumps(packed["X"]))
+        val dir = tmp()
+        val link = Link(0.0, 1)
+        fun start() = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        val webm = byteArrayOf(0x1a, 0x45, 0xdf.toByte(), 0xa3.toByte()) + ByteArray(50)
+        val key = Voices.key("Ni kipi kinaogelea?", "swa")
+        File(dir, "phone/assignments/voice").mkdirs()
+        File(dir, "phone/assignments/voice/$key.webm").writeBytes(webm)
+        File(dir, "phone/assignments/voice/evil.webm").writeBytes(webm)
+        File(dir, "phone/assignments/voice/${Voices.key("samaki", "swa")}.exe").writeBytes(webm)
+        val phone = start()
+        fun pack(code: String, tag: String) = mapOf("code" to code, "tag" to tag, "name" to code, "dir" to "ltr", "strings" to emptyMap<String, Any?>())
+        phone.importLanguage(mapOf("school" to pack("eng", "en"), "second" to pack("swa", "sw"), "ages" to listOf("primary")))
+        phone.importAssignment(packed, open = true)
+        fun ask(path: String, lang: String, method: String = "GET", form: String = "") = phone.app.dispatch(Request(method, path, emptyMap(),
+            mapOf("cookie" to "student=Ana; lang=$lang", "content-type" to "application/x-www-form-urlencoded"), form.toByteArray(), "1.2.3.4"))
+        fun html(path: String, lang: String) = String(ask(path, lang).body, Charsets.UTF_8)
+        assertTrue(html("/", "swa").contains("Wanyama") && html("/", "eng").contains("Animals"))
+        val page = html("/a/a1", "swa")
+        for (part in listOf("Ni kipi kinaogelea?", ">samaki<", "Tazama.", "Name one.", ">3<", "Read.", "data-voice='/voice/$key'")) assertTrue(part, page.contains(part))
+        assertTrue(!page.contains("Which can swim?") && html("/a/a1", "eng").contains("Which can swim?") && !html("/a/a1", "eng").contains("data-voice='/voice/"))
+        assertEquals(200, ask("/voice/$key", "swa").status)
+        assertEquals("audio/webm", ask("/voice/$key", "swa").contentType)
+        for (bad in listOf("0".repeat(16), "evil", Voices.key("samaki", "swa"))) assertEquals(404, ask("/voice/$bad", "swa").status)
+        ask("/a/a1", "swa", "POST", "q1=1&q2=samaki")
+        val id = phone.db.one("SELECT sub_id FROM submissions")!!.str("sub_id")
+        phone.onMessage(Message(1L, Protocol.RESULT, mapOf("r" to listOf(mapOf("id" to id, "sc" to 1, "mx" to 2, "ok" to 1, "q" to mapOf("q1" to 0, "q2" to 1)))), "hub"))
+        assertTrue(html("/results", "swa").contains("Wanyama") && html("/results", "swa").contains("mbuzi"))
+    }
+
+    /** The school's own pictures and each student's language, as the Python phone. */
+    @Test fun ownPicturesAndLanguages() {
+        val code = "11DpD7a7 02RR"   // the Python test has the same one
+        assertEquals("<svg class='pic own' viewBox='0 0 240 240' aria-hidden='true'><path d='M81 201L81 50L159 50' fill='none' stroke='#8a4b1c' " +
+            "style='stroke-width:8'/><path d='M120 120l.1 0' fill='none' stroke='#1d1d1b' style='stroke-width:14'/></svg>",
+            OwnPics.svg(mapOf("n" to "door", "s" to code), ""))
+        assertEquals(mapOf("n" to "our well", "l" to mapOf("por" to "o poço"), "b" to "goat", "s" to "11AA"), OwnPics.clean(mapOf("n" to " our  well ",
+            "l" to mapOf("por" to "o poço", "X" to "no", "deu" to 3), "s" to "11AA 99ZZ 1 11'A 11A", "b" to "goat", "f" to "red", "z" to 1)))
+        val photo = java.util.Base64.getEncoder().encodeToString(byteArrayOf(-1, -40, -1) + ByteArray(300) { 120 })
+        for (bad in listOf(null, emptyList<Any>(), mapOf("s" to "11AA"), mapOf("n" to " "), mapOf("n" to "x", "b" to "none"), mapOf("n" to "x", "j" to "AAAA"),
+            mapOf("n" to "x", "j" to "<svg>"), mapOf("n" to "x", "j" to java.util.Base64.getEncoder().encodeToString(byteArrayOf(-1, -40, -1) + ByteArray(30000) { 120 })))) {
+            assertEquals(null, OwnPics.clean(bad))
+        }
+        val dir = tmp()
+        val link = Link(0.0, 1)
+        fun start() = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        var phone = start()
+        val a = mapOf("id" to "a1", "title" to "T", "mode" to "graded", "version" to "v1", "questions" to listOf(mapOf("id" to "q1", "type" to "choice",
+            "prompt" to "Which?", "options" to listOf("A", "B"), "points" to 1.0, "pic" to "my-well*2, goat", "opic" to listOf("my-shot", "goat"))))
+        val packed = Assignments.pack(a) + mapOf("Px" to mapOf("my-well" to mapOf("n" to "our well", "s" to code), "my-shot" to mapOf("n" to "market"), "goat" to mapOf("n" to "x", "s" to "11AA")))
+        phone.importAssignment(packed, open = true)
+        fun ask(path: String, cookie: String, method: String = "GET", form: String = "") = phone.app.dispatch(Request(method, path, emptyMap(),
+            mapOf("cookie" to cookie, "content-type" to "application/x-www-form-urlencoded"), form.toByteArray(), "1.2.3.4"))
+        fun html(path: String, cookie: String) = String(ask(path, cookie).body, Charsets.UTF_8)
+        assertEquals(3, html("/a/a1", "student=Ana").split("M81 201L81 50L159 50").size)
+        assertTrue(html("/a/a1", "student=Ana").contains(">market</text>") && html("/a/a1", "student=Ana").contains("aria-label='our well, Goat'"))
+        phone.importPictures(mapOf("my-shot" to mapOf("n" to "market", "j" to photo)))
+        phone.importAssignment(packed)   // by radio again: the photo stays
+        assertTrue(html("/a/a1", "student=Ana").contains("data:image/jpeg;base64,"))
+
+        fun pack(code: String, tag: String) = mapOf("code" to code, "tag" to tag, "name" to code, "dir" to "ltr", "strings" to emptyMap<String, Any?>())
+        phone.importLanguage(mapOf("school" to pack("eng", "en"), "second" to pack("swa", "sw"), "more" to emptyList<Any>(), "ages" to listOf("primary"),
+            "students" to listOf(mapOf("n" to "Amara", "a" to "mid", "l" to "swa"), mapOf("n" to "Kofi", "a" to "mid"))))
+        fun lang(cookie: String) = Regex("<html lang='([a-z]+)'").find(html("/", cookie))!!.groupValues[1]
+        assertEquals(listOf("sw", "en", "en"), listOf(lang("student=Amara"), lang("student=Kofi"), lang("")))
+        assertTrue(ask("/lang", "student=Kofi", "POST", "to=swa&back=/").headers["Set-Cookie"] == null)
+        assertEquals(listOf("sw", "en", "sw"), listOf(lang("student=Kofi"), lang("student=Zoe"), lang("lang=swa")))
+        phone = start()   // after a restart
+        assertEquals("sw", lang("student=Kofi"))
+        assertTrue(html("/a/a1", "student=Ana").contains("M81 201L81 50L159 50"))
+        ask("/a/a1", "student=Kofi", "POST", "q1=0")
+        assertEquals("{\"l\":\"swa\"}", phone.db.one("SELECT signals FROM submissions")!!.str("signals"))
+    }
+
     /** Activities on the card run walled off, and libraries are served by name only: as the Python phone. */
     @Test fun activitiesAreWalledOff() {
         val dir = tmp()

@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import ownpics
 from .language import ENGLISH, Strings
 
 log = logging.getLogger(__name__)
@@ -241,8 +242,10 @@ PICTURES: Dict[str, dict] = json.loads(_site("pictures.json"))   # drawings for 
 MAX_PICS = 12
 
 
-def picture(key: str, cls: str = "") -> str:
-    """One drawing from the picture library, or '' when this version doesn't have it."""
+def picture(key: str, cls: str = "", own: Optional[Dict[str, dict]] = None) -> str:
+    """One drawing, from the picture library or the school's own (ownpics.py), or '' when there is none."""
+    if own and key in own:
+        return ownpics.svg(own[key], cls, PICTURES, esc)
     p = PICTURES.get(key)
     if not p:
         return ""
@@ -250,23 +253,27 @@ def picture(key: str, cls: str = "") -> str:
     return f"<svg class='pic{' ' + cls if cls else ''}' viewBox='0 0 24 24' stroke='{p.get('s', '#1a1a1a')}' aria-hidden='true'>{paths}</svg>"
 
 
-def pictures_of(spec: str) -> List[str]:
+def picture_name(key: str, own: Optional[Dict[str, dict]] = None, lang: str = "") -> str:
+    return ownpics.name_of(own[key], lang) if own and key in own else PICTURES[key]["n"] if key in PICTURES else key
+
+
+def pictures_of(spec: str, own: Optional[Dict[str, dict]] = None) -> List[str]:
     """The pictures a question shows: "apple*3, ball" -> apple, apple, apple, ball (at most MAX_PICS)."""
     out: List[str] = []
     for part in (spec or "").split(","):
         key, _, count = part.strip().partition("*")
-        if key in PICTURES:
+        if key in PICTURES or key in (own or {}):
             out += [key] * max(1, min(int(count) if count.strip().isdigit() else 1, MAX_PICS))
     return out[:MAX_PICS]
 
 
-def pictures_html(spec: str) -> str:
+def pictures_html(spec: str, own: Optional[Dict[str, dict]] = None, lang: str = "") -> str:
     """A question's pictures in a frame. Read aloud as the names of what is shown, never how many."""
-    keys = pictures_of(spec)
+    keys = pictures_of(spec, own)
     if not keys:
         return ""
-    names = ", ".join(dict.fromkeys(PICTURES[k]["n"] for k in keys))
-    return f"<div class='pics n{len(keys)}' role='img' aria-label='{esc(names)}'>{''.join(picture(k) for k in keys)}</div>"
+    names = ", ".join(dict.fromkeys(picture_name(k, own, lang) for k in keys))
+    return f"<div class='pics n{len(keys)}' role='img' aria-label='{esc(names)}'>{''.join(picture(k, own=own) for k in keys)}</div>"
 
 
 CSS = """
@@ -339,16 +346,16 @@ def minutes_for(questions, words: Strings = ENGLISH) -> str:
     return words("time.about_min", n=max(1, int(seconds / 60 + 0.5)))
 
 
-def teacher_pics(q: dict) -> str:
-    keys = pictures_of(q.get("pic", "")) + [k for k in q.get("opic", []) if k in PICTURES]
-    return f"<div>{''.join(picture(k, 'mini') for k in keys)}</div>" if keys else ""
+def teacher_pics(q: dict, own: Optional[Dict[str, dict]] = None) -> str:
+    keys = pictures_of(q.get("pic", ""), own) + [k for k in q.get("opic", []) if k in PICTURES or k in (own or {})]
+    return f"<div>{''.join(picture(k, 'mini', own) for k in keys)}</div>" if keys else ""
 
 
-def info_panel(q: dict) -> str:
+def info_panel(q: dict, own: Optional[Dict[str, dict]] = None) -> str:
     """A question's info, folded away, for the teacher's pages."""
     if not q.get("info"):
-        return teacher_pics(q)
-    return teacher_pics(q) + (f"<details class='muted' style='margin:4px 0'><summary>Question info</summary>"
+        return teacher_pics(q, own)
+    return teacher_pics(q, own) + (f"<details class='muted' style='margin:4px 0'><summary>Question info</summary>"
             f"<p style='white-space:pre-line;margin:4px 0'>{esc(q['info'])}</p></details>")
 
 

@@ -34,6 +34,7 @@ class HubBuilder:
         courses = [{"id": c["id"], "title": c["title"], "units": c["units"]} for c in self.courses() if not c.get("comingSoon")]
         pics = "".join(f"<button type='button' data-pic='{k}' data-find='{esc((p['n'] + ' ' + p['g'] + ' ' + k).lower())}'>"
                        f"{picture(k)}<span>{esc(p['n'])}</span></button>" for k, p in PICTURES.items())
+        pics = f"<div id='ownpics' style='display:contents'>{self._own_buttons()}</div>" + pics
         ages = self.setting("ages").split(",")
         looks = {look: label for age, look, label in AGE_LOOKS if age in ages} or {"mid": "Ages 8 to 11"}
         look_options = "".join(f"<option value='{k}'>{esc(v)}</option>" for k, v in looks.items())
@@ -50,7 +51,10 @@ class HubBuilder:
         if req.query.get("practice"):
             draft, note = self.practice_draft(course, unit, req.query["practice"][:200])
             return self._builder("New assignment", draft=draft, note=note)
-        return self._builder("New assignment", draft={"course": course, "unit": unit})
+        draft: dict = {"course": course, "unit": unit}
+        if req.query.get("pic") in PICTURES or req.query.get("pic") in self.own_pictures():
+            draft["questions"] = [{"type": "choice", "prompt": "", "options": ["", ""], "answer": 0, "pic": req.query["pic"]}]
+        return self._builder("New assignment", draft=draft)
 
     def edit_assignment(self, req: Request) -> Response:
         aid = req.params["aid"]
@@ -84,7 +88,8 @@ class HubBuilder:
         """How many radio packets an unsaved assignment would need."""
         try:
             assignment = asg.normalize_assignment(req.json())
-            packed = asg.pack(dict(asg.public_view(assignment), version="00000000"))
+            packed = asg.pack(dict(asg.only_languages(asg.public_view(assignment), self.class_codes()), version="00000000"))
+            packed.update(self.packed_pictures(assignment))
             return json_response({"frames": protocol.frame_count(protocol.ASSIGN, {"a": packed, "o": 1, "d": assignment["due"]})})
         except (ValueError, AttributeError, TypeError) as exc:
             return json_response({"frames": None, "why": str(exc)})
@@ -112,7 +117,6 @@ BUILDER_HTML = r"""
 .phoneframe .pb{padding:14px 12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}.phoneframe .pq{font-size:17px;font-weight:700;line-height:1.25;overflow-wrap:anywhere}.phoneframe.young .pq{font-size:22px}
 .phoneframe .po{display:flex;align-items:center;gap:8px;min-height:40px;padding:4px 10px;border-radius:10px;border:2px solid #d9d9d3;background:#fff;font-size:14px;overflow-wrap:anywhere}.phoneframe.young .po{min-height:54px;font-size:18px}.phoneframe .po b{flex:none;width:22px;height:22px;border-radius:11px;background:#eeeeea;display:flex;align-items:center;justify-content:center;font-size:11px}
 .phoneframe .pi{border:2px solid #1f5fbf;border-radius:10px;padding:6px 10px;font-size:13px;color:#174a96;font-weight:700}.phoneframe .pf{min-height:42px;border:2px solid #d9d9d3;border-radius:10px;background:#fff}.phoneframe .pf.big{min-height:110px}.phoneframe .pics{display:flex;flex-wrap:wrap;gap:4px}.phoneframe svg.pic{width:44px;height:44px}
-.sizebar{display:block;height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:6px 0}.sizebar span{display:block;height:100%;width:0;background:var(--good)}.sizebar.mid span{background:var(--warn)}.sizebar.big span{background:var(--bad)}
 @media(min-width:900px){#pvcol{position:sticky;top:16px}}
 </style>
 <form id="builder" novalidate><div class="cols"><div class="wide">
@@ -153,7 +157,7 @@ BUILDER_HTML = r"""
     <span class="sizebar" id="sizebar"><span></span></span><span class="small" id="sizetext"></span></div>
 </aside></div></form>
 <dialog id="picdlg"><div class="pichead"><input type="text" id="picfind" placeholder="Find a picture: goat, water, happy…" aria-label="Find a picture">
-<button type="button" id="picdone">Done</button></div><p class="muted" id="picnow"></p>
+<a class="button secondary" href="/pictures/draw" target="_blank" rel="noopener" style="margin:0;white-space:nowrap">Draw one</a><button type="button" id="picdone">Done</button></div><p class="muted" id="picnow"></p>
 <div class="picgrid">__PICTURES__</div></dialog>
 <script>
 const S = __STATE__;
@@ -249,11 +253,12 @@ function options(q) {
       h('input', {type: 'text', cls: 'otext', value: text, maxlength: 200, placeholder: `Option ${letter}`, 'aria-label': `Option ${letter}`, oninput: e => { q.options[j] = e.target.value; changed(); }}),
       h('button', {type: 'button', cls: 'mini', 'aria-label': `Picture for option ${letter}`, onclick: () => pick(q.opic[j], v => { q.opic[j] = v; changed(); render(); }, false)}, pic || 'Picture'),
       h('button', {type: 'button', cls: 'mini', 'aria-label': `Remove option ${letter}`, disabled: q.options.length <= 2, onclick: () => {
-        ['options', 'why', 'opic'].forEach(k => q[k].splice(j, 1)); if (q.answer > j) q.answer -= 1; else if (q.answer === j) q.answer = 0; changed(); render(); }}, '×'),
+        ['options', 'why', 'opic'].forEach(k => q[k].splice(j, 1)); Object.values(q.tr || {}).forEach(t => { if (t.o) t.o.splice(j, 1); }); if (q.answer > j) q.answer -= 1; else if (q.answer === j) q.answer = 0; changed(); render(); }}, '×'),
       right ? h('span', {cls: 'tag'}, 'Right answer') :
         h('input', {type: 'text', cls: 'whyin', value: q.why[j], maxlength: 80, placeholder: 'What picking this shows (only you see it)', 'aria-label': `What option ${letter} shows`, oninput: e => { q.why[j] = e.target.value; changed(); }})));
   });
-  wrap.append(h('button', {type: 'button', cls: 'mini', onclick: () => { q.options.push(''); q.why.push(''); q.opic.push(''); changed(); render(); }}, '+ Add option'));
+  wrap.append(h('button', {type: 'button', cls: 'mini', onclick: () => { q.options.push(''); q.why.push(''); q.opic.push(''); changed(); render(); }}, '+ Add option'), ' ',
+    h('button', {type: 'button', cls: 'mini', onclick: () => pickAnswers(q)}, 'Answers from pictures…'));
   return wrap;
 }
 function watch(q, what) {
@@ -270,12 +275,29 @@ function watch(q, what) {
 // Pictures
 const dlg = $('picdlg'), find = $('picfind');
 let picked = '', done = null, many = false;
+// Answers as pictures: each one picked becomes an option with its name. The first picked starts as the right answer.
+function pickAnswers(q) {
+  const typed = q.options.some(o => o.trim());
+  if (!typed) { ['options', 'why', 'opic'].forEach(k => { q[k] = []; }); Object.values(q.tr || {}).forEach(t => { delete t.o; }); }
+  const names = [];
+  pick('', name => {
+    if (q.opic.includes(name)) return;
+    q.options.push(nameOf(name)); q.why.push(''); q.opic.push(name); names.push(nameOf(name));
+    $('picnow').textContent = 'Answers: ' + names.join(', ');
+  }, true, true);
+  dlg.addEventListener('close', () => { while (q.options.length < 2) { q.options.push(''); q.why.push(''); q.opic.push(''); } changed(); render(); }, {once: true});
+}
+function nameOf(name) { const b = dlg.querySelector(`[data-pic="${CSS.escape(name)}"] span`); return b ? b.textContent : name; }
+// A picture drawn in another tab shows up here when you come back.
+window.addEventListener('focus', async () => { if (!dlg.open) return; try { $('ownpics').innerHTML = await (await fetch('/pictures/buttons')).text(); filterPics(); } catch (e) {} });
+let each = false;
 function svgOf(name) { const b = dlg.querySelector(`[data-pic="${CSS.escape(name)}"] svg`); return b ? b.cloneNode(true) : null; }
-function pick(now, then, several) { picked = now || ''; done = then; many = several; find.value = ''; filterPics(); $('picnow').textContent = picked; dlg.showModal(); }
+function pick(now, then, several, one) { picked = now || ''; done = then; many = several; each = !!one; find.value = ''; filterPics(); $('picnow').textContent = picked; dlg.showModal(); }
 function filterPics() { const t = find.value.trim().toLowerCase(); dlg.querySelectorAll('[data-pic]').forEach(b => { b.hidden = !!t && !b.dataset.find.includes(t); }); }
 find.addEventListener('input', filterPics);
 dlg.addEventListener('click', e => {
   const b = e.target.closest('[data-pic]'); if (!b) return;
+  if (each) { done(b.dataset.pic); return; }
   if (!many) { done(b.dataset.pic === picked ? '' : b.dataset.pic); dlg.close(); return; }
   picked += (picked.trim() ? ', ' : '') + b.dataset.pic; $('picnow').textContent = picked; done(picked);
 });
@@ -327,7 +349,9 @@ function collect() {
     const out = Object.assign({}, q, {id: 'q' + (i + 1)});
     if (q.type === 'choice') {
       const keep = q.options.map((o, j) => j).filter(j => q.options[j].trim());
-      out.options = keep.map(j => q.options[j].trim()); out.why = keep.map(j => j === q.answer ? '' : q.why[j]); out.opic = keep.map(j => q.opic[j]); out.answer = keep.indexOf(q.answer);
+      out.options = keep.map(j => q.options[j].trim()); out.why = keep.map(j => j === q.answer ? '' : q.why[j]); out.opic = keep.map(j => q.opic[j]);
+      if (q.tr) out.tr = Object.fromEntries(Object.entries(q.tr).map(([c, t]) => [c, t.o ? Object.assign({}, t, {o: keep.map(j => t.o[j] || '')}) : t]));
+      out.answer = keep.indexOf(q.answer);
     }
     if (q.type === 'number') { out.answer = String(q.answer).replace(',', '.'); out.tolerance = String(q.tolerance || 0).replace(',', '.'); }
     if (q.type === 'text') out.accept = q.accepttext.split('\n').map(s => s.trim()).filter(Boolean);
@@ -335,7 +359,8 @@ function collect() {
     return out;
   });
   const body = {title: $('title').value, subject: $('subject').value, due: $('due').value, instructions: $('instructions').value,
-                mode: document.querySelector('[name=mode]:checked').value, course: course.value, unit: unit.value, questions};
+                mode: document.querySelector('[name=mode]:checked').value, course: course.value, unit: unit.value, questions,
+                lang: S.draft.lang, tr: S.draft.tr};
   if (S.edit) body.id = S.edit;
   return body;
 }

@@ -43,6 +43,12 @@ class Phone(
     private var looks: List<String> = listOf("mid")   // declared before init, which loads the school's
     private val signIn: SignIn
 
+    /** The school's own pictures, and the language each student switched to. (Before init, which fills them.) */
+    private var own: Map<String, Map<String, Any?>> = emptyMap()
+    private var voices: Map<String, File> = emptyMap()
+    private val voiceDir = File(dataDir, "voice")
+    private val langOf = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     init {
         dataDir.mkdirs()
         installStarterLibrary()
@@ -51,6 +57,8 @@ class Phone(
             try { db.execute("ALTER TABLE submissions ADD COLUMN $column") } catch (e: Exception) { /* already there */ }
         }
         signIn = SignIn(this, db, ::page)
+        loadVoices()
+        loadPictures()
         loadLanguage()
         messenger = messengerFactory(::onMessage)
         loadPackFolder()
@@ -98,12 +106,82 @@ class Phone(
         ))
     }
 
+    // -- the school's own pictures --------------------------------------------
+
+    private fun loadPictures() {
+        val data = db.one("SELECT value FROM settings WHERE key = 'pictures'")?.str("value")?.let {
+            try { Json.parse(it).asMap() } catch (e: Exception) { null }
+        } ?: emptyMap()
+        own = data.mapNotNull { (k, v) -> v.asMap()?.let { k to it } }.toMap()
+    }
+
+    /** Keep the school's own pictures, from a lesson, a Wi-Fi copy or a card. A whole one is never replaced by its
+     *  name alone (a photo whose lesson came by radio). */
+    fun importPictures(data: Any?): Int {
+        var added = 0
+        for ((key, raw) in (data.asMap() ?: emptyMap()).entries.take(500)) {
+            val pic = (if (OwnPics.KEY.matches(key)) OwnPics.clean(raw) else null) ?: continue
+            if (pic != own[key] && (OwnPics.whole(pic) || !OwnPics.whole(own[key]))) {
+                own = own + (key to pic)
+                added++
+            }
+        }
+        if (added > 0) db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('pictures', ?)", Json.dumps(own))
+        return added
+    }
+
+    // -- the teacher's recordings ---------------------------------------------
+
+    private fun loadVoices() {
+        voices = Voices.folderFiles(File(packDir, "voice")) + Voices.folderFiles(voiceDir)
+    }
+
+    /** Where the teacher's recording of these words is, when this phone has one (listen.js plays it). */
+    private fun voice(text: String, w: Strings): String {
+        val key = if (voices.isEmpty()) null else Voices.find(voices, text, listOf(w.code) + (languages.keys - w.code))
+        return if (key == null) "" else " data-voice='/voice/$key'"
+    }
+
+    /** Fetch the recordings this phone lacks over Wi-Fi, and drop those no assignment uses any more. */
+    private fun syncVoices(hubUrl: String, wanted: Map<String, Any?>): Int {
+        val have = Voices.folderFiles(voiceDir)
+        var count = 0
+        for ((key, about) in wanted.entries.take(2000)) {
+            val list = about.asList() ?: continue
+            val ext = list.getOrNull(0) as? String ?: continue
+            val size = (list.getOrNull(1) as? Number)?.toInt() ?: continue
+            if (!Voices.KEY.matches(key) || ext !in Voices.TYPES || size !in 1..Voices.MAX_BYTES) continue
+            if (have[key]?.let { it.extension == ext && it.length() == size.toLong() } == true) continue
+            try {
+                val conn = URL(hubUrl.trimEnd('/') + "/voice/" + key).openConnection() as HttpURLConnection
+                conn.connectTimeout = 20_000
+                conn.readTimeout = 20_000
+                val data = try {
+                    if (conn.responseCode != 200) continue
+                    conn.inputStream.use { it.readBytes() }
+                } finally {
+                    conn.disconnect()
+                }
+                if (data.size == size && Voices.looksLike(data, ext)) {
+                    Voices.save(voiceDir, key, ext, data)
+                    count++
+                }
+            } catch (e: java.io.IOException) {
+                log.warning("could not copy recording $key")
+            }
+        }
+        for (key in have.keys - wanted.keys) Voices.remove(voiceDir, key)
+        loadVoices()
+        return count
+    }
+
     // -- language -------------------------------------------------------------
 
     private fun loadLanguage() {
         val data = db.one("SELECT value FROM settings WHERE key = 'language'")?.str("value")?.let {
             try { Json.parse(it).asMap() } catch (e: Exception) { null }
         } ?: emptyMap()
+        for (r in db.all("SELECT key, value FROM settings WHERE key LIKE 'lang:%'")) langOf[r.str("key")!!.substring(5)] = r.str("value") ?: ""
         val first = Strings(data["school"].asMap())
         val all = linkedMapOf(first.code to first)
         signIn.load(data)
@@ -146,8 +224,14 @@ class Phone(
         return if (chosen in looks) chosen else if ("mid" in looks) "mid" else looks.last()
     }
 
-    /** The student's language: the one they switched to, else the school's. */
-    fun words(req: Request): Strings = languages[req.cookies["lang"] ?: ""] ?: school
+    /** The student's language: the one they switched to, else the one on the class list, else the school's. Someone
+     *  who has not signed in yet gets the one they last tapped in this browser. */
+    fun words(req: Request): Strings {
+        val name = (req.cookies["student"] ?: "").substringBefore('~')
+        val person = if (name.isNotEmpty() && signIn.roster.isNotEmpty()) signIn.person(name) else null
+        val codes = listOf(if (name.isEmpty()) "" else langOf[name.lowercase()] ?: "", person?.lang ?: "", req.cookies["lang"] ?: "")
+        return codes.firstNotNullOfOrNull { languages[it] } ?: school
+    }
 
     // -- assignments ----------------------------------------------------------
 
@@ -157,6 +241,7 @@ class Phone(
         val aid = assignment["id"]?.toString() ?: ""
         val version = (packed["v"] as? String)?.takeIf { it.isNotEmpty() } ?: Assignments.versionOf(assignment)
         if (aid.isEmpty() || !truthy(assignment["questions"])) return false
+        importPictures(packed["Px"])
         val row = db.one("SELECT version, open, due, received FROM assignments WHERE id = ?", aid)
         val newOpen = if (open != null) (if (open) 1L else 0L) else (row?.long("open") ?: 0L)
         val newDue = due ?: (row?.str("due")?.takeIf { it.isNotEmpty() } ?: assignment["due"]?.toString() ?: "")
@@ -190,6 +275,7 @@ class Phone(
 
     /** Load assignments copied onto the memory card (data/assignments/ *.json). */
     fun loadPackFolder(): Int {
+        loadVoices()
         if (!packDir.isDirectory) return 0
         var count = 0
         val coursesFile = File(packDir, "courses.json")
@@ -208,8 +294,16 @@ class Phone(
                 log.warning("skipping unreadable language.json in the course pack")
             }
         }
+        val picturesFile = File(packDir, "pictures.json")
+        if (picturesFile.exists()) {
+            try {
+                importPictures(Json.parse(picturesFile.readText(Charsets.UTF_8)).asMap()?.get("pictures"))
+            } catch (e: Exception) {
+                log.warning("skipping unreadable pictures.json in the course pack")
+            }
+        }
         for (f in (packDir.listFiles() ?: emptyArray()).sortedBy { it.name }) {
-            if (!f.name.endsWith(".json") || f.name == "courses.json" || f.name == "language.json") continue
+            if (!f.name.endsWith(".json") || f.name in setOf("courses.json", "language.json", "pictures.json")) continue
             try {
                 val packed = Json.parse(f.readText()).asMap() ?: continue
                 if (importAssignment(packed)) count++
@@ -234,6 +328,8 @@ class Phone(
         }
         importCourses(data["courses"].asList() ?: emptyList())
         importLanguage(data["language"])
+        importPictures(data["pictures"])
+        data["voices"].asMap()?.let { syncVoices(hubUrl, it) }
         return (data["assignments"].asList() ?: emptyList()).count { p -> p.asMap()?.let { importAssignment(it) } == true }
     }
 
@@ -459,6 +555,7 @@ class Phone(
         app.add("GET", "/results", ::results)
         app.add("GET", "/library", ::library)
         app.add("GET", "/library/files/<path:path>", ::libraryFile)
+        app.add("GET", "/voice/<key>") { Voices.response(voices, it.params["key"] ?: "") }
         app.add("GET", "/status") { status(it) }
         app.add("POST", "/status/sync", ::statusSync)
         app.add("POST", "/status/reload", ::statusReload)
@@ -508,14 +605,14 @@ class Phone(
     private fun description(course: Map<String, Any?>, w: Strings): String =
         if (course["id"] == "") w("course.other.description") else (course["description"]?.toString() ?: "")
 
-    private fun assignmentsIn(courseId: String, openOnly: Boolean = true): List<MutableMap<String, Any?>> {
+    private fun assignmentsIn(courseId: String, openOnly: Boolean = true, w: Strings? = null): List<MutableMap<String, Any?>> {
         val rows = db.all("SELECT id FROM assignments" + (if (openOnly) " WHERE open = 1" else "") +
             " ORDER BY due = '', due, received DESC")
         val known = courseTree().map { it["id"].toString() }.toSet()
         return rows.mapNotNull { getAssignment(it.str("id")!!) }.filter { a ->
             val c = a["course"]?.toString() ?: ""
             (if (c in known) c else "") == courseId
-        }
+        }.map { if (w == null) it else Assignments.localized(it, w.code) }
     }
 
     /** This student's graded work, for the comprehension summary. */
@@ -585,7 +682,7 @@ class Phone(
         val cards = StringBuilder()
         val todo = ArrayList<Pair<Map<String, Any?>, String>>()
         for (course in courseTree()) {
-            val openItems = assignmentsIn(course["id"].toString())
+            val openItems = assignmentsIn(course["id"].toString(), w = w)
             if (course["id"] == "" && openItems.isEmpty()) continue
             val courseTitle = title(course, w)
             todo += openItems.filter { it["id"] !in mine }.map { it to courseTitle }
@@ -736,7 +833,7 @@ class Phone(
         val mine = myLatest(student)
         val summary = Comprehension.summarize(myRecords(student), course)
         val byUnit = summary.units.associateBy { it.id }
-        val items = assignmentsIn(cid)
+        val items = assignmentsIn(cid, w = w)
         val units = Courses.units(course)
         val sections = StringBuilder()
         units.forEachIndexed { i, unit ->
@@ -768,7 +865,11 @@ class Phone(
         if (!back.startsWith("/") || back.startsWith("//")) back = "/"
         val code = req.form["to"] ?: ""
         val response = Response.redirect(back)
-        return if (code in languages) response.setCookie("lang", code) else response
+        if (code !in languages) return response
+        val name = student(req) ?: return response.setCookie("lang", code)
+        langOf[name.lowercase()] = code   // on a shared phone the choice is the student's, not the browser's
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", "lang:" + name.lowercase(), code)
+        return response
     }
 
     fun switchLook(req: Request): Response {
@@ -821,13 +922,13 @@ class Phone(
             val points = (q["points"] as? Number)?.toDouble() ?: 1.0
             val pointsText = if (points == 1.0) w("form.points.one") else w("form.points.other", "n" to g(points))
             val legend = "<legend><span class='qnum'>${esc(w("form.qnum", "i" to i, "n" to n, "points" to pointsText))}</span>" +
-                "${esc(q["prompt"])}</legend>" + Html.picturesHtml(q["pic"]?.toString() ?: "")
+                "${esc(q["prompt"])}</legend>" + Html.picturesHtml(q["pic"]?.toString() ?: "", own, w.code)
             val cls = if (err != null) "q bad" else "q"
             val info = questionInfo(a, q, i, w)
             val flag = "<label class='flag unsure'><input type='checkbox' name='unsure-$qid' value='1'" +
                 "${if (("unsure-" + q["id"]) in values) " checked" else ""}> ${esc(w("form.unsure"))}</label>" +
                 "<label class='flag'><input type='checkbox' data-flag='$qid'> ${esc(w("form.flag"))}</label></fieldset></div>"
-            parts.append("<div class='qwrap${if (info.isNotEmpty()) " has" else ""}' data-prompt='${esc(q["prompt"])}'>$info")
+            parts.append("<div class='qwrap${if (info.isNotEmpty()) " has" else ""}' data-prompt='${esc(q["prompt"])}'${voice(q["prompt"].toString(), w)}>$info")
             when (q["type"]) {
                 "choice" -> {
                     val opic = q["opic"].asList() ?: emptyList()
@@ -836,7 +937,7 @@ class Phone(
                         val on = value == j.toString()
                         "<label class='option${if (on) " on" else ""}'><input type='radio' name='$qid' value='$j'" +
                             "${if (on) " checked" else ""}$described>" +
-                            "<span class='ltr' aria-hidden='true'>${'A' + j}</span>${opic.getOrNull(j)?.let { Html.picture(it.toString()) } ?: ""}<span class='otx'>${esc(opt)}</span></label>"
+                            "<span class='ltr' aria-hidden='true'>${'A' + j}</span>${opic.getOrNull(j)?.let { Html.picture(it.toString(), own = own) } ?: ""}<span class='otx'${voice(pyStr(opt), w)}>${esc(opt)}</span></label>"
                     }.joinToString("")
                     parts.append("<fieldset class='$cls'>$legend$errHtml<div class='opts$short'>$opts</div>$flag")
                 }
@@ -888,7 +989,7 @@ class Phone(
     }
 
     private fun openAssignment(req: Request): MutableMap<String, Any?>? =
-        getAssignment(req.params["aid"] ?: "")?.takeIf { it["open"] == true }
+        getAssignment(req.params["aid"] ?: "")?.takeIf { it["open"] == true }?.let { Assignments.localized(it, words(req).code) }
 
     fun assignmentForm(req: Request): Response {
         val w = words(req)
@@ -923,7 +1024,9 @@ class Phone(
             db.one("SELECT 1 AS x FROM submissions WHERE assignment_id = ? AND student = ?", a["id"], student) != null) {
             return Response.redirect("/results")
         }
-        submit(a, student, answers, signals = Assignments.signalsOf(a, unsure, req.form["first"] ?: "", answers))
+        val signals = Assignments.signalsOf(a, unsure, req.form["first"] ?: "", answers) +
+            (if (w.code != school.code) mapOf("l" to w.code) else emptyMap())   // so the teacher knows which language they work in
+        submit(a, student, answers, signals = signals)
         // Turned in: forget the draft the browser kept while the student worked.
         val clearDraft = "<div id='clear-draft' data-key='${esc(student + "|" + a["id"])}'></div><script>${Html.CLEAR_DRAFT_JS}</script>"
         if (a["mode"] == "practice") {
@@ -991,8 +1094,8 @@ class Phone(
         if (look(req) == "young") return Response(page(req, w("young.stars"), resultsYoung(rows, w)))
         val teen = look(req) == "teen"
         rows.forEachIndexed { i, s ->
-            val a: Map<String, Any?> = getAssignment(s.str("assignment_id")!!)
-                ?: mapOf("title" to s.str("assignment_id"), "questions" to emptyList<Any?>())
+            val a: Map<String, Any?> = Assignments.localized(getAssignment(s.str("assignment_id")!!)
+                ?: mapOf("title" to s.str("assignment_id"), "questions" to emptyList<Any?>()), w.code)
             val sent = when (messenger.messageStatus(s.long("msg_id"))) {
                 "acked" -> "<span class='pill good'>${esc(w("results.acked"))}</span>"
                 "pending" -> "<span class='pill warn'>${esc(w("results.pending"))}</span>"
@@ -1072,7 +1175,7 @@ class Phone(
         for (s in rows) {
             val aid = s.str("assignment_id")!!
             if (!seen.add(aid)) continue
-            val a: Map<String, Any?> = getAssignment(aid) ?: mapOf("id" to "", "title" to aid, "questions" to emptyList<Any?>())
+            val a: Map<String, Any?> = Assignments.localized(getAssignment(aid) ?: mapOf("id" to "", "title" to aid, "questions" to emptyList<Any?>()), w.code)
             val got = starsOf(s)
             val stars = if (got == null) "<p class='meta'>${esc(if (s["score"] != null) w("results.reading") else w("results.not_graded"))}</p>"
                 else "<div class='stars' role='img' aria-label='$got / 3'>" +
@@ -1093,7 +1196,7 @@ class Phone(
             val aid = s.str("assignment_id")!!
             if (aid in seen || s["score"] == null || count >= 5) continue
             seen.add(aid)
-            val a = getAssignment(aid) ?: continue
+            val a = Assignments.localized(getAssignment(aid) ?: continue, w.code)
             val detail = Json.parse(s.str("detail") ?: "{}").asMap() ?: emptyMap()
             val answers = Json.parse(s.str("answers") ?: "{}").asMap() ?: emptyMap()
             Assignments.questions(a).forEachIndexed { n, q ->

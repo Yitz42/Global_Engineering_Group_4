@@ -78,6 +78,8 @@ class HubLanguage:
         app.add_route("GET", "/language", self.language_page)
         app.add_route("POST", "/language", self.language_choose)
         app.add_route("POST", "/language/country", self.language_country)
+        app.add_route("GET", "/language/class", self.language_class)
+        app.add_route("POST", "/language/class", self.language_class_save)
         app.add_route("GET", "/language/words", self.language_words)
         app.add_route("POST", "/language/words", self.language_words_save)
         app.add_route("GET", "/language/export/<code>", self.language_export)
@@ -96,6 +98,82 @@ class HubLanguage:
         return (f"School language: <strong>{esc(pack['name'])}</strong>"
                 + ("" if pct == 100 else f" · {pct}% of the words students see are translated")
                 + " · <a href='/language'>change</a>")
+
+    @staticmethod
+    def _language_tabs(here: str) -> str:
+        return ("<nav class='tabs' aria-label='View'>" + "".join(
+            f"<a href='{href}'{' aria-current=page' if key == here else ''}>{label}</a>"
+            for key, label, href in (("school", "School", "/language"), ("class", "In the class", "/language/class"))) + "</nav>")
+
+    def class_languages(self) -> List[dict]:
+        """Each student: the language set here, and the one their latest work was done in ('' when it is the school's)."""
+        latest = {r["student"]: r for r in self.db.all(
+            "SELECT student, lang, phone, MAX(COALESCE(submitted_at, received_at)) AS at FROM submissions WHERE source = 'radio' GROUP BY student")}
+        listed = self.students()
+        out = [{"name": s["name"], "ages": s["ages"], "set": s["lang"], "seen": latest.get(s["name"]), "listed": True} for s in listed]
+        known = {s["name"].casefold() for s in listed}
+        out += [{"name": n, "ages": "", "set": "", "seen": r, "listed": False} for n, r in sorted(latest.items(), key=lambda kv: kv[0].lower())
+                if n.casefold() not in known]
+        return out
+
+    def language_class(self, req: Request) -> Response:
+        school, others = self.school_language(), self.other_languages()
+        codes = [school] + others
+        names, rows, counts = self._phone_names(), "", {}
+        ages = {"young": "ages 5 to 7", "mid": "ages 8 to 11", "teen": "ages 12 and up"}
+        for s in self.class_languages():
+            seen = s["seen"]
+            used = (seen["lang"] or school) if seen else (s["set"] if s["set"] in codes else school)
+            counts[used] = counts.get(used, 0) + 1
+            where = " · ".join(x for x in (names.get(seen["phone"], seen["phone"]) if seen else "", ages.get(s["ages"], "")) if x)
+            how = "No work yet" if not seen else "Picked on the phone" if used != (s["set"] or school) else "Set by you" if s["set"] else "School language"
+            if not seen and s["set"]:
+                how = "Set by you"
+            pick = ""
+            if s["listed"] and others:
+                pick = (f"<select name='lang:{esc(s['name'])}' aria-label='Language for {esc(s['name'])}'><option value=''>School language</option>"
+                        + "".join(f"<option value='{c}'{' selected' if c == s['set'] else ''}>{esc(cat.language_name(c))}</option>" for c in others) + "</select>")
+            rows += (f"<div><span class='grow'><strong>{esc(s['name'])}</strong><span class='small'>{esc(where)}</span></span>"
+                     f"<span class='small' style='flex:0 1 150px'>{how}</span><strong style='flex:0 1 110px'>{esc(cat.language_name(used))}</strong>"
+                     f"<span style='flex:0 1 190px'>{pick}</span></div>")
+        total = sum(counts.values())
+        saved = f"<div class='notice' role='status'>{esc(req.query['msg'])}</div>" if req.query.get("msg") else ""
+        students = (f"<form method='post' action='/language/class'><div class='list classlang'>{rows}</div>"
+                    + ("<button>Save languages</button>" if others and self.students() else "") + "</form>" if rows else
+                    "<div class='panel'><strong>No students yet.</strong><p class='muted' style='margin:4px 0 0'>Add a class list on the "
+                    "<a href='/students'>Students</a> page, or wait for the first work to arrive.</p></div>")
+        books: Dict[str, int] = {}
+        for i in self.selection():
+            for code in str(i.get("lang", "")).split(","):
+                if code:
+                    books[code] = books.get(code, 0) + 1
+        book_rows = "".join(f"<div class='pr'><span>{esc(cat.language_name(c) if c != 'mul' else 'Any language')}</span><strong>{n}</strong></div>"
+                            for c, n in sorted(books.items(), key=lambda kv: -kv[1]))
+        missing = [cat.language_name(c) for c in codes if c not in books and self.selection()]
+        side = (
+            "<section class='panel'><h2>How students choose</h2><p class='small'>They tap a language at the top of any page. On a shared phone each "
+            "student keeps their own choice. What you set here is where they start"
+            + (", and it reaches phones with their next lesson copy." if others else
+               ". To offer more than one language, add it on the <a href='/language'>School</a> tab.") + "</p></section>"
+            "<section class='panel'><h2>Books for the card, by language</h2>"
+            + (book_rows or "<p class='small'>No books are picked yet.</p>")
+            + (f"<p class='small warn'>Nothing picked in {esc(', '.join(missing))}.</p>" if missing else "")
+            + "<a class='button secondary' href='/library'>Choose books for the next card</a></section>"
+            "<section class='panel'><h2>Another language</h2><p class='small'>Any language can be added. If MeshLearn's words aren't translated yet, "
+            f"you or another school can translate them.</p><a class='button secondary' href='/language/words?lang={esc(others[0] if others else school)}'>Translate MeshLearn's words</a></section>")
+        body = f"{saved}{self._language_tabs('class')}<div class='cols'><div class='wide'>{students}</div><aside class='col' style='flex:1 1 280px'>{side}</aside></div>"
+        sub = (f"{total} student{'' if total == 1 else 's'} · " + ", ".join(f"{cat.language_name(c)} {n}" for c, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+               if total else "")
+        return Response(self._page("Languages in the class", body, current="language", sub=sub))
+
+    def language_class_save(self, req: Request) -> Response:
+        others, changed = self.other_languages(), 0
+        for s in self.students():
+            value = req.form.get("lang:" + s["name"])
+            if value is not None and value != s["lang"] and (value == "" or value in others):
+                self.db.execute("UPDATE students SET lang = ? WHERE name = ?", (value, s["name"]))
+                changed += 1
+        return redirect("/language/class?" + urlencode({"msg": f"Saved. Phones get it with their next lesson copy." if changed else "Nothing changed."}))
 
     def language_page(self, req: Request) -> Response:
         current, others = self.school_language(), self.other_languages()
@@ -174,7 +252,7 @@ class HubLanguage:
         body = ((f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "") + top
                 + "<h2>Languages for learning, by country</h2>" + countries + second_form
                 + "<h2>All languages</h2>" + search + note + table)
-        return Response(self._page("School language", body))
+        return Response(self._page("School language", self._language_tabs("school") + body))
 
     def _country_cards(self) -> str:
         country, young = self.setting("country"), self.all_under_12()

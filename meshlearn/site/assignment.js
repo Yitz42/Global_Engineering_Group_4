@@ -47,7 +47,7 @@ if(i===step)p.children[i].setAttribute('aria-current','step');else p.children[i]
 function show(i,move){if(move)left(step);step=Math.max(0,Math.min(N,i));var end=step===N;prog();
 id('nextlabel').textContent=f.getAttribute(step===N-1?'data-review':'data-next');
 for(var j=0;j<N;j++)ws[j].style.display=j===step?'':'none';
-if(end){list();if(window.meshMath)meshMath(id('reviewlist'));}if(window.meshScratchMoved)meshScratchMoved();id('review').style.display=end?'block':'none';id('submit').style.display=end?'':'none';
+if(end){list();if(window.meshMath)meshMath(id('reviewlist'));}if(window.meshScratchMoved)meshScratchMoved();if(window.meshListenMoved)meshListenMoved();id('review').style.display=end?'block':'none';id('submit').style.display=end?'':'none';
 id('back').disabled=step===0;id('next').style.display=end?'none':'';id('toreview').style.display=end||step===N-1?'none':'';
 if(move){save();window.scrollTo(0,0);var t=end?id('review'):ws[step].querySelector('fieldset');
 try{t.setAttribute('tabindex','-1');t.focus({preventScroll:true});}catch(e){}}}

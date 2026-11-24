@@ -61,6 +61,7 @@ class HubClass:
         version = self.current_version(aid)
         records = self._assignment_records(aid, version)
         report = cmp.question_report(assignment, records)
+        own = self.own_pictures()
         meta = [self._placement(assignment) or assignment.get("subject") or "",
                 "practice" if assignment["mode"] == "practice" else "graded",
                 f"due {assignment['due']}" if assignment.get("due") else "no due date"]
@@ -73,13 +74,14 @@ class HubClass:
             + self._hardest(report) +
             "<h2>Question by question</h2>"
             + ("<p class='small'>A practice counts each student's first try.</p>" if assignment["mode"] == "practice" else "")
-            + "".join(self._question_card(aid, n, item) for n, item in enumerate(report, start=1))
+            + "".join(self._question_card(aid, n, item, own) for n, item in enumerate(report, start=1))
             + (f"<p class='small'>{_count(older, 'piece')} of work on an earlier version of this assignment "
                "is marked below but not counted here.</p>" if older else "")
             + f"</div><aside class='col' style='flex:1 1 280px'>{self._on_phones(aid, assignment, version)}{self._answers_card(assignment)}</aside></div>"
             + self._submissions_table(aid, version)
         )
         action = (f"<span><a class='button secondary' href='/assignments/{esc(aid)}/edit'>Edit</a> "
+                  f"<a class='button secondary' href='/assignments/{esc(aid)}/languages'>Languages</a> <a class='button secondary' href='/assignments/{esc(aid)}/voice'>Voice</a> "
                   f"<a class='button secondary' href='/assignments/{esc(aid)}/grades.csv'>Download grades</a></span>")
         return Response(self._page(assignment["title"], body, current="assignments", sub=" · ".join(m for m in meta if m), action=action))
 
@@ -109,7 +111,7 @@ class HubClass:
                 + (f"<ul style='margin:0;padding-left:20px'>{rows}{extra}</ul>" if rows or extra else
                    "<p class='small' style='margin:0'>No wrong answer was shared by two or more students.</p>") + "</section>")
 
-    def _question_card(self, aid: str, n: int, item: dict) -> str:
+    def _question_card(self, aid: str, n: int, item: dict, own: Dict[str, dict]) -> str:
         q = item["q"]
         marked = len(item["right"]) + len(item["wrong"])
         kind = {"choice": "Choice", "number": "Number", "text": "Short answer", "long": "Written"}[q["type"]]
@@ -119,7 +121,7 @@ class HubClass:
             bar, total = sum(item["earned"]), marked * q["points"]
             head = f"average {bar / marked:.1f} of {q['points']:g}"
         hard = marked >= 2 and bar * 2 < total
-        inner = f"<div class='small'>{kind} · {q['points']:g} point{'' if q['points'] == 1 else 's'}</div>{info_panel(q)}"
+        inner = f"<div class='small'>{kind} · {q['points']:g} point{'' if q['points'] == 1 else 's'}</div>{info_panel(q, own)}"
         key = asg.key_text(q)
         if key:
             inner += f"<p style='margin:6px 0'><span class='good'><strong>Right answer:</strong></span> {esc(key)}"

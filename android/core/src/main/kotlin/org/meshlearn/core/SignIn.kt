@@ -10,7 +10,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /** Someone on the class list: name, picture, look ("young", "mid", "teen") and hashed secret. */
-class Person(val name: String, val pic: String, val look: String, val secret: String)
+class Person(val name: String, val pic: String, val look: String, val secret: String, val lang: String = "")
 
 /**
  * Who is using the phone: picking yourself by picture, name or PIN. A port of phonesignin.py, giving the same pages.
@@ -36,7 +36,7 @@ class SignIn(private val phone: Phone, private val db: Db, private val page: (Re
             val m = item.asMap() ?: return@mapNotNull null
             val name = (m["n"] as? String)?.ifEmpty { null } ?: return@mapNotNull null
             val look = (m["a"] as? String)?.takeIf { it in LOOK_ORDER } ?: "mid"
-            Person(name, m["p"] as? String ?: "", look, m["s"] as? String ?: "")
+            Person(name, m["p"] as? String ?: "", look, m["s"] as? String ?: "", m["l"] as? String ?: "")
         }
         val given = data["signin"].asMap() ?: emptyMap()
         ways = mapOf("young" to (given["young"] as? String ?: "pic"), "mid" to (given["mid"] as? String ?: "list"),

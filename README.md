@@ -98,6 +98,7 @@ The five students on the demo phone (Lena, Ana, Bruno, Kofi, Mateus) send their 
      ```bash
      python3 -m meshlearn pack --out /Volumes/SDCARD/Android/data/com.termux/files/meshlearn
      ```
+   **Phones and radio**, **Lessons** shows what each phone has and lacks. It can send a few missing lessons by radio (up to 40 packets), or fill a phone's memory card in this laptop's card reader: lessons first, then the chosen books. It never pre-selects a drive that holds no MeshLearn folder.
 6. **Fill the library** before the phone leaves an area with internet. Open **Card library** on the hub, choose collections, and press **Copy to memory card** with the phone's card in the laptop's card reader (see below). Or, without the browser:
    ```bash
    python3 -m meshlearn library --sd-gb 32 --lang pt --dest /Volumes/SDCARD/Android/data/com.termux/files/meshlearn/library --dry-run
@@ -262,6 +263,7 @@ Moving a due date or hiding an assignment is always 1 packet.
 - **Three looks, by age.** Ages 5–7 get big pictures, stars and few words; ages 8–11 get one thing to do next; ages 12 and up get due dates, course scores and what to review. The hub's students' ages decide which looks a phone offers, and when there is more than one, students pick their age on the welcome page.
 - **Signing in.** With a class list on the hub's **Students** page, ages 5–7 tap their picture (and a secret picture, if the teacher turns it on), ages 8–11 find their name, and ages 12 and up type it (and a PIN, if turned on). Students who are not on the list can start anyway; the hub asks the teacher who they are. The phone goes back to "Who are you?" after a while with no taps. Without a list, students type their name.
 - **Pictures in questions.** 289 drawings come with every phone, so a question sends only a picture's name (`apple*3, ball`). They can also stand for the answers.
+- **The school's own pictures.** On the hub's **Pictures** page the teacher can draw one, recolour or draw on a library picture, or use a photo. A simple drawing is one radio packet and travels with the lesson that uses it. A photo (about 15 KB, with its location data left out) goes by Wi-Fi or memory card only; until it arrives, students see its name. Names can be given in each of the school's languages.
 - **Keep reading.** The library offers each student the last thing they opened.
 - **Listen.** A button reads the page or the question aloud in the student's language, on devices that have a voice for it (inside the Android app, the phone's own voice). It hides itself where there is none.
 - **One question at a time.** Arrows move back and forward, and **Review** lists every question with the student's answer, what is still blank and what they ticked "Come back to this later". Answers and the place in the lesson are kept in the browser. Without JavaScript, every question shows in one list.
@@ -281,6 +283,9 @@ Moving a due date or hiding an assignment is always 1 packet.
   | United States | English, Spanish, French | |
   | Brazil | Portuguese, English, German | Brazilian Portuguese (`lang/por-BR.json` holds the words that differ from `por.json`) |
 
+- **Questions in each language.** An assignment's **Languages** page puts the original beside a column for each of the school's languages: title, instructions, questions, options and info. Where a translation is missing, students see the original. It says how many students that affects, and which translations to check after the original changed. Phones get only the languages their students use. The radio size is shown.
+- **The teacher's voice.** An assignment's **Voice** page records each question and answer word (about 3 KB a second), for phones with no voice in that language. **Listen** plays the recordings in order and reads the rest aloud where it can. A word is recorded once per language and used everywhere it shows. Recordings go by Wi-Fi or memory card, never by radio. Recording needs a microphone and works on the hub laptop itself; sound files can be added instead.
+- **Each student's language.** **Language**, **In the class** shows which language each student works in, and sets where they start. On a shared phone the choice belongs to the student, not the browser.
 - **Translations that can be partly done.** MeshLearn comes with every phone word in German, Spanish, French, Portuguese (European and Brazilian), Kiswahili and Arabic (`meshlearn/lang/`; not yet checked by native speakers). Any other language starts in English and the teacher translates word by word on the hub; anything not yet translated shows in English. Translations travel to phones with the lessons (Wi-Fi copy or memory card, never the radio), and can be downloaded and shared with other schools or sent to the project.
 - Text-only and smaller library editions are chosen automatically for small cards.
 - Students identify themselves by name, with no accounts or personal data beyond what the teacher needs. Secret pictures and PINs keep classmates honest but are not strong protection: phones carry only a hash of each, and slow down guessing, yet a 4-number PIN can be worked out by someone with the phone's files. The class list is copied over Wi-Fi to any phone that syncs.
@@ -312,6 +317,12 @@ meshlearn/
   library.py         open-content planner and downloader
   catalog.py         full Kiwix catalog: education rating, card budget, background copy to card
   kolibri.py         Kolibri's public courses: topics, lessons, licences and files for the card
+  hubtranslate.py    an assignment in the school's languages
+  hubvoice.py        recording the teacher's voice for an assignment
+  voices.py          which words a recording belongs to, and its files
+  hubpictures.py     the Pictures page: browse, draw, photos, change one of ours
+  ownpics.py         the school's own pictures, small enough for the radio
+  hublessons.py      what each phone has, filling a memory card, the printed setup card
   hubbuilder.py      the assignment builder: question cards, notes, phone preview, radio size
   hubclass.py        the class view of an assignment, and class progress
   hubkolibri.py      hub pages for choosing Kolibri topics
@@ -353,6 +364,9 @@ They cover:
 - starter sets that fit the card;
 - Kolibri topics from the channel's list to the student library: licences, repeated files, stopped copies and skipping ahead in a video;
 - notes on wrong answers (never on a phone, never a new version), not-sure ticks, changed answers, the class view, practice from a mistake, and notes back;
+- the school's own pictures by Wi-Fi, card and radio (both phones draw the same), and bad ones refused;
+- translated questions and the teacher's recordings, from the hub's pages to both phones;
+- what each phone has, filling a card, and each student's language;
 - activities on the card: the sandbox, path traversal, refused button presses, and ready-made libraries served by name only;
 - copying chosen collections onto a card from a local test server.
 
@@ -378,6 +392,7 @@ Tested:
 - Kolibri: the live list, topics from two courses, a real copy of 24 Swahili lessons (checksums matched), and one of them playing in the Android app on an emulator with the lessons on its memory card. Several students watching videos from one phone has not been tried.
 - Ready-made tools, on Windows (Python 3.12) and in the Android app on an emulator: a real copy of 7 PhET simulations, 8 Blockly Games and GeoGebra (Kolibri checksums matched), the scratchpad, the joining QR code and the phone setup link. On the computer, spreadsheet import, including a German Excel file. No QR code has been scanned with a real camera yet, and GeoGebra has not been tried on a slow phone.
 - The notes, class view and builder in a desktop browser on the made-up school (simulated radio), and the student side in the Android app on an emulator. No teacher or class has used them yet.
+- Recordings of a generated tone in place of a microphone, copied over Wi-Fi and played in order in a browser and in the Android app on an emulator. No one has recorded a real voice yet.
 
 Not yet tested:
 

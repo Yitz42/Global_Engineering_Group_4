@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 import zipfile
@@ -22,6 +23,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from . import assignments as asg
+from . import ownpics
 from . import catalog as cat
 from . import courses as crs
 from . import library
@@ -29,6 +31,10 @@ from . import protocol
 from .db import Database
 from .hubbuilder import HubBuilder
 from .hubclass import HubClass
+from .hublessons import HubLessons
+from .hubpictures import HubPictures
+from .hubtranslate import HubTranslate
+from .hubvoice import HubVoice
 from .hubkolibri import HubKolibri
 from .hublang import HubLanguage
 from .hubstudents import HubStudents
@@ -72,6 +78,8 @@ CREATE TABLE IF NOT EXISTS students (
 );
 CREATE TABLE IF NOT EXISTS name_links (name TEXT PRIMARY KEY, student TEXT NOT NULL);   -- a name from a phone -> the class list ('' = not a student)
 CREATE TABLE IF NOT EXISTS released (aid TEXT PRIMARY KEY, at REAL NOT NULL);           -- right answers sent early by the teacher
+CREATE TABLE IF NOT EXISTS pictures (key TEXT PRIMARY KEY, data TEXT NOT NULL, added REAL NOT NULL);   -- the school's own (ownpics.py)
+CREATE TABLE IF NOT EXISTS voices (key TEXT PRIMARY KEY, secs REAL NOT NULL, added REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS phrases (lang TEXT NOT NULL, key TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY (lang, key));
 """
 
@@ -89,12 +97,13 @@ def _when(ts: Optional[float]) -> str:
     return time.strftime("%b %d, %H:%M", time.localtime(ts)) if ts else "never"
 
 
-class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStudents):
+class Hub(HubUI, HubClass, HubBuilder, HubPictures, HubLessons, HubTranslate, HubVoice, HubPages, HubLanguage, HubKolibri, HubStudents):
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
         self.catalog = cat.Catalog(os.path.join(os.path.dirname(os.path.abspath(db_path)), "catalog.json"))
         self.kolibri_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "kolibri")
+        self.voice_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "voice")
         self.download_job: Optional[cat.DownloadJob] = None
         self._migrate()
         self.load_course_file()
@@ -102,6 +111,10 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
         self._routes()
         self._ui_routes()
         self._builder_routes()
+        self._picture_routes()
+        self._lesson_routes()
+        self._translate_routes()
+        self._voice_routes()
         self._class_routes()
         self._page_routes()
         self._language_routes()
@@ -115,7 +128,10 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
                     "ALTER TABLE submissions ADD COLUMN source TEXT NOT NULL DEFAULT 'radio'",
                     "ALTER TABLE submissions ADD COLUMN answers_sent INTEGER NOT NULL DEFAULT 0",
                     "ALTER TABLE submissions ADD COLUMN signals TEXT",
-                    "ALTER TABLE submissions ADD COLUMN notes TEXT"):
+                    "ALTER TABLE submissions ADD COLUMN notes TEXT",
+                    "ALTER TABLE submissions ADD COLUMN lang TEXT",
+                    "ALTER TABLE students ADD COLUMN lang TEXT NOT NULL DEFAULT ''",
+                    "ALTER TABLE phones ADD COLUMN copied REAL"):
             try:
                 self.db.execute(sql)
             except Exception:
@@ -217,10 +233,11 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
         row = self.db.one("SELECT version FROM assignments WHERE id = ?", (aid,))
         return row["version"] if row else None
 
-    def packed_for_phone(self, aid: str) -> dict:
-        """The phone's copy: answer key removed (unless practice), compact, version-stamped."""
+    def packed_for_phone(self, aid: str, pictures: bool = True) -> dict:
+        """The phone's copy: answer key removed (unless practice), compact, version-stamped. The school's own drawings go
+        along ("Px"), so a question never arrives without its picture; a course pack carries them once instead."""
         assignment = self.get_assignment(aid)
-        view = asg.public_view(assignment)
+        view = asg.only_languages(asg.public_view(assignment), self.class_codes())
         course = self.get_course(assignment.get("course", ""))
         if course:  # titles travel with the assignment, so radio-only phones can show the course
             view["course_title"] = course["title"]
@@ -230,26 +247,43 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
                 view["unit_no"] = crs.unit_number(course, unit["id"])
         packed = asg.pack(view)
         packed["v"] = self.current_version(aid)
+        packed.update(self.packed_pictures(assignment) if pictures else {})
         return packed
 
+    def packed_pictures(self, assignment: dict) -> dict:
+        own = self.own_pictures()
+        found = {k: ownpics.on_radio(own[k]) for k in self.pictures_in(assignment)}
+        return {"Px": found} if found else {}
+
     def course_pack(self) -> List[dict]:
-        return [self.packed_for_phone(r["id"]) for r in self.db.all("SELECT id FROM assignments ORDER BY created")]
+        return [self.packed_for_phone(r["id"], pictures=False) for r in self.db.all("SELECT id FROM assignments ORDER BY created")]
 
     def course_list_for_phones(self) -> List[dict]:
         return [{k: v for k, v in c.items() if k != "source"} for c in self.courses()]
 
+    def course_pack_files(self) -> Dict[str, bytes]:
+        """Everything for a phone's "assignments" folder, by path."""
+        def text(data) -> bytes:
+            return json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8")
+        files = {f"assignments/{packed['i']}.json": text(packed) for packed in self.course_pack()}
+        files["assignments/courses.json"] = text({"courses": self.course_list_for_phones()})
+        files["assignments/language.json"] = text(self.language_bundle())
+        if self.own_pictures():
+            files["assignments/pictures.json"] = text({"pictures": self.own_pictures()})
+        for key, path in self.used_voices().items():
+            with open(path, "rb") as fh:
+                files[f"assignments/voice/{os.path.basename(path)}"] = fh.read()
+        files["assignments/README.txt"] = (
+            "Copy this 'assignments' folder into the phone's MeshLearn data folder on the microSD card,\n"
+            "next to the 'library' folder. The phone loads it when it starts or when you press\n"
+            "'Reload from card' on its status page.\n").encode("utf-8")
+        return files
+
     def course_pack_zip(self) -> bytes:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for packed in self.course_pack():
-                zf.writestr(f"assignments/{packed['i']}.json", json.dumps(packed, ensure_ascii=False, indent=1))
-            zf.writestr("assignments/courses.json", json.dumps({"courses": self.course_list_for_phones()},
-                                                               ensure_ascii=False, indent=1))
-            zf.writestr("assignments/language.json", json.dumps(self.language_bundle(), ensure_ascii=False, indent=1))
-            zf.writestr("assignments/README.txt",
-                        "Copy this 'assignments' folder into the phone's MeshLearn data folder on the microSD card,\n"
-                        "next to the 'library' folder. The phone loads it when it starts or when you press\n"
-                        "'Reload from card' on its status page.\n")
+            for path, data in self.course_pack_files().items():
+                zf.writestr(path, data)
         return buf.getvalue()
 
     # -- phones ---------------------------------------------------------------
@@ -469,11 +503,12 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
                     signals["f"] = {str(k)[:20]: str(v)[:asg.MAX_FIRST_CHARS] for k, v in list(s["f"].items())[:100]}
                 self.db.execute(
                     "INSERT OR IGNORE INTO submissions (sub_id, assignment_id, version, student, phone, answers, submitted_at, "
-                    "received_at, duration, signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "received_at, duration, signals, lang) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (sub_id, str(s.get("a", ""))[:20], str(s.get("v", ""))[:16], self.student_name(str(s.get("u", "?"))[:60]), src,
                      json.dumps(s.get("x") or {}), s.get("t"), time.time(),
                      float(duration) if isinstance(duration, (int, float)) and duration > 0 else None,
-                     json.dumps(signals) if signals else None),
+                     json.dumps(signals) if signals else None,
+                     s["l"] if isinstance(s.get("l"), str) and re.match(r"^[a-z]{3}$", s["l"]) else None),
                 )
                 grade = self.grade_submission(sub_id)
                 if grade:
@@ -522,7 +557,9 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
             self.db.execute("INSERT INTO phones (node_id, name, last_seen) VALUES (?, ?, ?) "
                             "ON CONFLICT(node_id) DO UPDATE SET last_seen = excluded.last_seen", (node, name, time.time()))
             self.record_inventory(node, {p["i"]: p["v"] for p in pack}, complete=False)
-        return json_response({"assignments": pack, "courses": self.course_list_for_phones(), "language": self.language_bundle()})
+            self.db.execute("UPDATE phones SET copied = ? WHERE node_id = ?", (time.time(), node))
+        return json_response({"assignments": pack, "courses": self.course_list_for_phones(), "language": self.language_bundle(),
+                              "pictures": self.own_pictures(), "voices": self.voice_list()})
 
     def pack_zip(self, req: Request) -> Response:
         return Response(self.course_pack_zip(), content_type="application/zip",
@@ -570,7 +607,7 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
         grade = json.loads(s["grade"]) if s["grade"] else None
         scores = {q["id"]: q["score"] for q in (grade or {}).get("questions", [])}
         manual = json.loads(s["manual"] or "{}")
-        notes = json.loads(s["notes"] or "{}")
+        notes, own = json.loads(s["notes"] or "{}"), self.own_pictures()
         unsure, first = asg.read_signals(assignment, json.loads(s["signals"] or "{}")) if assignment else (set(), {})
         rows = ""
         for q in (assignment or {"questions": []})["questions"]:
@@ -602,7 +639,7 @@ class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStu
                 answer_cell += f"<div class='small'>First answer: {esc(asg.answer_text(q, first[q['id']]))}{was}</div>"
             answer_cell += (f"<input type='text' name='n_{esc(q['id'])}' maxlength='{MAX_NOTE_CHARS}' value='{esc(notes.get(q['id'], ''))}' "
                             f"placeholder='Short note to the student (optional)' aria-label='Note about {esc(q['prompt'][:40])}' style='margin-top:6px'>")
-            rows += f"<tr><td>{esc(q['prompt'])}{info_panel(q)}</td><td>{answer_cell}</td><td>{box}{note}</td></tr>"
+            rows += f"<tr><td>{esc(q['prompt'])}{info_panel(q, own)}</td><td>{answer_cell}</td><td>{box}{note}</td></tr>"
         total = f"{grade['score']:g} / {grade['max']:g}" if grade else "—"
         phone = self._phone_names().get(s["phone"], s["phone"])
         body = (

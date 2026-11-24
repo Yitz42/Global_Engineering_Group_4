@@ -19,9 +19,6 @@ from . import comprehension as cmp
 from . import courses as crs
 from .web import Request, Response, esc, json_response, redirect
 
-LEVEL_CLASS = {"Strong": "good", "Good": "good", "Developing": "warn", "Needs work": "bad",
-               "Just started": "muted", "Not started": "muted"}
-
 RECORD_FORMAT = "meshlearn-learning-record"
 RECORD_VERSION = 1
 RECORD_DICTIONARY = {
@@ -42,17 +39,6 @@ RECORD_DICTIONARY = {
     "submissions.pace": "'rushing', 'fast_right', 'slow' or null: a signal worth a look, never proof.",
     "mistake_kinds": "Every mistake kind, its area and what it means.",
 }
-
-
-def _level_pill(level: str, score: Optional[int]) -> str:
-    text = level if score is None else f"{level} · {score}%"
-    return f"<span class='pill {LEVEL_CLASS.get(level, '')}'>{esc(text)}</span>"
-
-
-def _bar(score: Optional[int]) -> str:
-    width = score or 0
-    return (f"<div style='height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:8px 0' "
-            f"role='img' aria-label='{width}%'><div style='height:100%;width:{width}%;background:var(--accent)'></div></div>")
 
 
 class HubPages:
@@ -99,42 +85,33 @@ class HubPages:
 
     # -- courses ----------------------------------------------------------------
 
-    def _course_cards(self, records: List[dict], link: str = "/courses/") -> str:
-        cards = ""
-        for c in self.courses(include_other=True):
-            summary = cmp.summarize(records, c)
-            count = len(self.assignments_in(c["id"]))
-            soon = c.get("comingSoon")
-            pace = summary["pace"]
-            flags = "".join(f"<div class='warn' style='font-size:15px'>{n}× {esc(cmp.PACE_LABELS[k])}</div>"
-                            for k, n in pace.items())  # lines, not pills: long labels must wrap in narrow cards
-            cards += (
-                f"<div class='card'{' style=opacity:.6' if soon else ''}>"
-                f"<h2 style='margin-top:0'><a href='{link}{esc(c['id']) or '_other'}'>{esc(c['title'])}</a></h2>"
-                f"<p class='muted'>{esc(c.get('description', ''))}</p>"
-                + ("<span class='pill'>Coming later</span>" if soon else
-                   f"<p>{len(c['units'])} units · {count} assignment{'' if count == 1 else 's'}</p>"
-                   f"{_level_pill(summary['level'], summary['score'])}{_bar(summary['score'])}"
-                   f"<p class='muted' style='margin-bottom:4px'>{summary['answered'] or 'No'} answers scored</p>{flags}")
-                + "</div>"
-            )
-        return f"<div class='grid'>{cards}</div>"
-
     def courses_page(self, req: Request) -> Response:
         records = self.comprehension_records()
+        cards = ""
+        for c in self.courses(include_other=True):
+            s = cmp.summarize(records, c)
+            count = len(self.assignments_in(c["id"]))
+            cls = {"Strong": "strong", "Good": "good", "Developing": "developing", "Needs work": "needs"}.get(s["level"], "")
+            level = "Coming later" if c.get("comingSoon") else s["level"] + (f" · {s['score']}%" if s["score"] is not None else "")
+            cards += (f"<a class='need' href='/courses/{esc(c['id']) or '_other'}'{' style=opacity:.6' if c.get('comingSoon') else ''}>"
+                      f"<span style='display:flex;justify-content:space-between;gap:8px;align-items:flex-start'><strong style='font-size:19px'>{esc(c['title'])}</strong>"
+                      f"<span class='level {cls}'>{esc(level)}</span></span><span class='small'>{esc(c.get('description', ''))}</span>"
+                      f"<span class='meter'><span style='width:{s['score'] or 0}%'></span></span>"
+                      f"<span class='small'>{len(c['units'])} units · {count} assignment{'' if count == 1 else 's'} · {s['answered'] or 'no'} answers scored</span>"
+                      "<span class='go'>Open</span></a>")
         body = (
-            "<p class='muted'>Courses and their numbered units are the frame for assignments. "
-            "Starter courses come from <code>meshlearn/courses.json</code>; anything changed here is kept.</p>"
-            + self._course_cards(records)
-            + "<h2>New course</h2><form method='post' action='/courses' class='card'>"
-            "<label for='title'>Course title</label><input type='text' id='title' name='title' required maxlength='80'>"
+            f"<div class='cards'>{cards}</div><div class='cols' style='margin-top:20px'><section class='panel wide'><h2>New course</h2>"
+            "<form method='post' action='/courses'><label for='title'>Course title</label><input type='text' id='title' name='title' required maxlength='80'>"
             "<label for='description'>What it covers</label><input type='text' id='description' name='description' maxlength='240'>"
             "<label for='units'>Units, one per line, in order</label>"
             "<textarea id='units' name='units' rows='5' placeholder='Numbers and fractions&#10;Measurement'></textarea>"
-            "<button>Add course</button></form>"
-            "<form method='post' action='/courses/reload'><button class='secondary'>Reload starter courses from the file</button></form>"
+            "<button>Add course</button></form></section>"
+            "<aside class='col' style='flex:1 1 260px'><section class='panel'><h2>Starter courses</h2><p class='small'>They come from "
+            "<code>meshlearn/courses.json</code>. Anything you change here is kept.</p>"
+            "<form method='post' action='/courses/reload'><button class='secondary'>Reload from the file</button></form></section></aside></div>"
         )
-        return Response(self._page("Courses", body))
+        n = len(self.courses())
+        return Response(self._page("Courses", body, sub=f"{n} course{'' if n == 1 else 's'}. Assignments go in their units."))
 
     def course_create(self, req: Request) -> Response:
         units = [{"title": line} for line in req.form.get("units", "").splitlines() if line.strip()]
@@ -156,51 +133,48 @@ class HubPages:
             return Response(self._page("Not found", "<p>No such course.</p>"), status=404)
         summary = self.course_summary(course)
         by_unit = {u["id"]: u for u in summary["units"]}
+
+        def rows(items: List[dict]) -> str:
+            return "".join(f"<a href='/assignments/{esc(a['id'])}'><span class='grow'><strong>{esc(a['title'])}</strong><span class='small'>"
+                           f"{'practice' if a.get('mode') == 'practice' else 'due ' + esc(a['due']) if a.get('due') else 'no due date'}</span></span></a>" for a in items)
+
+        def chip(u: dict) -> str:
+            cls = {"Strong": "strong", "Good": "good", "Developing": "developing", "Needs work": "needs"}.get(u["level"], "")
+            return f"<span class='level {cls}'>{esc(u['level'] if u['score'] is None else u['level'] + ' · ' + str(u['score']) + '%')}</span>"
+
         units_html = ""
         for n, unit in enumerate(course["units"], start=1):
             items = self.assignments_in(course["id"], unit["id"])
-            links = "".join(f"<li><a href='/assignments/{esc(a['id'])}'>{esc(a['title'])}</a>"
-                            f"{' <span class=muted>(practice)</span>' if a.get('mode') == 'practice' else ''}</li>" for a in items)
             u = by_unit.get(unit["id"], {"level": "Not started", "score": None, "answered": 0})
             units_html += (
-                f"<div class='card'><h2 style='margin-top:0'>Unit {n}: {esc(unit['title'])}</h2>"
-                f"{_level_pill(u['level'], u['score'])} <span class='muted'>{u['answered']} answers scored</span>"
-                + (f"<ul>{links}</ul>" if links else "<p class='muted'>No assignments yet.</p>")
-                + f"<a class='button secondary' href='/assignments/new?course={esc(course['id'])}&unit={esc(unit['id'])}'>"
-                "+ New assignment in this unit</a></div>"
-            )
+                f"<section aria-labelledby='u{n}'><div style='display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:20px 0 8px'>"
+                f"<h2 id='u{n}' style='margin:0'>Unit {n}: {esc(unit['title'])}</h2>{chip(u)}<span class='small'>{u['answered']} answers scored</span></div>"
+                f"<div class='list'>{rows(items)}<a href='/assignments/new?course={esc(course['id'])}&amp;unit={esc(unit['id'])}' style='color:var(--accent)'>"
+                "+ New assignment in this unit</a></div></section>")
         loose = [a for a in self.assignments_in(course["id"]) if a.get("unit", "") not in {u["id"] for u in course["units"]}]
         if loose:
-            units_html += ("<div class='card'><h2 style='margin-top:0'>Not in a unit</h2><ul>"
-                           + "".join(f"<li><a href='/assignments/{esc(a['id'])}'>{esc(a['title'])}</a></li>" for a in loose)
-                           + "</ul></div>")
+            units_html += f"<section><h2>Not in a unit</h2><div class='list'>{rows(loose)}</div></section>"
         editor = ""
         if cid != "_other":
-            rows = "".join(
-                f"<tr><td>{n}</td><td><input type='hidden' name='unit_id' value='{esc(u['id'])}'>"
-                f"<input type='text' name='unit_title' value='{esc(u['title'])}' aria-label='Unit {n} title'></td>"
-                f"<td><input type='text' name='unit_read' value='{esc(u.get('read', ''))}' aria-label='Unit {n} library search'></td></tr>"
-                for n, u in enumerate(course["units"], start=1))
-            rows += "".join(
-                f"<tr><td>new</td><td><input type='hidden' name='unit_id' value=''>"
-                f"<input type='text' name='unit_title' value='' aria-label='New unit title'></td>"
-                f"<td><input type='text' name='unit_read' value='' aria-label='New unit library search'></td></tr>" for _ in range(2))
+            fields = [(n, u["id"], u["title"], u.get("read", "")) for n, u in enumerate(course["units"], start=1)] + [("new", "", "", "")] * 2
+            lines = "".join(
+                f"<tr><td>{n}</td><td><input type='hidden' name='unit_id' value='{esc(uid)}'>"
+                f"<input type='text' name='unit_title' value='{esc(title)}' aria-label='{'New unit' if n == 'new' else f'Unit {n}'} title'></td>"
+                f"<td><input type='text' name='unit_read' value='{esc(read)}' aria-label='{'New unit' if n == 'new' else f'Unit {n}'} library search'></td></tr>"
+                for n, uid, title, read in fields)
             editor = (
-                "<h2>Edit course</h2><form method='post' class='card'>"
+                "<details class='panel' style='margin-top:24px'><summary><strong>Edit this course</strong></summary><form method='post'>"
                 f"<label for='title'>Title</label><input type='text' id='title' name='title' value='{esc(course['title'])}' required>"
                 f"<label for='description'>What it covers</label><input type='text' id='description' name='description' value='{esc(course.get('description', ''))}'>"
                 f"<label class='option'><input type='checkbox' name='comingSoon' value='1'{' checked' if course.get('comingSoon') else ''}> Coming later (shown greyed out)</label>"
-                "<table><tr><th>#</th><th>Unit title (clear it to remove an empty unit)</th><th>Library search for readings</th></tr>"
-                f"{rows}</table><button>Save course</button></form>"
+                "<div class='scroll'><table><tr><th>#</th><th>Unit title (clear it to remove an empty unit)</th><th>Library search for readings</th></tr>"
+                f"{lines}</table></div><button>Save course</button></form>"
                 + ("<p class='muted'>This course comes from the course file. Saving here keeps the hub's version from now on.</p>"
-                   if course.get("source") == "file" else "")
-            )
-        body = (
-            f"<p class='muted'>{esc(course.get('description', ''))}</p>"
-            f"<p>{_level_pill(summary['level'], summary['score'])} <a href='/comprehension/{esc(course['id']) or '_other'}'>"
-            "Comprehension by student</a></p>" + units_html + editor
-        )
-        return Response(self._page(course["title"], body))
+                   if course.get("source") == "file" else "") + "</details>")
+        action = (f"<span><a class='button secondary' href='/comprehension/{esc(course['id']) or '_other'}'>Class progress</a> "
+                  + (f"<a class='button' href='/assignments/new?course={esc(course['id'])}'>+ New assignment</a>" if cid != "_other" else "") + "</span>")
+        body = f"<p>{chip(summary)} <span class='small'>{summary['answered']} answers scored</span></p>" + units_html + editor
+        return Response(self._page(course["title"], body, current="courses", sub=course.get("description", ""), action=action))
 
     def course_update(self, req: Request) -> Response:
         cid = req.params["cid"]

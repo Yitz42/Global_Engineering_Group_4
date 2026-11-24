@@ -96,29 +96,36 @@ object Html {
     private const val MAX_PICS = 12
 
     fun hasPicture(key: String): Boolean = key in PICTURES
-    fun pictureName(key: String): String = PICTURES[key].asMap()?.get("n")?.toString() ?: key
+    fun pictureName(key: String, own: Map<String, Map<String, Any?>> = emptyMap(), lang: String = ""): String =
+        own[key]?.let { OwnPics.nameOf(it, lang) } ?: PICTURES[key].asMap()?.get("n")?.toString() ?: key
 
-    /** One drawing from the picture library, or "" when this version doesn't have it. */
-    fun picture(key: String, cls: String = ""): String {
+    fun pictureStroke(key: String): String = (PICTURES[key].asMap()?.get("s") ?: "#1a1a1a").toString()
+
+    fun picturePaths(key: String, fill: String? = null): String {
         val p = PICTURES[key].asMap() ?: return ""
-        val paths = (if (p["d"] != null) "<path d='${p["d"]}' fill='${p["f"]}'/>" else "") +
-            (if (p["x"] != null) "<path d='${p["x"]}' fill='none'/>" else "")
-        return "<svg class='pic${if (cls.isEmpty()) "" else " $cls"}' viewBox='0 0 24 24' stroke='${p["s"] ?: "#1a1a1a"}' aria-hidden='true'>$paths</svg>"
+        return (if (p["d"] != null) "<path d='${p["d"]}' fill='${fill ?: p["f"]}'/>" else "") + (if (p["x"] != null) "<path d='${p["x"]}' fill='none'/>" else "")
+    }
+
+    /** One drawing, from the picture library or the school's own (OwnPics.kt), or "" when there is none. */
+    fun picture(key: String, cls: String = "", own: Map<String, Map<String, Any?>> = emptyMap()): String {
+        own[key]?.let { return OwnPics.svg(it, cls) }
+        if (key !in PICTURES) return ""
+        return "<svg class='pic${if (cls.isEmpty()) "" else " $cls"}' viewBox='0 0 24 24' stroke='${pictureStroke(key)}' aria-hidden='true'>${picturePaths(key)}</svg>"
     }
 
     /** The pictures a question shows: "apple*3, ball" -> apple, apple, apple, ball (at most MAX_PICS). */
-    fun picturesOf(spec: String): List<String> = spec.split(",").flatMap { part ->
+    fun picturesOf(spec: String, own: Map<String, Map<String, Any?>> = emptyMap()): List<String> = spec.split(",").flatMap { part ->
         val key = part.trim().substringBefore('*')
         val count = part.trim().substringAfter('*', "").trim().toIntOrNull() ?: 1
-        if (key in PICTURES) List(count.coerceIn(1, MAX_PICS)) { key } else emptyList()
+        if (key in PICTURES || key in own) List(count.coerceIn(1, MAX_PICS)) { key } else emptyList()
     }.take(MAX_PICS)
 
     /** A question's pictures in a frame. Read aloud as the names of what is shown, never how many. */
-    fun picturesHtml(spec: String): String {
-        val keys = picturesOf(spec)
+    fun picturesHtml(spec: String, own: Map<String, Map<String, Any?>> = emptyMap(), lang: String = ""): String {
+        val keys = picturesOf(spec, own)
         if (keys.isEmpty()) return ""
-        val names = keys.distinct().joinToString(", ") { pictureName(it) }
-        return "<div class='pics n${keys.size}' role='img' aria-label='${esc(names)}'>${keys.joinToString("") { picture(it) }}</div>"
+        val names = keys.distinct().joinToString(", ") { pictureName(it, own, lang) }
+        return "<div class='pics n${keys.size}' role='img' aria-label='${esc(names)}'>${keys.joinToString("") { picture(it, own = own) }}</div>"
     }
 
     /** A line icon from the designs. Decorative: the words beside it carry the meaning. */

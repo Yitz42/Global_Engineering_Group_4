@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from . import assignments as asg
+from . import catalog as cat
 from . import comprehension as cmp
 from . import language as lang
 from .web import CSS, MATH_JS, Request, Response, esc, info_panel, page, redirect
@@ -86,6 +87,21 @@ details.qcard>summary{display:flex;align-items:center;gap:12px;padding:12px 16px
 strong.note{color:var(--badink);background:var(--badbg);border-radius:6px;padding:1px 8px;font-weight:600;font-size:15px}
 details.why summary{cursor:pointer;color:var(--accent);font-size:14px}button.tiny{margin:0;padding:7px 10px;font-size:14px;white-space:nowrap}
 @media (max-width:600px){.qin{padding-left:16px}}
+.bigpics{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:12px}.bigpics button{display:flex;flex-direction:column;align-items:center;gap:4px;margin:0;padding:12px 6px 8px;border-radius:14px;background:var(--card);border:1px solid var(--line);color:var(--ink);font-weight:400;font-size:14px;overflow-wrap:anywhere}
+.bigpics button[aria-pressed=true]{border:2px solid var(--accent)}.bigpics svg.pic{width:64px;height:64px}.bigpics .more{grid-column:1/-1;color:var(--accent);font-weight:600;padding:12px}
+#detail .art.big{display:flex;justify-content:center;padding:14px;border-radius:12px;background:#fff8ec;margin-bottom:10px}#detail .art.big svg.pic{width:140px;height:140px}#detail h2{font-size:20px}.pr{display:flex;justify-content:space-between;gap:12px;font-size:15px;padding:2px 0}.pr span:last-child{text-align:right}
+.button.wide,button.wide{display:block;width:100%;text-align:center;margin:8px 0 0;flex:none}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;margin-bottom:12px}button.tool{display:flex;align-items:center;justify-content:center;width:44px;height:44px;margin:0;padding:0;border:1px solid var(--line);background:#fff;color:#1d1d1b;border-radius:10px}button.tool.round{border-radius:22px;border:2px solid #fff;box-shadow:0 0 0 1px #9a9a94}button.tool[aria-pressed=true]{box-shadow:0 0 0 3px var(--accent)}button.tool.text{width:auto;padding:0 14px}button.tool i{border-radius:50%;background:#1d1d1b}
+.answerbtn{display:flex;align-items:center;gap:14px;min-height:84px;margin-top:8px;padding:10px 14px;border-radius:18px;border:3px solid #1a1a1a;background:#fff;color:#1a1a1a;font-size:22px;overflow-wrap:anywhere}.answerbtn svg{flex:none;background:#f1f1f1;border-radius:14px}
+.sizebar{display:block;height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:6px 0}.sizebar span{display:block;height:100%;width:0;background:var(--good)}.sizebar.mid span{background:var(--warn)}.sizebar.big span{background:var(--bad)}
+.lessoncard{display:flex;flex-direction:column;gap:8px;padding:16px;margin-bottom:12px;background:var(--card);border:1px solid var(--line);border-radius:14px}.lessoncard .row{display:flex;align-items:center;gap:12px}.lessoncard .dot2{flex:none;width:12px;height:12px;border-radius:6px;background:var(--muted)}.lessoncard.ok .dot2{background:var(--good)}.lessoncard.ok .st{color:var(--good)}.lessoncard.sending .dot2{background:var(--accent)}.lessoncard.behind{background:var(--warnbg);border:2px solid var(--warnline)}.lessoncard.behind .dot2{background:var(--warn)}.lessoncard.behind .st{color:var(--warnink)}
+.acts{display:flex;flex-wrap:wrap;gap:8px}.acts form{margin:0}a.button.tiny{padding:7px 10px;font-size:14px;margin:0}
+.cardsteps{display:flex;flex-wrap:wrap;gap:16px;list-style:none;padding:0;margin:0 0 14px}.cardsteps li{display:flex;align-items:center;gap:8px;color:var(--muted)}.cardsteps li[aria-current]{color:var(--ink);font-weight:700}.cardsteps span{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:14px;background:var(--soft);font-weight:700}.cardsteps li[aria-current] span{background:var(--accent);color:var(--accent-ink)}
+.trsum{display:flex;flex-direction:column;gap:6px;padding:14px 16px}.trsum .row{display:flex;justify-content:space-between;gap:8px}.trsum.some{border:2px solid var(--warnline)}
+table.trgrid{width:100%}table.trgrid td{min-width:220px}table.trgrid td:first-child{min-width:0;width:34px;color:var(--muted)}table.trgrid textarea{min-height:0;margin-bottom:6px;background:var(--bg)}table.trgrid input[type=text]{margin-bottom:6px;padding:7px 10px}.tro{margin:4px 0;padding:6px 10px;border:1px solid var(--line);border-radius:8px}
+.voice>div{flex-wrap:wrap}.voice .grow strong{font-size:18px;font-weight:600}.voice .level{flex:0 0 90px;height:8px;padding:0;border-radius:4px;background:var(--line);overflow:hidden;visibility:hidden}.voice .level.on{visibility:visible}.voice .level i{display:block;height:100%;width:0;background:#c0392b}.voice .acts{flex:0 1 auto}.voice label.button{margin:0}button.rec{background:#9b2c20;color:#fff;border-color:#9b2c20}button.danger{background:#c0392b;color:#fff;border-color:#c0392b}
+.classlang>div{flex-wrap:wrap}.classlang select{padding:7px}aside.col label{margin-top:10px}
+label.cardpick{display:flex;align-items:center;gap:12px;margin:0;padding:12px 0;border-bottom:1px solid var(--line);font-weight:400}label.cardpick>input{flex:none;width:20px;height:20px}
 .score{font-weight:700;white-space:nowrap}
 .tomark{font-size:14px;font-weight:600;color:var(--warnink);white-space:nowrap}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
@@ -120,16 +136,16 @@ table.plain{background:var(--card);border:1px solid var(--line);border-radius:14
 table.plain th{font-size:14px;color:var(--muted);font-weight:600}
 table.plain tr:last-child td{border-bottom:0}
 @media (max-width:760px){.shell{flex-direction:column}.side{position:static;height:auto;flex:none;border-right:0;border-bottom:1px solid var(--line);padding:12px}
-.side nav{flex-direction:row;flex-wrap:wrap}.brand{padding:0 6px 8px}.radiobox{margin-top:8px}.content{padding:16px;width:100%}table.plain{display:block;overflow-x:auto}}
+.side nav{flex-direction:row;flex-wrap:wrap}.brand{padding:0 6px 8px}.radiobox{margin-top:8px}.content{padding:16px;width:100%}table.plain{display:block;overflow-x:auto}.voice .level:not(.on){display:none}}
 """
 
 # The sidebar, in the designs' order. (key, label, link)
 NAV = [("today", "Today", "/"), ("marking", "Marking", "/marking"), ("assignments", "Assignments", "/assignments"),
-       ("students", "Students", "/students"), ("class", "Class progress", "/comprehension"), ("courses", "Courses", "/courses"),
+       ("pictures", "Pictures", "/pictures"), ("students", "Students", "/students"), ("class", "Class progress", "/comprehension"), ("courses", "Courses", "/courses"),
        ("phones", "Phones and radio", "/phones"), ("library", "Library", "/library"), ("language", "Language", "/language")]
 _TITLE_TO_NAV = {"Today": "today", "Welcome": "today", "Marking": "marking", "Assignments": "assignments",
                  "New assignment": "assignments", "Edit assignment": "assignments", "Class progress": "class",
-                 "Courses": "courses", "Students": "students", "Phones and radio": "phones", "Card library": "library",
+                 "Courses": "courses", "Pictures": "pictures", "Students": "students", "Phones and radio": "phones", "Card library": "library",
                  "Copy to memory card": "library", "Copying to the card": "library", "School language": "language"}
 
 QUIET_S = 24 * 3600   # a phone not heard for a day needs a look
@@ -316,7 +332,7 @@ class HubUI:
                         f"{esc(a['title'] if a else s['assignment_id'])}</strong><span class='small'>"
                         f"{esc(names.get(s['phone'], s['phone']))} · {esc(ago(s['received_at']))}</span></span>{right}</a>")
         body = (
-            notice
+            notice + self._offline_panel()
             + f"<section aria-labelledby='needs'><h2 id='needs'>Needs you</h2><div class='cards'>{cards}</div></section>"
             + "<div class='cols'>"
             + "<section aria-labelledby='crs'><h2 id='crs'>Courses</h2>"
@@ -330,6 +346,24 @@ class HubUI:
         date = datetime.date.today().strftime("%A %d %B").replace(" 0", " ")
         return Response(self._page("Today", body, sub=date,
                                    action="<a class='button' href='/assignments/new'>+ New assignment</a>"))
+
+    def _offline_panel(self) -> str:
+        """When the radio is away: what is waiting, how to fix it, and what still works."""
+        ok, head, _ = self._radio_state()
+        if ok:
+            return ""
+        waiting = self.messenger.status().get("pending", 0)
+        last = self.db.one("SELECT MAX(last_seen) AS at FROM phones")["at"]
+        return (f"<section class='panel look' aria-labelledby='off' style='margin-bottom:16px'><h2 id='off'>{esc(head)}</h2>"
+                + (f"<p>{_plural(waiting, 'message')} {'is' if waiting == 1 else 'are'} waiting here. {'It goes' if waiting == 1 else 'They go'} out by "
+                   f"{'itself' if waiting == 1 else 'themselves'} once it's back.</p>" if waiting else "")
+                + "<div class='cols'><div class='col' style='flex:1 1 280px'><strong>How to fix it</strong><ol style='margin:4px 0;padding-left:20px'>"
+                "<li>Plug the radio into this laptop by USB, and check its light.</li><li>Try another USB cable: some only charge.</li>"
+                "<li>Close this hub's window and start it again.</li></ol></div>"
+                "<div class='col' style='flex:1 1 280px'><strong>Still works without the radio</strong><ul style='margin:4px 0;padding-left:20px'>"
+                "<li>Writing and changing assignments</li><li>Marking what already arrived</li>"
+                "<li><a href='/phones/lessons'>Copying lessons to a phone at school</a></li><li><a href='/phones/card'>Filling memory cards</a></li></ul></div></div>"
+                + (f"<p class='small'>Last heard from a phone: {esc(ago(last))}. Phones keep new answers safe until the radio is back.</p>" if last else "") + "</section>")
 
     def _first_day(self) -> str:
         phones = self.db.one("SELECT COUNT(*) AS n FROM phones")["n"]
@@ -419,7 +453,11 @@ class HubUI:
         qn = [x["id"] for x in a["questions"]].index(q["id"]) + 1
         said = json.loads(s["answers"]).get(q["id"], "").strip()
         unsure, _ = asg.read_signals(a, json.loads(s["signals"] or "{}"))
-        doubt = " <span class='tomark'>not sure</span>" if q["id"] in unsure else ""
+        if s["lang"]:
+            said_in = f" <span class='small'>in {esc(cat.language_name(s['lang']))}</span>"
+        else:
+            said_in = ""
+        doubt = said_in + (" <span class='tomark'>not sure</span>" if q["id"] in unsure else "")
         note = json.loads(s["notes"] or "{}").get(q["id"], "")
         points = q["points"]
         steps = [float(n) for n in range(int(points) + 1)]
@@ -428,7 +466,7 @@ class HubUI:
         marks = "".join(
             f"<label><input type='radio' name='mark' value='{m:g}' required><span>{m:g}</span></label>" for m in steps)
         model = (f"<div class='model'><strong>Your model answer:</strong> {esc(q['model'])}</div>" if q.get("model") else "")
-        info = info_panel(q)
+        info = info_panel(q, self.own_pictures())
         body = (
             notice + "<div class='cols'>"
             f"<section class='col' aria-label='Answers to mark' style='flex:1 1 260px'><div class='list'>{queue}</div></section>"
@@ -581,7 +619,7 @@ class HubUI:
                       f"<span class='grow' style='flex:1 1 200px'><strong style='font-size:18px'>{esc(p['name'])}</strong>"
                       f"<span class='small'>{esc(line)} · {esc(p['node_id'])}</span></span>"
                       f"<span class='right'><span>{_plural(n_wait, 'message') + ' waiting' if n_wait else 'Nothing waiting'}</span>"
-                      f"<span>{esc(pack)}</span></span>{tip}</div>")
+                      f"<a href='/phones/lessons'>{esc(pack)}</a></span>{tip}</div>")
         if not cards:
             cards = ("<div class='panel'><strong>No phones yet.</strong><p class='muted' style='margin:4px 0 0'>A phone appears "
                      "here by itself the first time it reaches this hub. Set it up with the radio id on the right.</p></div>")
@@ -609,7 +647,7 @@ class HubUI:
             f"<p class='code' style='margin:10px 0 2px'>{esc(node or '!........')}</p>"
             + (f"<p class='small' style='margin:0'>channel <strong>{channel}</strong></p>" if channel is not None else "")
             + self._setup_qr(req)
-            + "</section>"
+            + "<a class='button secondary' href='/phones/setup-card'>Print setup card</a></section>"
         )
         add = ("<details class='panel' style='margin-top:12px'><summary style='cursor:pointer;font-weight:600'>Add a phone by hand"
                "</summary><form method='post' action='/phones'><label for='name'>Name (the village or family)</label>"
@@ -623,7 +661,7 @@ class HubUI:
                 f"folder.</p><p class='small'>{self.language_summary()}. Phones get it with the lessons.</p>"  # already HTML
                 "<a class='button' href='/pack.zip'>Download course pack</a></section>")
         students = self.db.one("SELECT COUNT(DISTINCT student) AS n FROM submissions")["n"]
-        body = (f"<div class='cols'><div class='col wide'>{cards}{radio}</div>"
+        body = (self.phone_tabs("radio") + f"<div class='cols'><div class='col wide'>{cards}{radio}</div>"
                 f"<aside class='col' style='flex:1 1 280px'>{setup}{add}{pack}</aside></div>")
         return Response(self._page("Phones and radio", body,
                                    sub=f"{_plural(len(phones), 'community phone')} · {_plural(students, 'student')}"))

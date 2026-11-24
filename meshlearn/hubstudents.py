@@ -45,6 +45,8 @@ class HubStudents:
             row = {"n": s["name"], "p": s["pic"], "a": s["ages"]}
             if ways[s["ages"]] in ("secret", "pin"):
                 row["s"] = secret_hash(s["name"], s["pin"] if ways[s["ages"]] == "pin" else s["secret"])
+            if s["lang"]:
+                row["l"] = s["lang"]
             rows.append(row)
         out = self.setting("signout")
         return {"students": rows, "signin": ways, "signout": int(out) if out.isdigit() else 10}
@@ -85,11 +87,11 @@ class HubStudents:
         def options(pairs, chosen):
             return "".join(f"<option value='{v}'{' selected' if v == chosen else ''}>{esc(t)}</option>" for v, t in pairs)
 
-        ways_form = "<form method='post' action='/students/ways' class='card grid'>" + "".join(
+        ways_form = "<form method='post' action='/students/ways' class='panel'><h2 style='margin-top:0'>How they sign in</h2>" + "".join(
             f"<div><label for='way_{a}'>{esc(t)}</label><select id='way_{a}' name='{a}'>{options(WAYS[a], ways[a])}</select></div>" for a, t in AGES) + (
             f"<div><label for='signout'>Sign out after</label><select id='signout' name='signout'>{options(SIGNOUTS, self.setting('signout') or '10')}</select></div>"
-            "<div><label>&nbsp;</label><button class='secondary'>Save</button></div></form>")
-        add = ("<form method='post' action='/students/add' class='card'><label for='names'>Add students, one name per line</label>"
+            "<button class='secondary'>Save</button></form>")
+        add = ("<form method='post' action='/students/add' class='panel' id='add'><h2 style='margin-top:0'>Add students</h2><label for='names'>Names, one per line</label>"
                "<textarea id='names' name='names' rows='4' placeholder='Amara Osei&#10;Kofi Asante'></textarea>"
                f"<label for='ages'>Their age group</label><select id='ages' name='ages'>{options(AGES, 'mid')}</select>"
                "<button>Add students</button></form>")
@@ -113,25 +115,30 @@ class HubStudents:
         fresh = ""
         for r in self.new_names():
             same = "".join(f"<option>{esc(s['name'])}</option>" for s in rows_data)
-            fresh += (f"<div class='card'><strong>{esc(r['name'])}</strong> <span class='muted'>· {esc(names.get(r['phone'], r['phone']))} · "
+            fresh += (f"<div class='phonecard quiet' style='display:block'><strong>{esc(r['name'])}</strong> <span class='muted'>· {esc(names.get(r['phone'], r['phone']))} · "
                       f"{r['n']} piece{'' if r['n'] == 1 else 's'} of work</span>"
                       "<form method='post' action='/students/link' class='inline'>"
                       f"<input type='hidden' name='name' value='{esc(r['name'])}'><select name='ages' aria-label='Age group'>{options(AGES, 'mid')}</select>"
                       "<button name='do' value='add'>Add as new student</button>"
                       f"<select name='same' aria-label='Same as'>{same}</select><button name='do' value='same' class='secondary'>Same as this student</button>"
                       "<button name='do' value='ignore' class='secondary'>Not a student</button></form></div>")
-        body = (
-            (f"<p class='good' role='status'>{esc(msg)}</p>" if msg else "")
-            + ("" if rows_data else "<p>Add your class and students pick themselves on the phone, by picture or name, instead of typing. "
+        main = (
+            ("" if rows_data else "<p>Add your class and students pick themselves on the phone, by picture or name, instead of typing. "
                "Without a list, they type their name as before.</p>")
             + (f"<h2>New names from phones</h2>{fresh}" if fresh else "")
-            + (f"<h2>Class list</h2><table>{rows}</table><p><a class='button secondary' href='/students/cards'>Print picture cards</a></p>" if rows else "")
-            + "<h2>Add students</h2>" + add + "<h2>How they sign in</h2>" + ways_form
-            + "<p class='muted'>The list reaches phones with their next lesson copy, over Wi-Fi or on the memory card. It holds names, pictures "
+            + (f"<table class='plain'>{rows}</table>" if rows else ""))
+        if not rows_data:
+            main += add
+        side = ((add if rows_data else "") + ways_form
+            + "<p class='small'>The list reaches phones with their next lesson copy, over Wi-Fi or on the memory card. It holds names, pictures "
             "and scrambled secrets. Secrets and PINs keep classmates honest; they are not strong protection. Changing a name here also "
             "renames that student's work.</p>"
         )
-        return Response(self._page("Students", body, sub=f"{len(rows_data)} on the class list" if rows_data else ""))
+        body = ((f"<div class='notice' role='status'>{esc(msg)}</div>" if msg else "")
+                + f"<div class='cols'><div class='wide'>{main}</div><aside class='col' style='flex:1 1 300px'>{side}</aside></div>")
+        action = ("<span><a class='button secondary' href='/students/cards'>Print picture cards</a> <a class='button' href='#add'>Add students</a></span>"
+                  if rows_data else "")
+        return Response(self._page("Students", body, sub=f"{len(rows_data)} on the class list" if rows_data else "", action=action))
 
     def students_ways(self, req: Request) -> Response:
         for a, _ in AGES:

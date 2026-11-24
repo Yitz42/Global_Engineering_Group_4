@@ -45,7 +45,8 @@ class PhoneSignIn:
     def _load_roster(self, data: dict) -> None:
         rows = data.get("students") if isinstance(data.get("students"), list) else []
         self.roster: List[dict] = [
-            {"n": r["n"], "p": r.get("p", ""), "a": r.get("a") if r.get("a") in ("young", "mid", "teen") else "mid", "s": r.get("s", "")}
+            {"n": r["n"], "p": r.get("p", ""), "a": r.get("a") if r.get("a") in ("young", "mid", "teen") else "mid", "s": r.get("s", ""),
+             "l": r.get("l") if isinstance(r.get("l"), str) else ""}
             for r in rows if isinstance(r, dict) and isinstance(r.get("n"), str) and r["n"]]
         ways = data.get("signin") if isinstance(data.get("signin"), dict) else {}
         self.signin = {"young": ways.get("young", "pic"), "mid": ways.get("mid", "list"), "teen": ways.get("teen", "list")}

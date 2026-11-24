@@ -66,9 +66,38 @@ object Assignments {
             val info = q["info"]?.toString() ?: ""   // several questions about one text: it travels once, then 1 = "the same again"
             if (info.isNotEmpty()) cq["n"] = if (info == infoBefore) 1L else info
             infoBefore = info
+            packTr(q["tr"]).takeIf { it.isNotEmpty() }?.let { cq["x"] = it }
             questions.add(cq)
         }
         out["Q"] = questions
+        packTr(assignment["tr"]).takeIf { it.isNotEmpty() }?.let { out["X"] = it }
+        return out
+    }
+
+    /** Translations without their stamps, and nothing empty. */
+    private fun packTr(tr: Any?): Map<String, Any?> = (tr.asMap() ?: emptyMap()).mapValues { (_, t) ->
+        (t.asMap() ?: emptyMap()).filter { (k, v) -> k != "s" && truthy(v) }
+    }.filterValues { it.isNotEmpty() }
+
+    /** The assignment as a student of this language sees it: translated where it can be, the original elsewhere. */
+    fun localized(assignment: Map<String, Any?>, code: String): MutableMap<String, Any?> {
+        val out = LinkedHashMap(assignment)
+        val top = assignment["tr"].asMap()?.get(code).asMap() ?: emptyMap()
+        val qs = questions(assignment)
+        if (top.isEmpty() && qs.none { it["tr"].asMap()?.containsKey(code) == true }) return out
+        fun text(v: Any?): String? = (v as? String)?.takeIf { it.isNotEmpty() }
+        text(top["T"])?.let { out["title"] = it }
+        if (truthy(assignment["instructions"])) text(top["I"])?.let { out["instructions"] = it }
+        out["questions"] = qs.map { original ->
+            val q = LinkedHashMap(original)
+            val t = original["tr"].asMap()?.get(code).asMap() ?: emptyMap()
+            text(t["p"])?.let { q["prompt"] = it }
+            if (truthy(q["info"])) text(t["n"])?.let { q["info"] = it }
+            val done = t["o"].asList()
+            val options = q["options"].asList()
+            if (done != null && options != null) q["options"] = options.mapIndexed { j, o -> text(done.getOrNull(j)) ?: o }
+            q
+        }
         return out
     }
 
@@ -96,9 +125,11 @@ object Assignments {
             val info = (cq["n"] as? String) ?: if (truthy(cq["n"])) infoBefore else ""
             if (info.isNotEmpty()) q["info"] = info
             infoBefore = info
+            cq["x"].asMap()?.let { q["tr"] = it }
             questions.add(q)
         }
         out["questions"] = questions
+        packed["X"].asMap()?.let { out["tr"] = it }
         for (key in OPTIONAL_TOP) if (!truthy(out[key])) out.remove(key)
         return out
     }

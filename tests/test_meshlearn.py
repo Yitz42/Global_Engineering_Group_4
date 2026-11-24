@@ -7,7 +7,9 @@ import contextlib
 import functools
 import http.server
 import io
+import base64
 import json
+import re
 import os
 import shutil
 import socket
@@ -15,6 +17,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import types
 import unittest
 import urllib.error
 import urllib.parse
@@ -24,7 +27,8 @@ from http.cookiejar import CookieJar
 from unittest import mock
 
 from meshlearn import assignments as asg
-from meshlearn import catalog, comprehension, courses, kolibri, library, protocol, radioports
+from html import escape as html_escape
+from meshlearn import catalog, comprehension, courses, hublessons, kolibri, library, ownpics, protocol, radioports, voices
 from meshlearn.hub import Hub
 from meshlearn.messenger import Messenger
 from meshlearn.phone import Phone
@@ -571,6 +575,366 @@ class ZipAppTests(unittest.TestCase):
         item = channel.selection_item(channel.node("add"), case.hub.catalog.entries[0])
         sim = next(d for d in item["details"] if d["title"] == "Sim")
         self.assertEqual((sim["kind"], sim["credit"]), ("zip", kolibri.PHET_CREDIT))
+
+
+class OwnPictureTests(unittest.TestCase):
+    """Pictures a school makes itself, from the drawing page to the phone, by Wi-Fi, card and radio."""
+
+    LINES = [(1, 1, [(80, 200), (80, 50), (160, 50)]), (0, 2, [(120, 120)])]
+    JPEG = base64.b64encode(b"\xff\xd8\xff" + b"x" * 300).decode()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        self.hub.add_phone("p1", "North village")
+
+    def phone(self, name="phone"):
+        return Phone(os.path.join(self.tmp, name), "hub", "P", lambda h: _QuietRadio())
+
+    def call(self, path, method="GET", body=b"", app=None, **headers):
+        path, _, query = path.partition("?")
+        return (app or self.hub.app).dispatch(Request(method, path, dict(urllib.parse.parse_qsl(query)), headers, body, "127.0.0.1"))
+
+    def post_json(self, path, data):
+        resp = self.call(path, "POST", json.dumps(data).encode())
+        return resp.status, json.loads(resp.body)
+
+    def test_drawings_are_small_and_the_same_on_both_phones(self):
+        code = ownpics.encode(self.LINES)
+        self.assertEqual(code, "11DpD7a7 02RR")   # the Android test has the same one
+        self.assertEqual([(c, w, len(p)) for c, w, p in ownpics.strokes(code)], [(1, 1, 3), (0, 2, 1)])
+        for (_, _, got), (_, _, want) in zip(ownpics.strokes(code), self.LINES):
+            self.assertTrue(all(abs(a - b) <= 2 for g, w in zip(got, want) for a, b in zip(g, w)))
+        self.assertEqual(ownpics.svg({"n": "door", "s": code}, "", {}, str),
+                         "<svg class='pic own' viewBox='0 0 240 240' aria-hidden='true'><path d='M81 201L81 50L159 50' fill='none' stroke='#8a4b1c' "
+                         "style='stroke-width:8'/><path d='M120 120l.1 0' fill='none' stroke='#1d1d1b' style='stroke-width:14'/></svg>")
+        self.assertNotIn("<script", ownpics.svg(ownpics.clean({"n": "<script>x", "s": "zz"}, {}), "", {}, html_escape))
+
+    def test_bad_pictures_are_refused(self):
+        good = {"n": "door", "s": "11AABB"}
+        for bad in (None, [], {"s": "11AA"}, {"n": " "}, dict(good, b="no-such-picture"), {"n": "x", "j": "AAAA"}, {"n": "x", "j": "<svg>"},
+                    {"n": "x", "j": base64.b64encode(b"\xff\xd8\xff" + b"x" * 30000).decode()}):
+            self.assertIsNone(ownpics.clean(bad, {"goat": {}}), bad)
+        self.assertEqual(ownpics.clean({"n": " our  well ", "l": {"por": "o poço", "X": "no", "deu": 3}, "s": "11AA 99ZZ 1 11'A 11A", "b": "goat", "f": "red", "z": 1},
+                                       {"goat": {}}), {"n": "our well", "l": {"por": "o poço"}, "b": "goat", "s": "11AA"})
+        self.assertEqual(self.post_json("/api/pictures", {"n": "x"})[0], 400)      # nothing drawn
+        self.assertEqual(self.post_json("/api/pictures", {"n": "x", "s": "11AA", "size": True})[1]["frames"], 1)
+        self.assertEqual(self.hub.own_pictures(), {})                              # measuring saves nothing
+
+    def lesson(self, key, photo=""):
+        return self.hub.create_assignment({"id": "a-pic", "title": "Wells", "questions": [
+            {"type": "choice", "prompt": "Which?", "options": ["A", "B"], "answer": 0, "pic": f"{key}*2, goat", "opic": [photo or key, "goat"]}]})
+
+    def test_wifi_card_and_radio(self):
+        key = self.post_json("/api/pictures", {"n": "our well", "l": {"por": "o nosso poço"}, "s": ownpics.encode(self.LINES)})[1]["key"]
+        photo = self.post_json("/api/pictures", {"n": "market", "j": self.JPEG})[1]["key"]
+        self.assertRegex(key, r"^my-our-well-[0-9a-f]{4}$")
+        self.lesson(key, photo)
+        packed = self.hub.packed_for_phone("a-pic")
+        self.assertEqual(packed["Px"][photo], {"n": "market"})                     # a photo never goes by radio, only its name
+        self.assertIn("s", packed["Px"][key])
+        self.assertEqual(asg.version_of(asg.unpack(packed)), self.hub.current_version("a-pic"))
+        self.assertNotIn("Px", self.hub.course_pack()[0])                          # a pack carries them once
+        radio = self.phone("radio")
+        radio.on_message(protocol.Message(1, protocol.ASSIGN, {"a": packed, "o": 1}, "hub"))
+        html = self.call("/a/a-pic", app=radio.app, Cookie="student=Ana").body.decode()
+        self.assertEqual(html.count("M81 201L81 50L159 50"), 2)
+        self.assertIn(">market</text>", html)                                      # its name until the photo is copied
+        self.assertIn("aria-label='our well, Goat'", html)
+        pack = json.loads(self.call("/api/pack?node=p1&name=N").body)
+        radio.import_pictures(pack["pictures"])
+        self.assertIn("data:image/jpeg;base64,", self.call("/a/a-pic", app=radio.app, Cookie="student=Ana").body.decode())
+        radio.import_assignment(packed)                                            # the lesson again by radio
+        self.assertIn("j", radio.own[photo])                                       # the photo stays
+        self.assertIn(photo, self.phone("radio").own)                              # and after a restart
+        card = os.path.join(self.tmp, "card")
+        with zipfile.ZipFile(io.BytesIO(self.hub.course_pack_zip())) as z:
+            z.extractall(card)
+        self.assertEqual(set(Phone(card, "hub", "P", lambda h: _QuietRadio()).own), {key, photo})
+        radio.import_pictures({"goat": {"n": "x", "s": "11AA"}, "my-../x": {"n": "x", "s": "11AA"}, "my-ok": {"n": "y", "s": "<"}})
+        self.assertEqual(set(radio.own) - {key, photo}, {"my-ok"})
+
+    def test_pages(self):
+        self.assertIn("289 on every phone", self.call("/pictures").body.decode())
+        self.assertIn("Radio size", self.call("/pictures/draw?from=goat").body.decode())
+        self.assertIn("Use a photo", self.call("/pictures/add").body.decode())
+        key = self.post_json("/api/pictures", {"n": "</script>well", "b": "goat", "f": "#112233"})[1]["key"]
+        page = self.call("/pictures?pick=" + key).body.decode()
+        self.assertIn("Made by you", page)
+        self.assertNotIn("</script>well", page)
+        self.assertIn("#112233", self.call("/pictures/buttons").body.decode())
+        self.assertIn(key, self.call("/assignments/new?pic=" + key).body.decode())
+        self.lesson(key)
+        self.assertIn("pic own mini", self.call("/assignments/a-pic").body.decode())
+        self.call("/pictures/delete", "POST", ("key=" + key).encode())
+        self.assertIn(key, self.hub.own_pictures())                                # it is in use
+        self.hub.db.execute("DELETE FROM assignments")
+        self.call("/pictures/delete", "POST", ("key=" + key).encode())
+        self.assertEqual(self.hub.own_pictures(), {})
+
+
+class PhoneLessonsTests(unittest.TestCase):
+    """What each phone has, sending what it lacks, filling a card, and languages in the class."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        for node, name in (("p1", "North village"), ("p2", "Hill farm")):
+            self.hub.add_phone(node, name)
+        for n in range(3):
+            self.hub.create_assignment({"id": f"a{n}", "title": f"Lesson {n}", "questions": [{"type": "text", "prompt": "Q?", "accept": ["x"]}]})
+
+    def call(self, path, method="GET", form=None, ip="127.0.0.1"):
+        path, _, query = path.partition("?")
+        return self.hub.app.dispatch(Request(method, path, dict(urllib.parse.parse_qsl(query)), {"Host": "192.168.1.5:8000"},
+                                             urllib.parse.urlencode(form or {}, doseq=True).encode(), ip))
+
+    def test_lessons_on_each_phone(self):
+        json.loads(self.call("/api/pack?node=p1&name=North+village").body)
+        html = self.call("/phones/lessons").body.decode()
+        self.assertIn("3 of 3 · copied by Wi-Fi", html)
+        self.assertIn("Up to date", html)
+        self.assertIn("Empty", html)
+        self.hub.record_inventory("p2", {"a0": self.hub.current_version("a0")}, complete=True)
+        html = self.call("/phones/lessons").body.decode()
+        self.assertIn("2 lessons behind", html)
+        sent = []
+        self.hub.messenger.send = lambda dest, kind, payload: sent.append((dest, kind, payload)) or len(sent)
+        self.call("/phones/lessons/send", "POST", {"node": "p2"})
+        self.assertEqual([(d, k, p["a"]["i"], p["o"]) for d, k, p in sent], [("p2", protocol.ASSIGN, "a1", 0), ("p2", protocol.ASSIGN, "a2", 0)])
+        self.hub.messenger.message_status = lambda i: "pending"
+        self.assertIn("Sending by radio", self.call("/phones/lessons").body.decode())
+        self.assertEqual(self.call("/phones/lessons/send", "POST", {"node": "nope"}).status, 303)
+        self.assertIn("!", self.call("/phones/setup-card").body.decode())
+
+    def test_filling_a_card(self):
+        dest = os.path.join(self.tmp, "SD", "Android", "data", "org.meshlearn.phone", "files", "meshlearn")
+        os.makedirs(os.path.join(self.tmp, "SD"))
+        with mock.patch.object(hublessons, "removable_drives", return_value=[os.path.join(self.tmp, "SD")]):
+            page = self.call("/phones/card?node=p2").body.decode()
+            self.assertIn("No MeshLearn folder on it yet", page)
+            self.assertNotIn("name='dest' checked", re.sub(r"value='[^']*'", "", page).replace("  ", " "))   # an unknown drive is never chosen for you
+            self.assertIn("Hill farm", page)
+            self.assertIn("hub laptop itself", self.call("/phones/card?node=p2", ip="192.168.1.9").body.decode())
+        self.call("/phones/card", "POST", {"node": "p2", "dest": dest}, ip="192.168.1.9")     # only from the laptop the card is in
+        self.assertFalse(os.path.exists(dest))
+        self.call("/phones/card", "POST", {"node": "p2", "dest": "relative/folder"})
+        self.call("/phones/card", "POST", {"node": "p2", "dest": "other", "other": ""})
+        self.assertIsNone(self.hub.card_job)
+        self.call("/phones/card", "POST", {"node": "p2", "dest": dest})
+        self.assertTrue(os.path.exists(os.path.join(dest, "assignments", "a0.json")))
+        self.assertIn("The card is ready", self.call("/phones/card").body.decode())
+        self.assertIn("A card was filled for it", self.call("/phones/lessons").body.decode())
+        phone = Phone(dest, "hub", "Hill farm", lambda h: _QuietRadio())
+        self.assertEqual(len(phone.inventory()), 3)
+        self.hub.select_item({"key": "k|x", "title": "Stories", "label": "Books", "folder": "books", "kind": "txt", "lang": "eng", "license": "CC",
+                              "size": 4, "files": [["http://x/s.txt", "s.txt"]]})
+        with mock.patch.object(library, "download", side_effect=lambda url, path, size, **k: open(path, "wb").write(b"text")):
+            self.call("/phones/card", "POST", {"node": "p2", "dest": dest, "item": ["k|x"]})
+            self.hub.download_job.join(10)
+        self.assertTrue(os.path.exists(os.path.join(dest, "library", "books", "s.txt")))
+        self.assertIn("1 collection", self.call("/phones/card").body.decode())
+        with mock.patch.object(library, "download") as never:
+            self.call("/phones/card", "POST", {"node": "p2", "dest": dest})                    # unticked: no books
+            never.assert_not_called()
+
+    def test_place_exists(self):
+        self.assertTrue(hublessons.place_exists(os.path.join(self.tmp, "a", "b")))
+        self.assertFalse(hublessons.place_exists(""))
+        self.assertFalse(hublessons.place_exists("a/b"))
+
+    def test_languages_in_the_class(self):
+        hub = self.hub
+        hub.set_setting("lang", "eng")
+        hub.set_setting("lang2", "swa")
+        hub.add_student("Amara", "mid")
+        hub.add_student("Kofi", "mid")
+        self.call("/language/class", "POST", {"lang:Amara": "swa", "lang:Kofi": "xyz", "lang:Nobody": "swa"})
+        self.assertEqual({s["name"]: s["lang"] for s in hub.students()}, {"Amara": "swa", "Kofi": ""})
+        sent = []
+        radio = _QuietRadio()
+        radio.send = lambda dest, kind, payload: sent.append((kind, payload)) or 1
+        phone = Phone(os.path.join(self.tmp, "phone"), "hub", "P", lambda h: radio)
+        phone.import_language(hub.language_bundle())
+        phone.import_assignment(hub.packed_for_phone("a0"), open_=True)
+        def lang(cookie):
+            return re.search("<html lang='([a-z]+)'", phone.app.dispatch(Request("GET", "/", {}, {"Cookie": cookie}, b"", "1.1.1.1")).body.decode()).group(1)
+        self.assertEqual((lang("student=Amara"), lang("student=Kofi"), lang("")), ("sw", "en", "en"))
+        resp = phone.app.dispatch(Request("POST", "/lang", {}, {"Cookie": "student=Kofi"}, b"to=swa&back=/", "1.1.1.1"))
+        self.assertNotIn("Set-Cookie", resp.headers)                                           # the choice is Kofi's, not the shared phone's
+        self.assertEqual((lang("student=Kofi"), lang("student=Zoe")), ("sw", "en"))
+        self.assertEqual(lang("lang=swa"), "sw")                                               # before signing in
+        phone = Phone(os.path.join(self.tmp, "phone"), "hub", "P", lambda h: radio)
+        self.assertEqual(lang("student=Kofi"), "sw")                                           # after a restart
+        phone.app.dispatch(Request("POST", "/a/a0", {}, {"Cookie": "student=Kofi"}, b"q1=x", "1.1.1.1"))
+        phone.flush_submissions(force=True)
+        item = [p for k, p in sent if k == protocol.SUBMIT][-1]["s"][0]
+        self.assertEqual(item["l"], "swa")
+        hub.on_message(protocol.Message(1, protocol.SUBMIT, {"s": [item, dict(item, id="s2", u="Zoe", l="<b>")]}, "p1"))
+        html = self.call("/language/class").body.decode()
+        self.assertIn("Picked on the phone", html)
+        self.assertIn("Set by you", html)
+        self.assertIn("North village", html)
+        self.assertIsNone(hub.db.one("SELECT lang FROM submissions WHERE sub_id = 's2'")["lang"])
+
+    def test_offline_panel(self):
+        self.hub._radio_state = lambda: (False, "The radio isn't plugged in", "")
+        html = self.call("/").body.decode()
+        self.assertIn("Still works without the radio", html)
+        for path in ("/courses", "/courses/math", "/students", "/language"):
+            self.assertEqual(self.call(path).status, 200, path)
+
+
+class TranslationTests(unittest.TestCase):
+    """An assignment in the school's languages, from the teacher's page to each student's, and the teacher's voice."""
+
+    WEBM = b"\x1a\x45\xdf\xa3" + b"x" * 900
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        self.hub.set_setting("lang", "eng")
+        self.hub.set_setting("lang2", "swa")
+        self.hub.add_phone("p1", "North village")
+        self.hub.create_assignment({"id": "a-tr", "title": "Animals", "instructions": "Read.", "questions": [
+            {"type": "choice", "prompt": "Which can swim?", "info": "Look.", "options": ["fish", "goat", "3"], "answer": 0, "opic": ["fish", "goat", ""]},
+            {"type": "text", "prompt": "Name one.", "accept": ["fish", "samaki"]}]})
+
+    def call(self, path, method="GET", form=None, body=None, app=None, **headers):
+        path, _, query = path.partition("?")
+        return (app or self.hub.app).dispatch(Request(method, path, dict(urllib.parse.parse_qsl(query)), headers,
+                                                      body if body is not None else urllib.parse.urlencode(form or {}).encode(), "127.0.0.1"))
+
+    def translate(self, **extra):
+        form = {"t|swa||p": "Wanyama", "t|swa|q1|p": "Ni kipi kinaogelea?", "t|swa|q1|n": "Tazama.", "t|swa|q1|o0": "samaki", "t|swa|q1|o1": "mbuzi"}
+        form.update(extra)
+        return self.call("/assignments/a-tr/languages", "POST", form)
+
+    def phone(self, name="phone"):
+        return Phone(os.path.join(self.tmp, name), "hub", "P", lambda h: _QuietRadio())
+
+    def test_the_page_and_what_travels(self):
+        before = self.hub.current_version("a-tr")
+        self.assertIn("2 missing: 0 students see those in English", self.call("/assignments/a-tr/languages").body.decode())
+        self.translate()
+        a = self.hub.get_assignment("a-tr")
+        self.assertNotEqual(self.hub.current_version("a-tr"), before)                # the words have to travel
+        self.assertTrue(asg.translated(a["questions"][0], "swa"))                    # "3" needs no translation
+        self.assertFalse(asg.translated(a["questions"][1], "swa"))
+        html = self.call("/assignments/a-tr/languages").body.decode()
+        self.assertIn("1 missing: 0 students see that in English", html)
+        packed = self.hub.packed_for_phone("a-tr")
+        self.assertEqual(packed["X"], {"swa": {"T": "Wanyama"}})
+        self.assertEqual(packed["Q"][0]["x"]["swa"], {"p": "Ni kipi kinaogelea?", "n": "Tazama.", "o": ["samaki", "mbuzi", ""]})   # no stamp
+        self.assertEqual(asg.version_of(asg.unpack(packed)), self.hub.current_version("a-tr"))
+        self.hub.set_setting("lang2", "")                                            # no student uses it now
+        self.assertNotIn("X", self.hub.packed_for_phone("a-tr"))
+        self.assertNotIn("x", self.hub.packed_for_phone("a-tr")["Q"][0])
+        self.assertIn("Students have one language here", self.call("/assignments/a-tr/languages").body.decode())
+
+    def test_a_changed_original_is_flagged(self):
+        self.translate()
+        a = self.hub.get_assignment("a-tr")
+        a["questions"][0]["prompt"] = "Which of these can swim?"
+        self.hub.create_assignment(a)
+        html = self.call("/assignments/a-tr/languages").body.decode()
+        self.assertIn("1 to check: the original changed", html)
+        self.translate()                                                             # saved again, unchanged: still to check
+        self.assertTrue(asg.stale(self.hub.get_assignment("a-tr")["questions"][0], "swa"))
+        self.translate(**{"ok|swa|q1": "1"})
+        self.assertFalse(asg.stale(self.hub.get_assignment("a-tr")["questions"][0], "swa"))
+        version = self.hub.current_version("a-tr")
+        self.call("/assignments/a-tr/languages", "POST", {"base": "swa"})
+        self.assertEqual(self.hub.written_in(self.hub.get_assignment("a-tr")), "swa")
+        self.assertEqual(self.hub.translate_to(self.hub.get_assignment("a-tr")), ["eng"])
+        self.assertEqual(self.hub.current_version("a-tr"), version)                  # which language it is written in stays here
+        self.call("/assignments/a-tr/languages", "POST", {"base": "<b>"})
+        self.assertEqual(self.hub.written_in(self.hub.get_assignment("a-tr")), "swa")
+
+    def test_bad_translations_are_dropped(self):
+        a = asg.normalize_assignment({"title": "T", "tr": {"swa": {"T": "x" * 500, "I": 3}, "xx": {"T": "no"}, "deu": "no"}, "lang": "English", "questions": [
+            {"type": "choice", "prompt": "P", "options": ["a", "b"], "answer": 0, "tr": {"swa": {"p": " s ", "o": ["1", 2, "3", "4"], "n": "no info here"}, "fra": {"o": ["", ""]}}}]})
+        self.assertEqual((len(a["tr"]["swa"]["T"]), list(a["tr"]), "lang" in a), (120, ["swa"], False))
+        self.assertEqual(a["questions"][0]["tr"], {"swa": {"p": "s", "o": ["1", ""]}})
+
+    def test_students_see_their_language(self):
+        self.translate()
+        phone = self.phone()
+        phone.import_language(self.hub.language_bundle())
+        phone.import_assignment(self.hub.packed_for_phone("a-tr"), open_=True)
+        def page(path, lang, method="GET", form=None):
+            return self.call(path, method, form, app=phone.app, Cookie=f"student=Ana; lang={lang}").body.decode()
+        self.assertIn("Wanyama", page("/", "swa"))
+        self.assertIn("Animals", page("/", "eng"))
+        html = page("/a/a-tr", "swa")
+        for part in ("Ni kipi kinaogelea?", ">samaki<", "Tazama.", "Name one.", ">3<", "Read."):
+            self.assertIn(part, html)
+        self.assertNotIn("Which can swim?", html)
+        self.assertIn("Which can swim?", page("/a/a-tr", "eng"))
+        page("/a/a-tr", "swa", "POST", {"q1": "1", "q2": "samaki"})
+        row = phone.db.one("SELECT answers, signals FROM submissions")
+        self.assertEqual((json.loads(row["answers"])["q1"], json.loads(row["signals"])["l"]), ("1", "swa"))
+        sid = phone.db.one("SELECT sub_id FROM submissions")["sub_id"]
+        phone.on_message(protocol.Message(1, protocol.RESULT, {"r": [{"id": sid, "sc": 1, "mx": 2, "ok": 1, "q": {"q1": 0, "q2": 1}}]}, "hub"))
+        results = page("/results", "swa")
+        self.assertIn("Wanyama", results)
+        self.assertIn("mbuzi", results)                                              # what they answered, in their language
+
+    def test_recordings(self):
+        self.translate()
+        html = self.call("/assignments/a-tr/voice?lang=swa").body.decode()
+        self.assertIn("Ni kipi kinaogelea?", html)
+        self.assertIn("1 of these is not translated into Swahili yet", html)
+        self.assertIn("Picture word", html)
+        k, word = voices.key(" Ni kipi  kinaogelea? ", "swa"), voices.key("samaki", "swa")
+        self.assertEqual(word, "3df9c89daaec75f4")   # the Android test has the same one
+        def send(key, data=self.WEBM, kind="audio/webm", secs="2.5"):
+            return self.call(f"/api/voice/{key}?secs={secs}", "POST", body=data, **{"Content-Type": kind}).status
+        self.assertEqual([send(k), send(word)], [200, 200])
+        self.assertEqual([send(voices.key("not said anywhere", "swa")), send("../../x"), send(k, b"<html>"), send(k, b""), send(k, kind="text/html"),
+                          send(k, self.WEBM[:4] + b"x" * voices.MAX_BYTES)], [404, 404, 400, 400, 400, 400])
+        self.assertEqual(self.call(f"/voice/{k}").headers["Content-Type"], "audio/webm")
+        self.assertEqual(set(self.hub.voice_list()), {k, word})
+        three, only = voices.key("3", "swa"), {voices.key("3", "eng"): "", voices.key("Name one.", "eng"): ""}
+        self.assertNotEqual(three, voices.key("3", "eng"))                           # a number is read differently in each language
+        self.assertEqual(voices.find(only, "3", ["swa", "eng"]), "")                 # so an English "three" is not played to others
+        self.assertEqual(voices.find(only, "Name one.", ["swa", "eng"]), voices.key("Name one.", "eng"))   # an untranslated question is
+        self.assertIn('"have": true', self.call("/assignments/a-tr/voice?lang=swa").body.decode())
+
+        port = free_port()
+        server = self.hub.app.serve_in_thread("127.0.0.1", port)
+        self.addCleanup(server.shutdown)
+        phone = self.phone()
+        phone.messenger.transport = types.SimpleNamespace(node_id="p1")
+        phone.sync_from_hub(f"http://127.0.0.1:{port}")                              # over Wi-Fi
+        phone.db.execute("UPDATE assignments SET open = 1")
+        def page(lang, target=phone):
+            return self.call("/a/a-tr", app=target.app, Cookie=f"student=Ana; lang={lang}").body.decode()
+        self.assertIn(f"data-voice='/voice/{k}'", page("swa"))
+        self.assertIn(f"<span class='otx' data-voice='/voice/{word}'>samaki", page("swa"))
+        self.assertNotIn(f"data-voice='/voice/", page("eng"))                        # nothing recorded in English
+        got = self.call(f"/voice/{k}", app=phone.app)
+        self.assertEqual((got.status, got.headers["Content-Type"], os.path.getsize(got.file_path)), (200, "audio/webm", len(self.WEBM)))
+        self.assertEqual([self.call("/voice/" + bad, app=phone.app).status for bad in ("0" * 16, "..", "x")], [404] * 3)
+
+        card = os.path.join(self.tmp, "card")                                        # by memory card
+        with zipfile.ZipFile(io.BytesIO(self.hub.course_pack_zip())) as z:
+            z.extractall(card)
+        other = Phone(card, "hub", "P", lambda h: _QuietRadio())
+        other.db.execute("UPDATE assignments SET open = 1")
+        self.assertIn(f"data-voice='/voice/{k}'", page("swa", other))
+
+        self.call("/assignments/a-tr/languages", "POST", {"t|swa|q1|p": "Yupi huogelea?", "t|swa|q1|o0": "samaki"})
+        self.assertEqual(set(self.hub.voice_list()), {word})                         # the words changed: that recording is not sent
+        phone.sync_from_hub(f"http://127.0.0.1:{port}")
+        self.assertEqual(set(phone.voices), {word})                                  # and phones drop it
+        self.call(f"/api/voice/{word}/delete", "POST")
+        self.assertEqual(self.hub.voice_list(), {})
+        phone.sync_voices("http://127.0.0.1:9", {"zz": ["webm", 5], "0" * 16: ["exe", 5], "1" * 16: ["webm", 10 ** 9], "2" * 16: "x", "3" * 16: ["webm", 5]})
+        self.assertEqual(phone.voices, {})
 
 
 class WrongAnswerTests(unittest.TestCase):

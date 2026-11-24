@@ -23,6 +23,11 @@ Every phone has the library, so only the names travel.
 number or short answer, [{"x": "2/6", "w": "Added tops and bottoms"}]. Like a written question's
 "model" answer it stays on the hub: it is never packed for phones and does not change the version.
 
+"tr" holds translations, {"por": {"p": prompt, "o": [options], "n": info, "s": stamp}}; the assignment's own
+"tr" has {"T": title, "I": instructions}. A phone shows a student their language where it is there and the original
+where it isn't. "s" says which original was translated, so the hub can tell when it has changed since; like "lang",
+the language the assignment is written in, it stays on the hub.
+
 In "graded" mode the answer key never leaves the hub: the phone only checks
 that answers are complete and well-formed, and the hub grades them. In
 "practice" mode the key goes to the phone so students get instant feedback.
@@ -60,6 +65,87 @@ def new_id(prefix: str = "") -> str:
 
 def _clean_str(value, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+_CODE = re.compile(r"^[a-z]{3}$")
+
+
+def _clean_tr(q: Optional[dict], raw) -> dict:
+    """Translations of one question, or of the title and instructions (q is None); {} when there are none."""
+    out: dict = {}
+    for code, t in list(raw.items())[:8] if isinstance(raw, dict) else []:
+        if not (isinstance(code, str) and _CODE.match(code) and isinstance(t, dict)):
+            continue
+        if q is None:
+            one = {"T": _clean_str(t.get("T"), 120), "I": _clean_str(t.get("I"), 2000)}
+        else:
+            one = {"p": _clean_str(t.get("p"), 500), "n": _clean_str(t.get("n"), MAX_INFO_CHARS) if q.get("info") else ""}
+            if q["type"] == "choice" and isinstance(t.get("o"), list):
+                done = [_clean_str(o, 200) if isinstance(o, str) else "" for o in t["o"]][:len(q["options"])]
+                if any(done):
+                    one["o"] = done + [""] * (len(q["options"]) - len(done))
+        one = {k: v for k, v in one.items() if v}
+        if one:
+            if q is not None and isinstance(t.get("s"), str):
+                one["s"] = t["s"][:8]
+            out[code] = one
+    return out
+
+
+def source_stamp(q: dict) -> str:
+    """Says which wording of a question a translation was made from."""
+    text = json.dumps([q["prompt"], q.get("options", []), q.get("info", "")], ensure_ascii=False)
+    return format(zlib.crc32(text.encode("utf-8")), "08x")
+
+
+def stale(q: dict, code: str) -> bool:
+    """Whether the original has changed since this translation was made."""
+    stamp = ((q.get("tr") or {}).get(code) or {}).get("s")
+    return bool(stamp) and stamp != source_stamp(q)
+
+
+def translated(q: dict, code: str) -> bool:
+    """Whether nothing of a question is left in the original. An option that is only a number needs no translation."""
+    t = (q.get("tr") or {}).get(code) or {}
+    done = t.get("o") or []
+    return bool(t.get("p")) and (not q.get("info") or bool(t.get("n"))) and all(
+        (j < len(done) and done[j]) or parse_number(o) is not None for j, o in enumerate(q.get("options", [])))
+
+
+def localized(assignment: dict, code: str) -> dict:
+    """The assignment as a student of this language sees it: translated where it can be, the original elsewhere."""
+    top = (assignment.get("tr") or {}).get(code) or {}
+    if not top and not any(code in (q.get("tr") or {}) for q in assignment.get("questions", [])):
+        return assignment
+    out = dict(assignment)
+    out["title"] = top.get("T") or assignment.get("title", "")
+    if top.get("I") and assignment.get("instructions"):
+        out["instructions"] = top["I"]
+    out["questions"] = []
+    for q in assignment["questions"]:
+        t = (q.get("tr") or {}).get(code) or {}
+        q = dict(q, prompt=t.get("p") or q["prompt"])
+        if t.get("n") and q.get("info"):
+            q["info"] = t["n"]
+        if t.get("o") and q.get("options"):
+            q["options"] = [(t["o"][j] if j < len(t["o"]) else "") or o for j, o in enumerate(q["options"])]
+        out["questions"].append(q)
+    return out
+
+
+def only_languages(assignment: dict, codes) -> dict:
+    """A copy with just these languages' translations: what phones get."""
+    out = copy.deepcopy(assignment)
+    for part in [out] + out["questions"]:
+        if part.get("tr"):
+            part["tr"] = {c: t for c, t in part["tr"].items() if c in codes}
+    return out
+
+
+def _pack_tr(tr) -> dict:
+    """Translations without their stamps, and nothing empty."""
+    out = {code: {k: v for k, v in t.items() if k != "s" and v} for code, t in (tr or {}).items()}
+    return {code: t for code, t in out.items() if t}
 
 
 def _clean_why(q: dict, raw) -> list:
@@ -157,12 +243,18 @@ def normalize_assignment(data: dict) -> dict:
             model = _clean_str(q.get("model"), MAX_LONG_CHARS)
             if model:
                 clean["model"] = model
+        tr = _clean_tr(clean, q.get("tr"))
+        if tr:
+            clean["tr"] = tr
         why = _clean_why(clean, q.get("why")) if qtype != "long" else []
         if why:
             clean["why"] = why
         questions.append(clean)
 
+    tr = _clean_tr(None, data.get("tr"))
+    written = data.get("lang") if isinstance(data.get("lang"), str) and _CODE.match(data["lang"]) else ""
     return {
+        **({"tr": tr} if tr else {}), **({"lang": written} if written else {}),
         "id": _clean_str(data.get("id"), 20) or new_id("a"),
         "title": title,
         "subject": _clean_str(data.get("subject"), 60),
@@ -220,8 +312,12 @@ def pack(assignment: dict) -> dict:
         if info:  # several questions about one text: it travels once, then 1 means "the same again"
             cq["n"] = 1 if info == info_before else info
         info_before = info
+        if _pack_tr(q.get("tr")):
+            cq["x"] = _pack_tr(q["tr"])
         questions.append(cq)
     out["Q"] = questions
+    if _pack_tr(assignment.get("tr")):
+        out["X"] = _pack_tr(assignment["tr"])
     return out
 
 
@@ -253,8 +349,12 @@ def unpack(packed: dict) -> dict:
         if info:
             q["info"] = info
         info_before = info
+        if isinstance(cq.get("x"), dict):
+            q["tr"] = cq["x"]
         questions.append(q)
     out["questions"] = questions
+    if isinstance(packed.get("X"), dict):
+        out["tr"] = packed["X"]
     for key in _OPTIONAL_TOP:
         if not out[key]:
             out.pop(key)

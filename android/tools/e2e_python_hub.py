@@ -26,6 +26,7 @@ REPO = os.path.dirname(ANDROID)
 sys.path.insert(0, REPO)
 
 from meshlearn.hub import Hub  # noqa: E402
+from meshlearn import ownpics, voices
 from meshlearn.messenger import Messenger  # noqa: E402
 from meshlearn.transport import UdpSimTransport  # noqa: E402
 
@@ -118,6 +119,38 @@ def main() -> int:
         english = post("/lang", {"to": "eng", "back": "/results"})
         assert "<html lang='en'>" in english and "3 / 7 so far" in english, english[:800]
         print("  ok: the school's language came with the lessons, and the student switched to English")
+
+        # A lesson written in English with one Kiswahili question, a drawing and the teacher's voice. By radio come the
+        # words and the drawing; the recording comes with the next Wi-Fi copy.
+        drawn = hub.save_picture({"n": "our well", "s": ownpics.encode([(4, 1, [(60, 60), (180, 60), (120, 200)])])})
+        hub.create_assignment({"id": "a-well", "title": "Our well", "lang": "eng", "tr": {"swa": {"T": "Kisima chetu"}}, "questions": [
+            {"type": "choice", "prompt": "Where is the water?", "pic": drawn, "options": ["well", "goat"], "answer": 0,
+             "why": ["", "Mixed up the animals"], "tr": {"swa": {"p": "Maji yako wapi?", "o": ["kisima", "mbuzi"]}}}]})
+        said = voices.key("Maji yako wapi?", "swa")
+        sound = b"\x1a\x45\xdf\xa3" + bytes(range(256)) * 12
+        req = urllib.request.Request(f"http://127.0.0.1:{HUB_HTTP}/api/voice/{said}?secs=2", data=sound, headers={"Content-Type": "audio/webm"})
+        web.open(req, timeout=10).read()
+        hub.set_open("a-well", "phone-1", True)
+        wait_for("the translated lesson reached the phone by radio", lambda: "Our well" in get("/"))
+        form = get("/a/a-well")
+        assert "Where is the water?" in form and "pic own" in form and "stroke='#1f5fbf'" in form and "Mixed up" not in form, form[-3000:]
+        post("/lang", {"to": "swa", "back": "/"})
+        form = get("/a/a-well")
+        assert "Maji yako wapi?" in form and ">kisima<" in form and "Where is the water?" not in form and "data-voice='/voice/" not in form, form[-3000:]
+        post("/status/sync", {"hub_url": f"127.0.0.1:{HUB_HTTP}"})
+        assert f"data-voice='/voice/{said}'" in get("/a/a-well")
+        with web.open(f"{base}/voice/{said}", timeout=10) as resp:
+            assert resp.headers["Content-Type"].startswith("audio/webm") and resp.read() == sound
+        with web.open(urllib.request.Request(f"{base}/voice/{said}", headers={"Range": "bytes=10-19"}), timeout=10) as resp:
+            assert resp.status == 206 and resp.read() == sound[10:20]
+        post("/a/a-well", {"q1": "1", "unsure-q1": "1"})
+        wait_for("the hub heard the work, its language and the not-sure tick",
+                 lambda: (hub.db.one("SELECT lang, signals FROM submissions WHERE assignment_id = 'a-well'") or {"lang": None})["lang"] is None
+                 and hub.db.one("SELECT signals FROM submissions WHERE assignment_id = 'a-well'"))
+        row = hub.db.one("SELECT lang, signals FROM submissions WHERE assignment_id = 'a-well'")
+        assert row["lang"] is None and json.loads(row["signals"]) == {"n": 1}, dict(row)   # Kiswahili is the school's language
+        assert "Mixed up the animals" in web.open(f"http://127.0.0.1:{HUB_HTTP}/assignments/a-well", timeout=10).read().decode()
+        print("  ok: translated question, drawing and the teacher's voice on the Kotlin phone")
         print("PASSED")
         return 0
     except BaseException:

@@ -29,6 +29,8 @@ from urllib.parse import quote
 
 from . import __version__
 from . import assignments as asg
+from . import ownpics
+from . import voices
 from . import comprehension as cmp
 from . import courses as crs
 from . import protocol
@@ -37,7 +39,7 @@ from .language import Strings
 from .messenger import Messenger
 from .phonesignin import PhoneSignIn
 from .zipapps import PhoneApps
-from .web import (ASSIGNMENT_JS, CLEAR_DRAFT_JS, COUNTDOWN_JS, LISTEN_JS, MATH_JS, READING_JS, RESUME_JS, SCRATCH_JS, STUDENT_CSS, App, Request, Response,
+from .web import (ASSIGNMENT_JS, CLEAR_DRAFT_JS, COUNTDOWN_JS, LISTEN_JS, MATH_JS, PICTURES, READING_JS, RESUME_JS, SCRATCH_JS, STUDENT_CSS, App, Request, Response,
                   due_label, esc, file_response, icon, minutes_for, page, picture, pictures_html, redirect)
 
 log = logging.getLogger(__name__)
@@ -128,6 +130,9 @@ class Phone(PhoneSignIn, PhoneApps):
                 self.db.execute("ALTER TABLE submissions ADD COLUMN " + column)
             except Exception:
                 pass
+        self.voice_dir = os.path.join(data_dir, "voice")
+        self._load_voices()
+        self._load_pictures()
         self._load_language()
         self.messenger: Messenger = messenger_factory(self.on_message)
         self.load_pack_folder()
@@ -169,6 +174,59 @@ class Phone(PhoneSignIn, PhoneApps):
             "sw": __version__, "inv": self.inventory(),
         })
 
+    # -- the school's own pictures ------------------------------------------------
+
+    def _load_pictures(self) -> None:
+        row = self.db.one("SELECT value FROM settings WHERE key = 'pictures'")
+        try:
+            data = json.loads(row["value"]) if row else {}
+        except ValueError:
+            data = {}
+        self.own: Dict[str, dict] = data if isinstance(data, dict) else {}
+
+    def import_pictures(self, data) -> int:
+        """Keep the school's own pictures, from a lesson, a Wi-Fi copy or a card. A whole one is never replaced by its
+        name alone (a photo whose lesson came by radio)."""
+        added = 0
+        for key, raw in list(data.items())[:500] if isinstance(data, dict) else []:
+            pic = ownpics.clean(raw, PICTURES) if isinstance(key, str) and ownpics.KEY.match(key) else None
+            if pic and pic != self.own.get(key) and (ownpics.whole(pic) or not ownpics.whole(self.own.get(key))):
+                self.own = {**self.own, key: pic}
+                added += 1
+        if added:
+            self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('pictures', ?)", (json.dumps(self.own, ensure_ascii=False),))
+        return added
+
+    # -- the teacher's recordings --------------------------------------------------
+
+    def _load_voices(self) -> None:
+        self.voices: Dict[str, str] = {**voices.folder_files(os.path.join(self.pack_dir, "voice")), **voices.folder_files(self.voice_dir)}
+
+    def sync_voices(self, hub_url: str, wanted) -> int:
+        """Fetch the recordings this phone lacks over Wi-Fi, and drop those no assignment uses any more."""
+        wanted = wanted if isinstance(wanted, dict) else {}
+        have = voices.folder_files(self.voice_dir)
+        count = 0
+        for key, about in list(wanted.items())[:2000]:
+            if not (isinstance(key, str) and voices.KEY.match(key) and isinstance(about, list) and len(about) == 2 and about[0] in voices.TYPES):
+                continue
+            ext, size = about
+            path = have.get(key)
+            if not isinstance(size, int) or not 0 < size <= voices.MAX_BYTES or (path and path.endswith("." + ext) and os.path.getsize(path) == size):
+                continue
+            try:
+                with urllib.request.urlopen(f"{hub_url.rstrip('/')}/voice/{key}", timeout=20) as resp:
+                    data = resp.read(voices.MAX_BYTES + 1)
+                if len(data) == size and voices.looks_like(data, ext):
+                    voices.save(self.voice_dir, key, ext, data)
+                    count += 1
+            except OSError:
+                log.warning("could not copy recording %s", key)
+        for key in set(have) - set(wanted):
+            voices.remove(self.voice_dir, key)
+        self._load_voices()
+        return count
+
     # -- language -------------------------------------------------------------
 
     def _load_language(self) -> None:
@@ -177,6 +235,7 @@ class Phone(PhoneSignIn, PhoneApps):
             data = json.loads(row["value"]) if row else {}
         except ValueError:
             data = {}
+        self._lang_of = {r["key"][5:]: r["value"] for r in self.db.all("SELECT key, value FROM settings WHERE key LIKE 'lang:%'")}
         school = Strings(data.get("school") if isinstance(data.get("school"), dict) else None)
         self.school = school
         self.languages: Dict[str, Strings] = {school.code: school}
@@ -206,8 +265,14 @@ class Phone(PhoneSignIn, PhoneApps):
         return True
 
     def words(self, req: Request) -> Strings:
-        """The student's language: the one they switched to, else the school's."""
-        return self.languages.get(req.cookies.get("lang", ""), self.school)
+        """The student's language: the one they switched to, else the one on the class list, else the school's. Someone
+        who has not signed in yet gets the one they last tapped in this browser."""
+        name = (req.cookies.get("student") or "").partition("~")[0]
+        person = self.person(name) if name and self.roster else None
+        for code in (self._lang_of.get(name.casefold()) if name else "", person.get("l", "") if person else "", req.cookies.get("lang", "")):
+            if code in self.languages:
+                return self.languages[code]
+        return self.school
 
     def look(self, req: Request) -> str:
         """Which of the three looks this student sees: their age on the class list, else the one they chose."""
@@ -223,6 +288,7 @@ class Phone(PhoneSignIn, PhoneApps):
         aid, version = assignment.get("id"), packed.get("v") or asg.version_of(assignment)
         if not aid or not assignment.get("questions"):
             return False
+        self.import_pictures(packed.get("Px"))
         row = self.db.one("SELECT version, open, due FROM assignments WHERE id = ?", (aid,))
         new_open = (1 if open_ else 0) if open_ is not None else (row["open"] if row else 0)
         new_due = due if due is not None else (row["due"] if row and row["due"] else assignment.get("due", ""))
@@ -250,6 +316,7 @@ class Phone(PhoneSignIn, PhoneApps):
     def load_pack_folder(self) -> int:
         """Load assignments copied onto the memory card (data/assignments/*.json)."""
         count = 0
+        self._load_voices()
         if not os.path.isdir(self.pack_dir):
             return 0
         courses_file = os.path.join(self.pack_dir, "courses.json")
@@ -266,8 +333,15 @@ class Phone(PhoneSignIn, PhoneApps):
                     self.import_language(json.load(fh))
             except (OSError, ValueError):
                 log.warning("skipping unreadable language.json in the course pack")
+        pictures_file = os.path.join(self.pack_dir, "pictures.json")
+        if os.path.exists(pictures_file):
+            try:
+                with open(pictures_file, encoding="utf-8") as fh:
+                    self.import_pictures(json.load(fh).get("pictures"))
+            except (OSError, ValueError, AttributeError):
+                log.warning("skipping unreadable pictures.json in the course pack")
         for fname in sorted(os.listdir(self.pack_dir)):
-            if not fname.endswith(".json") or fname in ("courses.json", "language.json"):
+            if not fname.endswith(".json") or fname in ("courses.json", "language.json", "pictures.json"):
                 continue
             try:
                 with open(os.path.join(self.pack_dir, fname), encoding="utf-8") as fh:
@@ -285,6 +359,9 @@ class Phone(PhoneSignIn, PhoneApps):
             data = json.loads(resp.read().decode("utf-8"))
         self.import_courses(data.get("courses", []))
         self.import_language(data.get("language"))
+        self.import_pictures(data.get("pictures"))
+        if "voices" in data:
+            self.sync_voices(hub_url, data["voices"])
         return sum(1 for packed in data.get("assignments", []) if self.import_assignment(packed))
 
     def get_assignment(self, aid: str) -> Optional[dict]:
@@ -513,6 +590,7 @@ class Phone(PhoneSignIn, PhoneApps):
         app.add_route("GET", "/results", self.results)
         app.add_route("GET", "/library", self.library)
         app.add_route("GET", "/library/files/<path:path>", self.library_file)
+        app.add_route("GET", "/voice/<key>", lambda req: voices.response(self.voices, req.params["key"]))
         app.add_route("GET", "/status", self.status)
         app.add_route("POST", "/status/sync", self.status_sync)
         app.add_route("POST", "/status/reload", self.status_reload)
@@ -554,7 +632,7 @@ class Phone(PhoneSignIn, PhoneApps):
     def _description(course: dict, w: Strings) -> str:
         return w("course.other.description") if course["id"] == "" else course.get("description", "")
 
-    def _assignments_in(self, course_id: str, open_only: bool = True) -> List[dict]:
+    def _assignments_in(self, course_id: str, open_only: bool = True, w: Optional[Strings] = None) -> List[dict]:
         rows = self.db.all("SELECT id FROM assignments" + (" WHERE open = 1" if open_only else "")
                            + " ORDER BY due = '', due, received DESC")
         known = {c["id"] for c in self.course_tree()}
@@ -563,7 +641,7 @@ class Phone(PhoneSignIn, PhoneApps):
             a = self.get_assignment(r["id"])
             cid = a.get("course", "") if a.get("course", "") in known else ""
             if cid == course_id:
-                out.append(a)
+                out.append(asg.localized(a, w.code) if w else a)
         return out
 
     def my_records(self, student: str) -> List[dict]:
@@ -636,7 +714,7 @@ class Phone(PhoneSignIn, PhoneApps):
         records = self.my_records(student)
         cards, todo = "", []
         for course in self.course_tree():
-            open_items = self._assignments_in(course["id"])
+            open_items = self._assignments_in(course["id"], w=w)
             if course["id"] == "" and not open_items:
                 continue
             title = self._title(course, w)
@@ -789,7 +867,7 @@ class Phone(PhoneSignIn, PhoneApps):
         mine = self._my_latest(student)
         summary = cmp.summarize(self.my_records(student), course)
         by_unit = {u["id"]: u for u in summary["units"]}
-        items = self._assignments_in(cid)
+        items = self._assignments_in(cid, w=w)
         sections = ""
         for n, unit in enumerate(course["units"], start=1):
             in_unit = [a for a in items if a.get("unit", "") == unit["id"]]
@@ -819,7 +897,14 @@ class Phone(PhoneSignIn, PhoneApps):
             back = "/"
         code = req.form.get("to", "")
         response = redirect(back)
-        return response.set_cookie("lang", code) if code in self.languages else response
+        if code not in self.languages:
+            return response
+        name = self.student(req)
+        if name:   # on a shared phone the choice is the student's, not the browser's
+            self._lang_of[name.casefold()] = code
+            self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("lang:" + name.casefold(), code))
+            return response
+        return response.set_cookie("lang", code)
 
     def switch_look(self, req: Request) -> Response:
         look = req.form.get("to", "")
@@ -865,13 +950,13 @@ class Phone(PhoneSignIn, PhoneApps):
             described = f" aria-describedby='{qid}-err' aria-invalid='true'" if err else ""
             points = w("form.points.one") if q["points"] == 1 else w("form.points.other", n=f"{q['points']:g}")
             legend = (f"<legend><span class='qnum'>{esc(w('form.qnum', i=i, n=n, points=points))}"
-                      f"</span>{esc(q['prompt'])}</legend>") + pictures_html(q.get("pic", ""))
+                      f"</span>{esc(q['prompt'])}</legend>") + pictures_html(q.get("pic", ""), self.own, w.code)
             cls = "q bad" if err else "q"
             info = self._question_info(a, q, i, w)
             flag = (f"<label class='flag unsure'><input type='checkbox' name='unsure-{qid}' value='1'"
                     f"{' checked' if ('unsure-' + q['id']) in values else ''}> {esc(w('form.unsure'))}</label>"
                     f"<label class='flag'><input type='checkbox' data-flag='{qid}'> {esc(w('form.flag'))}</label></fieldset></div>")
-            parts.append(f"<div class='qwrap{' has' if info else ''}' data-prompt='{esc(q['prompt'])}'>{info}")
+            parts.append(f"<div class='qwrap{' has' if info else ''}' data-prompt='{esc(q['prompt'])}'{self._voice(q['prompt'], w)}>{info}")
             if q["type"] == "choice":
                 opts = ""
                 opic = q.get("opic") or []
@@ -880,8 +965,8 @@ class Phone(PhoneSignIn, PhoneApps):
                     on = value == str(j)
                     opts += (f"<label class='option{' on' if on else ''}'><input type='radio' name='{qid}' value='{j}'"
                              f"{' checked' if on else ''}{described}>"
-                             f"<span class='ltr' aria-hidden='true'>{chr(65 + j)}</span>{picture(opic[j]) if j < len(opic) else ''}"
-                             f"<span class='otx'>{esc(opt)}</span></label>")
+                             f"<span class='ltr' aria-hidden='true'>{chr(65 + j)}</span>{picture(opic[j], own=self.own) if j < len(opic) else ''}"
+                             f"<span class='otx'{self._voice(opt, w)}>{esc(opt)}</span></label>")
                 parts.append(f"<fieldset class='{cls}'>{legend}{err_html}<div class='opts{short}'>{opts}</div>{flag}")
             elif q["type"] == "long":
                 limit = q.get("max_chars", 600)
@@ -912,6 +997,11 @@ class Phone(PhoneSignIn, PhoneApps):
                      f"</div></div></form>{self._scratchpad(w)}<script>{ASSIGNMENT_JS}</script>")
         return "".join(parts)
 
+    def _voice(self, text: str, w: Strings) -> str:
+        """Where the teacher's recording of these words is, when this phone has one (LISTEN_JS plays it)."""
+        key = voices.find(self.voices, text, [w.code] + [c for c in self.languages if c != w.code]) if self.voices else ""
+        return f" data-voice='/voice/{key}'" if key else ""
+
     def _question_info(self, a: dict, q: dict, i: int, w: Strings) -> str:
         """The panel that goes with a question: its info, and the assignment's instructions. Students pull it
         down on a phone; it sits beside the question on a wide screen. Open at the first question."""
@@ -926,7 +1016,7 @@ class Phone(PhoneSignIn, PhoneApps):
 
     def _open_assignment(self, req: Request):
         a = self.get_assignment(req.params["aid"])
-        return a if a and a.get("open") else None
+        return asg.localized(a, self.words(req).code) if a and a.get("open") else None
 
     def assignment_form(self, req: Request) -> Response:
         w = self.words(req)
@@ -964,7 +1054,10 @@ class Phone(PhoneSignIn, PhoneApps):
         if a.get("mode") != "practice" and self.db.one(
                 "SELECT 1 FROM submissions WHERE assignment_id = ? AND student = ?", (a["id"], student)):
             return redirect("/results")
-        self.submit(a, student, answers, signals=asg.signals_of(a, unsure, req.form.get("first", ""), answers))
+        signals = asg.signals_of(a, unsure, req.form.get("first", ""), answers)
+        if w.code != self.school.code:
+            signals["l"] = w.code   # so the teacher knows which language they work in
+        self.submit(a, student, answers, signals=signals)
         # Turned in: forget the draft the browser kept while the student worked.
         clear_draft = (f"<div id='clear-draft' data-key='{esc(student + '|' + a['id'])}'></div>"
                        f"<script>{CLEAR_DRAFT_JS}</script>")
@@ -1024,7 +1117,7 @@ class Phone(PhoneSignIn, PhoneApps):
         teen = self.look(req) == "teen"
         out = ""
         for i, s in enumerate(rows):
-            a = self.get_assignment(s["assignment_id"]) or {"title": s["assignment_id"], "questions": []}
+            a = asg.localized(self.get_assignment(s["assignment_id"]) or {"title": s["assignment_id"], "questions": []}, w.code)
             delivery = self.messenger.message_status(s["msg_id"])
             sent = {"acked": f"<span class='pill good'>{esc(w('results.acked'))}</span>",
                     "pending": f"<span class='pill warn'>{esc(w('results.pending'))}</span>",
@@ -1102,7 +1195,7 @@ class Phone(PhoneSignIn, PhoneApps):
             if s["assignment_id"] in seen:
                 continue
             seen.add(s["assignment_id"])
-            a = self.get_assignment(s["assignment_id"]) or {"id": "", "title": s["assignment_id"], "questions": []}
+            a = asg.localized(self.get_assignment(s["assignment_id"]) or {"id": "", "title": s["assignment_id"], "questions": []}, w.code)
             got = stars_of(s)
             if got is None:
                 stars = f"<p class='meta'>{esc(w('results.reading') if s['score'] is not None else w('results.not_graded'))}</p>"
@@ -1122,7 +1215,7 @@ class Phone(PhoneSignIn, PhoneApps):
             if s["assignment_id"] in seen or s["score"] is None or count >= 5:
                 continue
             seen.add(s["assignment_id"])
-            a = self.get_assignment(s["assignment_id"]) or {"title": "", "questions": []}
+            a = asg.localized(self.get_assignment(s["assignment_id"]) or {"title": "", "questions": []}, w.code)
             detail, answers = json.loads(s["detail"] or "{}"), json.loads(s["answers"] or "{}")
             for n, q in enumerate(a["questions"], start=1):
                 if detail.get(q["id"]) == 0 and count < 5:
