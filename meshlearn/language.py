@@ -6,6 +6,9 @@ may be partly done: any word it lacks shows in English, so a school can start us
 language before every button is translated. Teachers can also translate or correct words on
 the hub; the hub merges those into the pack it sends to phones with their lessons.
 
+A country can have its own words for a language: por-BR.json holds only what Brazilian Portuguese
+says differently from por.json. COUNTRIES lists the languages schools in each country learn in.
+
 Plurals: a key ending ".one" is used when the number is 1, ".other" for every other number.
 Languages that change their words for 2, 5 or 11 write ".other" so it reads right for any
 number (for example "Assignments to do: {n}").
@@ -46,6 +49,27 @@ TAGS = {
     "guj": "gu", "kan": "kn", "mlg": "mg",
 }
 
+# The languages students learn in, by country, the school's main one first. Teachers can change any of it.
+# In Germany, students under 12 are not yet fluent in English, so it is left out when all students are younger.
+COUNTRIES = {
+    "DE": {"name": "Germany", "languages": ["deu", "eng", "fra"], "from_12": ["eng"],
+           "why": "German first. English only where students are 12 or older. French is European French."},
+    "KE": {"name": "Kenya", "languages": ["eng", "swa", "fra"],
+           "why": "English first, the language of school, then Swahili and French."},
+    "US": {"name": "United States", "languages": ["eng", "spa", "fra"],
+           "why": "English first, then Spanish and French."},
+    "BR": {"name": "Brazil", "languages": ["por", "eng", "deu"],
+           "why": "Brazilian Portuguese first, the native language, then English and German."},
+}
+REGION_TAGS = {("fra", "DE"): "fr-FR", ("por", "BR"): "pt-BR"}
+
+
+def languages_for(country: str, under_12: bool = False) -> List[str]:
+    """A country's languages for learning, main one first."""
+    info = COUNTRIES.get(country, {})
+    return [c for c in info.get("languages", []) if not (under_12 and c in info.get("from_12", []))]
+
+
 LEVEL_KEYS = {"Not started": "level.not_started", "Just started": "level.just_started", "Needs work": "level.needs_work",
               "Developing": "level.developing", "Good": "level.good", "Strong": "level.strong"}
 
@@ -59,6 +83,7 @@ _ERRORS = [
 ]
 
 _cache: Dict[str, dict] = {}
+_regions: Dict[tuple, dict] = {}
 
 
 def bundled() -> Dict[str, dict]:
@@ -68,8 +93,17 @@ def bundled() -> Dict[str, dict]:
             if fname.endswith(".json"):
                 with open(os.path.join(LANG_DIR, fname), encoding="utf-8") as fh:
                     data = json.load(fh)
-                _cache[data["code"]] = data
+                if data.get("region"):
+                    _regions[(data["code"], data["region"])] = data
+                else:
+                    _cache[data["code"]] = data
     return _cache
+
+
+def regional(code: str, country: str) -> dict:
+    """A country's own words for a language (por in BR), or {}."""
+    bundled()
+    return _regions.get((code, country), {})
 
 
 def source() -> dict:
@@ -102,12 +136,15 @@ def fill(text: str, values: dict) -> str:
     return _PLACEHOLDER.sub(lambda m: str(values[m.group(1)]) if m.group(1) in values else m.group(0), text)
 
 
-def build_pack(code: str, overrides: Optional[Dict[str, str]] = None, name: str = "", direction: str = "") -> dict:
+def build_pack(code: str, overrides: Optional[Dict[str, str]] = None, name: str = "", direction: str = "",
+               country: str = "") -> dict:
     """The words for one language as phones receive them: the file that comes with MeshLearn
-    (if any), with the teacher's own words on top. Only usable words are kept."""
+    (if any), the country's own words, then the teacher's on top. Only usable words are kept."""
     base = bundled().get(code, {})
+    local = regional(code, country)
     strings: Dict[str, str] = {}
-    for key, text in list((base.get("strings") or {}).items()) + list((overrides or {}).items()):
+    for key, text in (list((base.get("strings") or {}).items()) + list((local.get("strings") or {}).items())
+                      + list((overrides or {}).items())):
         if isinstance(text, str) and text.strip() and not check(key, text):
             strings[key] = text.strip()
     lists = {}
@@ -117,8 +154,8 @@ def build_pack(code: str, overrides: Optional[Dict[str, str]] = None, name: str 
             lists[key] = value
     return {
         "code": code,
-        "tag": base.get("tag") or TAGS.get(code, code),
-        "name": name or base.get("name") or code,
+        "tag": REGION_TAGS.get((code, country)) or base.get("tag") or TAGS.get(code, code),
+        "name": name or local.get("name") or base.get("name") or code,
         "dir": direction if direction in ("ltr", "rtl") else base.get("dir") or ("rtl" if code in RTL else "ltr"),
         "reviewed": bool(base.get("reviewed")) and not overrides,
         "strings": strings,
@@ -169,6 +206,14 @@ class Strings:
     def date(self, day: datetime.date) -> str:
         return self("date.short", weekday=self._lists["days"][day.weekday()], month=self._lists["months"][day.month - 1],
                     day=day.day)
+
+    def day_parts(self, due: str):
+        """A due date's short weekday and day number, or None when there is no date."""
+        try:
+            day = datetime.date.fromisoformat((due or "").strip()[:10])
+        except ValueError:
+            return None
+        return self._lists["days"][day.weekday()], str(day.day)
 
     def when(self, ts: Optional[float]) -> str:
         if not ts:

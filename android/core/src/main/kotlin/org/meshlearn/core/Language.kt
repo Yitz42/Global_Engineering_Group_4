@@ -50,6 +50,15 @@ class Strings(pack: Map<String, Any?>? = null) {
             "month" to lists["months"]!![cal.get(Calendar.MONTH)], "day" to cal.get(Calendar.DAY_OF_MONTH))
     }
 
+    /** A due date's short weekday and day number, or null when there is no date. */
+    fun dayParts(due: String?): Pair<String, String>? {
+        val m = Regex("(\\d{4})-(\\d{2})-(\\d{2})").matchEntire((due ?: "").trim().take(10)) ?: return null
+        val (y, mo, d) = m.destructured
+        val cal = Calendar.getInstance().apply { isLenient = false; clear(); set(y.toInt(), mo.toInt() - 1, d.toInt()) }
+        val weekday = try { (cal.get(Calendar.DAY_OF_WEEK) + 5) % 7 } catch (e: IllegalArgumentException) { return null }
+        return lists["days"]!![weekday] to d.toInt().toString()
+    }
+
     fun whenText(ts: Double?): String {
         if (ts == null || ts == 0.0) return ""
         val cal = Calendar.getInstance().apply { timeInMillis = (ts * 1000).toLong() }

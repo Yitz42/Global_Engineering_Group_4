@@ -15,6 +15,7 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.Uri
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.os.Build
@@ -101,6 +102,31 @@ class MainActivity : Activity() {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { back() }
         }
         render()
+        if (savedInstanceState == null) offerSetup(intent)
+    }
+
+    /** A setup link from the hub's QR code (meshlearn://setup?hub=…&channel=…): shown first, used only if the person agrees. */
+    private fun offerSetup(intent: Intent?) {
+        val link = intent?.data ?: return
+        if (link.scheme != "meshlearn" || link.host != "setup") return
+        intent.data = null
+        val hub = (link.getQueryParameter("hub") ?: "").trim()
+        val channel = link.getQueryParameter("channel")?.toIntOrNull()?.takeIf { it in 0..7 }
+        if (!Regex("![0-9a-fA-F]{8}").matches(hub)) {
+            AlertDialog.Builder(this).setTitle("That setup code has no school radio")
+                .setMessage("On the teacher's laptop, check that its radio is connected, then scan the code again.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Use this school?")
+            .setMessage("School radio: $hub" + (if (channel != null) "\nChannel: $channel" else "") +
+                "\n\nOnly use a code from your own teacher's laptop. Students' work will be sent there.")
+            .setPositiveButton("Use it") { _, _ ->
+                settings.hubId = hub
+                if (channel != null) settings.channel = channel
+                if (settings.setupDone) { restartService(); reset(Screen.STATUS) } else render()
+            }
+            .setNegativeButton("Cancel", null).show()
     }
 
     /** Already open behind the student site: "Phone settings" there brings it back on Settings. */
@@ -108,6 +134,7 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.getStringExtra(EXTRA_SCREEN) == SCREEN_SETTINGS && settings.setupDone) reset(Screen.STATUS, Screen.SETTINGS)
+        offerSetup(intent)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -771,6 +798,10 @@ class MainActivity : Activity() {
             background = shape(Color.WHITE, 16, LINE, 2)
             addView(column(2).apply { addView(label("1. Join the Wi-Fi", 17f, INK, true)); addView(wifiLine) })
             addView(column(2).apply { addView(label("2. Open", 17f, INK, true)); addView(address) })
+        })
+        c.addView(bigButton("Show a QR code to scan") {
+            val addr = Settings.hotspotAddress() ?: Settings.localAddresses().firstOrNull() ?: "192.168.43.1"
+            openSite("/join?u=" + Uri.encode("http://$addr:${settings.port}"), "How students join")
         })
         if (firstTime) {
             c.addView(row(14).apply {

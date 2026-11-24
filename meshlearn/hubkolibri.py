@@ -9,7 +9,7 @@ from . import catalog as cat
 from . import kolibri
 from .web import Request, Response, esc, redirect
 
-KIND_NAMES = {"mp4": "Video", "webm": "Video", "mp3": "Audio", "pdf": "PDF", "epub": "E-book"}
+KIND_NAMES = {"mp4": "Video", "webm": "Video", "mp3": "Audio", "pdf": "PDF", "epub": "E-book", "zip": "Activity"}
 
 
 class HubKolibri:
@@ -74,10 +74,10 @@ class HubKolibri:
                "<p>Nothing here can go on the card.</p>")
             + "</div>"
             + (f"<table><tr><th>Topic or lesson</th><th>Add to card</th></tr>{rows}</table>" if rows else "")
-            + "<p class='muted'>Videos, sound, PDFs and e-books with an open licence, which students open in the MeshLearn "
+            + "<p class='muted'>Videos, sound, PDFs, e-books and activities with an open licence, which students open in the MeshLearn "
             "library without the Kolibri app. A lesson listed under several topics is copied once, so topics can add up to "
             "less than the sum of their sizes."
-            + (f" Left out here: {left_out:,} exercise{'' if left_out == 1 else 's'}, apps and items with other licences." if left_out else "")
+            + (f" Left out here: {left_out:,} exercise{'' if left_out == 1 else 's'} and items with other licences." if left_out else "")
             + "</p>" + get_list.format(cls=" class='secondary'", text="Get the newest list of topics")
         )
         return Response(self._page(entry["title"], body, current="library", sub="Kolibri channel"))

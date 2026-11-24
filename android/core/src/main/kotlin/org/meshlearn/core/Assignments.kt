@@ -30,7 +30,7 @@ object Assignments {
     private val OPTIONAL_TOP = listOf("version", "course_title", "unit_title", "unit_no")
     private val Q_KEYS = linkedMapOf(
         "id" to "i", "prompt" to "p", "options" to "o", "answer" to "a", "tolerance" to "l", "accept" to "c",
-        "points" to "s", "max_chars" to "m",
+        "points" to "s", "max_chars" to "m", "pic" to "g", "opic" to "og",
     )
     private val Q_DEFAULTS = mapOf<String, Any>("points" to 1.0, "tolerance" to 0.0, "max_chars" to 600L)
 
@@ -51,6 +51,7 @@ object Assignments {
             }
         }
         val questions = ArrayList<Any?>()
+        var infoBefore = ""
         (assignment["questions"].asList() ?: emptyList()).forEachIndexed { i, item ->
             val q = item.asMap() ?: return@forEachIndexed
             val cq = LinkedHashMap<String, Any?>()
@@ -62,6 +63,9 @@ object Assignments {
                 if (key in Q_DEFAULTS && pyEquals(value, Q_DEFAULTS[key])) continue
                 cq[short] = num(value)
             }
+            val info = q["info"]?.toString() ?: ""   // several questions about one text: it travels once, then 1 = "the same again"
+            if (info.isNotEmpty()) cq["n"] = if (info == infoBefore) 1L else info
+            infoBefore = info
             questions.add(cq)
         }
         out["Q"] = questions
@@ -73,6 +77,7 @@ object Assignments {
         for ((key, short) in TOP_KEYS) out[key] = packed[short] ?: ""
         out["mode"] = if (packed["M"] == "p") "practice" else "graded"
         val questions = ArrayList<Any?>()
+        var infoBefore = ""
         (packed["Q"].asList() ?: emptyList()).forEachIndexed { i, item ->
             val cq = item.asMap() ?: emptyMap()
             val type = QUESTION_TYPES[((cq["t"] as? Number)?.toInt() ?: 0)]
@@ -86,6 +91,11 @@ object Assignments {
             if (type == "number" && "a" in cq) q["tolerance"] = (cq["l"] ?: 0.0).toDoubleOrNull() ?: 0.0
             if ("c" in cq) q["accept"] = (cq["c"].asList() ?: emptyList()).toList()
             if (type == "long") q["max_chars"] = ((cq["m"] ?: 600L) as Number).toLong()
+            if (truthy(cq["g"])) q["pic"] = cq["g"].toString()
+            cq["og"].asList()?.let { list -> q["opic"] = list.map { it?.toString() ?: "" } }
+            val info = (cq["n"] as? String) ?: if (truthy(cq["n"])) infoBefore else ""
+            if (info.isNotEmpty()) q["info"] = info
+            infoBefore = info
             questions.add(q)
         }
         out["questions"] = questions
@@ -117,6 +127,8 @@ object Assignments {
     fun questions(assignment: Map<String, Any?>): List<Map<String, Any?>> =
         (assignment["questions"].asList() ?: emptyList()).mapNotNull { it.asMap() }
 
+    private const val MAX_FIRST_CHARS = 40
+    private const val MAX_UNSURE = 62
     private val NUMBER_RE = Regex("^[-+]?(\\d+([.,]\\d*)?|[.,]\\d+)([eE][-+]?\\d+)?$")
 
     /** Accept "3.5", "3,5" (comma decimals are common in Brazil and Germany) or "1/2". */
@@ -171,6 +183,39 @@ object Assignments {
         return answers to errors
     }
 
+    private fun sameAnswer(q: Map<String, Any?>, a: String, b: String): Boolean = when (q["type"]) {
+        "number" -> {
+            val x = parseNumber(a)
+            val y = parseNumber(b)
+            x != null && y != null && Math.abs(x - y) <= 1e-9 * maxOf(1.0, Math.abs(x), Math.abs(y))
+        }
+        "text" -> normalizeText(a) == normalizeText(b)
+        else -> a.trim() == b.trim()
+    }
+
+    /** What goes with a student's answers: "n", the questions they ticked as not sure (one bit each, in order), and
+     *  "f", their first answer where they changed it after moving on. As signals_of in assignments.py. */
+    fun signalsOf(assignment: Map<String, Any?>, unsure: Set<String>, firstJson: String, answers: Map<String, String>): Map<String, Any?> {
+        val out = LinkedHashMap<String, Any?>()
+        val qs = questions(assignment)
+        var mask = 0L
+        qs.take(MAX_UNSURE).forEachIndexed { i, q -> if (q["id"].toString() in unsure) mask = mask or (1L shl i) }
+        if (mask != 0L) out["n"] = mask
+        val firsts = try { Json.parse(firstJson.ifEmpty { "{}" }).asMap() } catch (e: Exception) { null } ?: emptyMap()
+        val changed = LinkedHashMap<String, Any?>()
+        for (q in qs) {
+            val id = q["id"].toString()
+            val value = (firsts[id] as? String)?.trim() ?: continue
+            if (q["type"] == "long" || value.isEmpty()) continue
+            val cut = value.substring(0, value.offsetByCodePoints(0, minOf(MAX_FIRST_CHARS, chars(value))))
+            if (q["type"] == "choice" && (!isDigits(cut) || (cut.toIntOrNull() ?: Int.MAX_VALUE) >= (q["options"].asList() ?: emptyList()).size)) continue
+            if (q["type"] == "number" && parseNumber(cut) == null) continue
+            if (!sameAnswer(q, cut, answers[id] ?: "")) changed[id] = cut
+        }
+        if (changed.isNotEmpty()) out["f"] = changed
+        return out
+    }
+
     private fun normalizeText(value: String): String =
         value.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ").trim(' ', '.', '!', '?')
 
@@ -204,5 +249,20 @@ object Assignments {
             } else null
         }
         return out
+    }
+
+    /** The right answer of an auto-marked question, in words. */
+    fun keyText(q: Map<String, Any?>): String {
+        val options = q["options"].asList() ?: emptyList()
+        val answer = q["answer"]
+        return when (q["type"]) {
+            "choice" -> (answer as? Number)?.toInt()?.let { options.getOrNull(it)?.toString() } ?: ""
+            "number" -> if (answer !is Number) "" else {
+                val tol = (q["tolerance"] as? Number)?.toDouble() ?: 0.0
+                Html.g(answer.toDouble()) + (if (tol != 0.0) " (± ${Html.g(tol)})" else "")
+            }
+            "text" -> (q["accept"].asList() ?: emptyList()).joinToString(" or ")
+            else -> ""
+        }
     }
 }

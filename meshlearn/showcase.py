@@ -22,46 +22,56 @@ from . import comprehension as cmp
 
 DAY = 86400
 
+# What students pull down beside the questions (the question info)
+GARDEN = "The school garden plot is a rectangle.\nLength: 6 m\nWidth: 4 m\nFencing costs 150 per metre."
+RAIN = "Rainfall measured at the school:\nJanuary: 120 mm\nFebruary: 95 mm\nMarch: 60 mm\nApril: 30 mm"
+
 ASSIGNMENTS: List[dict] = [
     {"id": "a-fractions1", "released": 20, "share": 0.95},  # the sample assignment (loaded by the demo)
     {"id": "a-eqfrac", "released": 18, "share": 0.9, "title": "Equivalent fractions practice", "course": "math",
      "unit": "fractions", "mode": "practice", "instructions": "Try as many times as you like. You will see right and wrong straight away.",
      "questions": [
-         {"type": "choice", "prompt": "Which fraction is equal to 2/4?", "options": ["1/2", "2/3", "3/4"], "answer": 0},
-         {"type": "number", "prompt": "Write 3/4 as a decimal.", "answer": 0.75, "tolerance": 0.001},
-         {"type": "number", "prompt": "What is 1/3 + 1/3? (a fraction or a decimal)", "answer": 0.6667, "tolerance": 0.01},
-         {"type": "choice", "prompt": "Which fraction is the biggest?", "options": ["1/3", "1/2", "1/4"], "answer": 1}]},
+         {"type": "choice", "prompt": "Which fraction is equal to 2/4?", "options": ["1/2", "2/3", "3/4"], "answer": 0,
+          "why": ["", "Added 1 to the top and bottom", "Added 1 to the top only"]},
+         {"type": "number", "prompt": "Write 3/4 as a decimal.", "answer": 0.75, "tolerance": 0.001,
+          "why": [{"x": "3.4", "w": "Wrote the fraction as a decimal, digit by digit"}]},
+         {"type": "number", "prompt": "What is 1/3 + 1/3? (a fraction or a decimal)", "answer": 0.6667, "tolerance": 0.01,
+          "why": [{"x": "2/6", "w": "Added tops and bottoms"}]},
+         {"type": "choice", "prompt": "Which fraction is the biggest?", "options": ["1/3", "1/2", "1/4"], "answer": 1,
+          "why": ["", "", "Thinks a bigger bottom number is a bigger fraction"]}]},
     {"id": "a-garden", "released": 15, "share": 0.9, "title": "Measuring the school garden", "course": "math",
      "unit": "measurement", "due": "2026-10-16",
-     "instructions": "The school garden plot is a rectangle 6 m long and 4 m wide.",
      "questions": [
-         {"type": "number", "prompt": "What is the area of the plot in square metres?", "answer": 24},
-         {"type": "number", "prompt": "What is its perimeter in metres?", "answer": 20},
-         {"type": "number", "prompt": "Fencing costs 150 per metre. How much does it cost to fence the whole plot?", "answer": 3000},
+         {"type": "number", "info": GARDEN, "prompt": "What is the area of the plot in square metres?", "answer": 24,
+          "why": [{"x": "20", "w": "Found the perimeter instead of the area"}, {"x": "10", "w": "Added the sides instead of multiplying"}]},
+         {"type": "number", "info": GARDEN, "prompt": "What is its perimeter in metres?", "answer": 20,
+          "why": [{"x": "24", "w": "Found the area instead of the perimeter"}, {"x": "10", "w": "Added only two of the four sides"}]},
+         {"type": "number", "info": GARDEN, "prompt": "How much does it cost to fence the whole plot?", "answer": 3000},
          {"type": "long", "prompt": "How could you measure the garden if you had no tape measure?",
           "model": "Use something of known length: pace it out and measure one pace, or a stick or knotted rope, and count along each side.", "points": 3}]},
     {"id": "a-rain", "released": 12, "share": 0.85, "title": "Rainfall in our village", "course": "math", "unit": "data",
      "due": "2026-10-20",
-     "instructions": "Rainfall measured at the school: January 120 mm, February 95 mm, March 60 mm, April 30 mm.",
      "questions": [
-         {"type": "number", "prompt": "What was the total rainfall from January to April, in mm?", "answer": 305},
-         {"type": "number", "prompt": "What was the average rainfall per month, in mm?", "answer": 76.25, "tolerance": 0.1},
-         {"type": "choice", "prompt": "Which month was the driest?", "options": ["January", "February", "March", "April"], "answer": 3},
+         {"type": "number", "info": RAIN, "prompt": "What was the total rainfall from January to April, in mm?", "answer": 305},
+         {"type": "number", "info": RAIN, "prompt": "What was the average rainfall per month, in mm?", "answer": 76.25, "tolerance": 0.1},
+         {"type": "choice", "info": RAIN, "prompt": "Which month was the driest?", "options": ["January", "February", "March", "April"], "answer": 3},
          {"type": "long", "prompt": "Why does rainfall matter to farmers here?",
           "model": "Crops need water to grow: too little rain and they dry out, too much floods the fields. Rain also fills wells and rivers.", "points": 3}]},
     {"id": "a-plants", "released": 10, "share": 0.85, "title": "How plants make food", "course": "science", "unit": "living",
      "due": "2026-10-22", "instructions": "Read 'How plants make food' in the Library first.",
      "questions": [
-         {"type": "choice", "prompt": "Which gas do plants take in from the air?", "options": ["Oxygen", "Carbon dioxide", "Nitrogen"], "answer": 1},
+         {"type": "choice", "prompt": "Which gas do plants take in from the air?", "options": ["Oxygen", "Carbon dioxide", "Nitrogen"], "answer": 1,
+          "why": ["Mixed up the gas taken in and the gas given off", "", ""]},
          {"type": "text", "prompt": "What is the green substance in leaves that captures light?", "accept": ["chlorophyll", "clorofila"]},
-         {"type": "choice", "prompt": "Where does photosynthesis mainly happen?", "options": ["Roots", "Leaves", "Flowers"], "answer": 1},
+         {"type": "choice", "prompt": "Where does photosynthesis mainly happen?", "options": ["Roots", "Leaves", "Flowers"], "answer": 1,
+          "opic": ["", "leaf", "flower"]},
          {"type": "long", "prompt": "Why does a plant kept in a dark cupboard grow weak?",
           "model": "Without light it cannot photosynthesise, so it makes no food (sugar) and uses up its store: it grows pale, thin and weak.", "points": 3}]},
     {"id": "a-water", "released": 6, "share": 0.6, "title": "The water cycle", "course": "science", "unit": "earth",
      "due": "2026-10-30",
      "questions": [
          {"type": "choice", "prompt": "What is it called when water turns into vapour?", "options": ["Condensation", "Evaporation", "Precipitation"], "answer": 1},
-         {"type": "choice", "prompt": "Clouds form when water vapour…", "options": ["evaporates", "condenses", "melts"], "answer": 1},
+         {"type": "choice", "pic": "cloud, rain", "prompt": "Clouds form when water vapour…", "options": ["evaporates", "condenses", "melts"], "answer": 1},
          {"type": "text", "prompt": "Rain, snow and hail are all forms of what?", "accept": ["precipitation"]},
          {"type": "long", "prompt": "Where does the water in your village well come from?",
           "model": "Rain soaks into the ground and collects underground (groundwater); the well reaches down to it.", "points": 3}]},
@@ -122,6 +132,11 @@ NOT_SURE = "I am not sure."
 
 
 def _answer(q: dict, right: bool, rng: random.Random) -> str:
+    known = q.get("why") or []
+    if known and not right and rng.random() < 0.6:   # the mistake the teacher's note describes
+        if q["type"] == "choice":
+            return str(rng.choice([i for i, w in enumerate(known) if w]))
+        return rng.choice(known)["x"]
     if q["type"] == "choice":
         if right:
             return str(q["answer"])
@@ -187,6 +202,13 @@ def seed(hub, phone, log: Callable[[str], None] = print, wait_s: float = 60.0) -
             return round(_expected_s(a) * rng.uniform(0.1, 0.2))
         return round(base)
 
+    doubt = random.Random(9)   # its own dice, so the answers above don't depend on it
+
+    def signals_for(a, answers, ability):
+        unsure = {q["id"] for q in a["questions"] if q["type"] != "long" and doubt.random() < (0.28 if ability < 0.75 else 0.1)}
+        first = {q["id"]: str(q["answer"]) for q in a["questions"] if q["type"] == "choice" and doubt.random() < 0.08}
+        return asg.signals_of(a, unsure, json.dumps(first), answers)
+
     to_grade = []  # (student, aid, sub_id or None, answers) for written answers the teacher marks
     radio_subs = 0
     for name, node, ability, habit in STUDENTS:
@@ -202,16 +224,17 @@ def seed(hub, phone, log: Callable[[str], None] = print, wait_s: float = 60.0) -
                 answers = answers_for(a, min(0.98, ability + 0.12 * t), rushing)
                 duration = duration_for(a, habit, rushing)
                 if node == "phone-1":  # through the real radio path
-                    sub_id = phone.submit(phone.get_assignment(a["id"]), name, answers, duration=duration)
+                    sub_id = phone.submit(phone.get_assignment(a["id"]), name, answers, duration=duration,
+                                          signals=signals_for(a, answers, ability))
                     phone.db.execute("UPDATE submissions SET submitted_at = ? WHERE sub_id = ?", (at, sub_id))
                     radio_subs += 1
                 else:  # phones out of range in the demo: as if their work had already arrived
                     sub_id = asg.new_id("s")
                     hub.db.execute(
                         "INSERT INTO submissions (sub_id, assignment_id, version, student, phone, answers, submitted_at, "
-                        "received_at, duration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "received_at, duration, signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (sub_id, a["id"], hub.current_version(a["id"]), name, node, json.dumps(answers), at,
-                         at + rng.uniform(600, 4 * 3600), duration))
+                         at + rng.uniform(600, 4 * 3600), duration, json.dumps(signals_for(a, answers, ability))))
                     hub.grade_submission(sub_id)
                 if any(q["type"] == "long" for q in a["questions"]):
                     to_grade.append((name, a, sub_id, ability, spec["released"]))

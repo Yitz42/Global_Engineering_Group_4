@@ -68,7 +68,7 @@ class Response:
         self.file_path: Optional[str] = None
 
     def set_cookie(self, name: str, value: str, max_age: int = 60 * 60 * 24 * 180) -> "Response":
-        self.headers["Set-Cookie"] = f"{name}={quote(value)}; Path=/; Max-Age={max_age}; SameSite=Lax"
+        self.headers["Set-Cookie"] = f"{name}={quote(value)}; Path=/; Max-Age={max_age}; SameSite=Lax; HttpOnly"
         return self
 
 
@@ -131,6 +131,9 @@ class App:
         self.route(method, pattern)(fn)
 
     def dispatch(self, request: Request) -> Response:
+        if request.method == "POST" and request.headers.get("Origin", "") == "null":
+            # A walled-off activity (zipapps.py) must not be able to press our buttons.
+            return Response("Not allowed", status=403, content_type="text/plain")
         path_matched = False
         for method, regex, fn in self._routes:
             match = regex.match(request.path)
@@ -216,6 +219,56 @@ class App:
         return server
 
 
+SITE_DIR = os.path.join(os.path.dirname(__file__), "site")
+
+
+def _site(name: str) -> str:
+    """A file of the student site's look or scripts, shared with the Kotlin phone."""
+    with open(os.path.join(SITE_DIR, name), encoding="utf-8") as fh:
+        return fh.read()
+
+
+ICONS: Dict[str, str] = json.loads(_site("icons.json"))
+
+
+def icon(name: str, cls: str = "") -> str:
+    """A line icon from the designs (site/icons.json). Decorative: the words beside it carry the meaning."""
+    return (f"<svg class='i{' ' + cls if cls else ''}' viewBox='0 0 24 24' aria-hidden='true'>"
+            f"<path d='{ICONS[name]}'/></svg>")
+
+
+PICTURES: Dict[str, dict] = json.loads(_site("pictures.json"))   # drawings for young learners, one set on every phone
+MAX_PICS = 12
+
+
+def picture(key: str, cls: str = "") -> str:
+    """One drawing from the picture library, or '' when this version doesn't have it."""
+    p = PICTURES.get(key)
+    if not p:
+        return ""
+    paths = (f"<path d='{p['d']}' fill='{p['f']}'/>" if p.get("d") else "") + (f"<path d='{p['x']}' fill='none'/>" if p.get("x") else "")
+    return f"<svg class='pic{' ' + cls if cls else ''}' viewBox='0 0 24 24' stroke='{p.get('s', '#1a1a1a')}' aria-hidden='true'>{paths}</svg>"
+
+
+def pictures_of(spec: str) -> List[str]:
+    """The pictures a question shows: "apple*3, ball" -> apple, apple, apple, ball (at most MAX_PICS)."""
+    out: List[str] = []
+    for part in (spec or "").split(","):
+        key, _, count = part.strip().partition("*")
+        if key in PICTURES:
+            out += [key] * max(1, min(int(count) if count.strip().isdigit() else 1, MAX_PICS))
+    return out[:MAX_PICS]
+
+
+def pictures_html(spec: str) -> str:
+    """A question's pictures in a frame. Read aloud as the names of what is shown, never how many."""
+    keys = pictures_of(spec)
+    if not keys:
+        return ""
+    names = ", ".join(dict.fromkeys(PICTURES[k]["n"] for k in keys))
+    return f"<div class='pics n{len(keys)}' role='img' aria-label='{esc(names)}'>{''.join(picture(k) for k in keys)}</div>"
+
+
 CSS = """
 :root{--bg:#f7f7f4;--card:#fff;--ink:#1d1d1b;--muted:#5b5b57;--line:#d9d9d3;--accent:#1f5fbf;--accent-ink:#fff;--good:#1d7a3a;--bad:#b3261e;--warn:#8a5a00}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#22221f;--ink:#efefea;--muted:#b4b4ad;--line:#3a3a36;--accent:#7fb0ff;--accent-ink:#0b1a33;--good:#6fcf8a;--bad:#ff8a80;--warn:#f0c060}}
@@ -251,118 +304,27 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-a
 
 
 # The student site's look, on top of CSS: made for a phone held in one hand. Big tap targets, whole
-# cards that open, tabs that show where you are. Kept identical to STUDENT_CSS in the Kotlin phone (Web.kt).
-STUDENT_CSS = """
-body{font-size:18px}
-header{position:sticky;top:0;z-index:5;flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px}
-header strong{font-size:16px;margin:0;display:flex;justify-content:space-between;gap:8px}
-.who{font-weight:400;color:var(--muted);font-size:15px}
-nav.tabs{display:flex;gap:6px}
-nav.tabs a{flex:1;display:flex;align-items:center;justify-content:center;white-space:nowrap;padding:9px 4px;border-radius:10px;border:1px solid var(--line);font-size:16px;color:var(--accent);text-decoration:none}
-nav.tabs a[aria-current=page]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
-main{padding:12px 14px 32px}
-h1{font-size:24px;margin:6px 0 10px}
-.lead{font-size:19px;margin:0 0 14px}
-a.card{display:block;color:var(--ink);text-decoration:none}
-a.card:hover,a.card:focus{border-color:var(--accent)}
-a.card h2,a.card h3{color:var(--accent);margin:0 0 6px}
-a.card h3{font-size:19px}
-.meta{color:var(--muted);font-size:15px;margin:4px 0}
-.due{font-size:15px;font-weight:700;margin:6px 0}
-.due.late{color:var(--bad)} .due.soon{color:var(--warn)} .due.done{color:var(--muted);font-weight:400}
-.go{display:block;text-align:center;margin:12px 0 0}
-.bar{height:10px;border-radius:99px;background:var(--line);overflow:hidden;margin:10px 0 4px}
-.bar span{display:block;height:100%;background:var(--good)}
-fieldset.q{background:var(--card);margin:14px 0;padding:14px}
-fieldset.q legend{float:left;width:100%;padding:0;margin:0 0 10px;font-size:19px;line-height:1.35}
-fieldset.q legend+*{clear:both}
-.qnum{display:block;color:var(--muted);font-size:14px;font-weight:600;margin-bottom:2px}
-.q label:not(.option){font-weight:400;font-size:15px;color:var(--muted);margin:4px 0}
-.option{border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0;min-height:52px;font-size:18px;color:var(--ink);cursor:pointer}
-.option.on{border-color:var(--accent);outline:2px solid var(--accent)}
-.q.bad{border-color:var(--bad)}
-.counter{font-size:14px;color:var(--muted);text-align:right;margin:4px 0 0}
-.submitbar{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0;margin-top:12px}
-.submitbar .meta{margin:0 0 6px}
-button.big,.button.big{display:block;width:100%;text-align:center;padding:15px;font-size:19px;margin:8px 0 0}
-.grade{font-size:22px;font-weight:700;margin:6px 0}
-.units{list-style:none;padding:0;margin:8px 0 0}
-.units li{padding:8px 0;border-top:1px solid var(--line)}
-a.item{padding:12px 14px;margin:8px 0}
-a.item strong{color:var(--accent)}
-form.search{display:flex;gap:8px;align-items:center;margin:0 0 8px}
-form.search input{flex:1}
-form.search button{margin:0}
-form.lang{align-self:flex-end;margin:0}
-form.lang button{margin:0;padding:6px 14px;font-size:15px;background:transparent;color:var(--accent);border:1px solid var(--line)}
-[dir=rtl] fieldset.q legend{float:right}
-[dir=rtl] .counter{text-align:left}
-[dir=rtl] button,[dir=rtl] .button{margin:8px 0 0 8px}
-[dir=rtl] button.big,[dir=rtl] .button.big,[dir=rtl] form.search button,[dir=rtl] form.lang button{margin:8px 0 0}
-[dir=rtl] th,[dir=rtl] td{text-align:right}
-.week{margin:0 0 14px}
-.week .wk{display:flex;justify-content:space-between;gap:8px;font-size:16px}
-.week .bar{height:14px;margin:6px 0 0}
-.next{background:var(--accent);color:var(--accent-ink);border-radius:22px;padding:20px;margin:0 0 16px}
-.next .label{font-size:15px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;opacity:.85}
-.next h2{margin:8px 0 6px;font-size:23px;line-height:1.25;color:inherit}
-.next .meta{color:inherit;opacity:.9}
-.next .due{color:inherit}
-.next .button{display:block;text-align:center;background:var(--card);color:var(--accent);font-size:20px;padding:16px;border-radius:16px;margin:14px 0 0}
-.row{display:flex;align-items:center;gap:12px;background:var(--card);border:2px solid var(--line);border-radius:18px;padding:12px 14px;margin:8px 0;color:var(--ink);text-decoration:none}
-.row.wait{border-style:dashed;background:transparent}
-.row .grow{flex:1;min-width:0;display:flex;flex-direction:column}
-.row .meta{margin:0}
-.row .end{font-weight:700;text-align:right}
-.row .end.small{font-weight:400;font-size:15px;color:var(--muted)}
-.chev{color:var(--muted);font-size:22px}
-.squares{display:grid;grid-template-columns:repeat(auto-fill,minmax(40px,1fr));gap:6px;margin:10px 0}
-.squares span{display:flex;align-items:center;justify-content:center;height:40px;border-radius:10px;font-weight:800}
-.squares .right{background:var(--good);color:var(--card)}
-.squares .part{background:var(--warn);color:var(--card)}
-.squares .wrong{border:3px solid var(--bad);color:var(--bad)}
-.squares .wait{border:2px dashed var(--line);color:var(--muted)}
-.new{display:inline-block;padding:2px 10px;border-radius:99px;background:var(--accent);color:var(--accent-ink);font-size:14px;font-weight:800}
-.bigscore{font-size:24px;font-weight:800;margin:6px 0}
-.missed{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:10px 0 0}
-.missed strong{display:block}
-.sendin{font-weight:700}
-"""
+# cards that open, tabs that show where you are. student.css is the base and looks.css the three looks by
+# age. The Kotlin phone (Web.kt) reads the same files from meshlearn/site.
+STUDENT_CSS = _site("student.css") + _site("looks.css")
 
 # Counts down to when the phone sends the student's work by radio (data-in seconds from now), then
-# says it is on its way. Kept identical to COUNTDOWN_JS in the Kotlin phone (Web.kt). Plain ES5.
-COUNTDOWN_JS = r"""
-(function(){var el=document.getElementById('sendin');if(!el)return;
-var left=parseInt(el.getAttribute('data-in'),10)||0,t0=new Date().getTime();
-function tick(){var s=Math.max(0,Math.round(left-(new Date().getTime()-t0)/1000));
-if(s<=0){el.textContent=el.getAttribute('data-now');return;}
-var m=Math.floor(s/60),r=s%60;el.textContent=el.getAttribute('data-words').replace('{time}',m+':'+(r<10?'0':'')+r);
-setTimeout(tick,1000);}tick();})();
-"""
+# says it is on its way. Plain ES5.
+COUNTDOWN_JS = _site("countdown.js")
 
-# Keeps a student's answers in the browser while they work (so a closed tab or a flat battery loses
-# nothing), counts what is answered, and shows which choice is picked. Plain ES5 for old phones.
-ASSIGNMENT_JS = r"""
-(function(){var f=document.getElementById('aform');if(!f)return;var key='meshlearn-draft:'+f.getAttribute('data-key');
-var store=null;try{store=window.localStorage;}catch(e){}
-function all(){return f.querySelectorAll('input[type=text],input[type=radio],textarea');}
-function save(){if(!store)return;var d={},els=all();for(var i=0;i<els.length;i++){var el=els[i];
-if(el.type==='radio'){if(el.checked)d[el.name]=el.value;}else if(el.value)d[el.name]=el.value;}
-try{store.setItem(key,JSON.stringify(d));}catch(e){}}
-function restore(){if(!store)return;var d;try{d=JSON.parse(store.getItem(key)||'{}')||{};}catch(e){d={};}
-var els=all();for(var i=0;i<els.length;i++){var el=els[i];if(!d.hasOwnProperty(el.name))continue;
-if(el.type==='radio'){if(!f.querySelector('input[name="'+el.name+'"]:checked')&&el.value===d[el.name])el.checked=true;}
-else if(!el.value)el.value=d[el.name];}}
-function update(){var qs=f.querySelectorAll('fieldset.q'),done=0;for(var i=0;i<qs.length;i++){
-var q=qs[i],ok=false,els=q.querySelectorAll('input,textarea');for(var j=0;j<els.length;j++){var el=els[j];
-if(el.type==='radio'){var lab=el.parentNode;if(el.checked){ok=true;lab.className='option on';}else lab.className='option';}
-else if(el.value.replace(/\s/g,''))ok=true;
-if(el.tagName==='TEXTAREA'){var c=document.getElementById(el.id+'-count');if(c)c.innerHTML=el.value.length+' / '+el.getAttribute('maxlength');}}
-if(ok)done++;}var a=document.getElementById('answered');
-if(a)a.textContent=(a.getAttribute('data-words')||'{done} of {total} answered').replace('{done}',done).replace('{total}',qs.length);}
-restore();update();f.addEventListener('input',function(){save();update();});f.addEventListener('change',function(){save();update();});
-var bad=f.querySelector('[aria-invalid=true]');if(bad)bad.focus();})();
-"""
+# One question at a time, with arrows and a review page; without it, every question shows in one list.
+# Keeps a student's answers and place in the browser while they work (so a closed tab or a flat battery
+# loses nothing), counts what is answered, and shows which choice is picked. Question info pulls down on
+# a phone and stays open at the side on a wide screen. Plain ES5 for old phones.
+ASSIGNMENT_JS = _site("assignment.js")
+
+LISTEN_JS = _site("listen.js")   # reads the page or the question aloud, where the device has a voice for the language
+SIGNIN_JS = _site("signin.js")   # finds a name in the class list, and offers whoever was last on this phone
+IDLE_JS = _site("idle.js")       # goes back to "Who are you?" when nobody taps for a while
+MATH_JS = _site("math.js")         # equations (KaTeX), only on pages that have some
+READING_JS = _site("reading.js")   # bigger text, easy-to-read letters, more space
+SCRATCH_JS = _site("scratch.js")   # a scratchpad per question; stays in the browser
+RESUME_JS = _site("resume.js")   # "Keep going" instead of "Start" on work this student has begun
 
 # Forgets a saved draft once the work is safely turned in.
 CLEAR_DRAFT_JS = ("(function(){var el=document.getElementById('clear-draft');if(!el)return;"
@@ -375,6 +337,19 @@ def minutes_for(questions, words: Strings = ENGLISH) -> str:
     """'about 5 min' for a list of questions."""
     seconds = sum(_EXPECTED_S.get(q.get("type"), 45) for q in questions)
     return words("time.about_min", n=max(1, int(seconds / 60 + 0.5)))
+
+
+def teacher_pics(q: dict) -> str:
+    keys = pictures_of(q.get("pic", "")) + [k for k in q.get("opic", []) if k in PICTURES]
+    return f"<div>{''.join(picture(k, 'mini') for k in keys)}</div>" if keys else ""
+
+
+def info_panel(q: dict) -> str:
+    """A question's info, folded away, for the teacher's pages."""
+    if not q.get("info"):
+        return teacher_pics(q)
+    return teacher_pics(q) + (f"<details class='muted' style='margin:4px 0'><summary>Question info</summary>"
+            f"<p style='white-space:pre-line;margin:4px 0'>{esc(q['info'])}</p></details>")
 
 
 def due_label(due: str, turned_in: bool, today: Optional[datetime.date] = None,
@@ -401,12 +376,14 @@ def due_label(due: str, turned_in: bool, today: Optional[datetime.date] = None,
 
 
 def page(title: str, body: str, nav: str = "", site: str = "MeshLearn", wide: bool = False, extra_css: str = "",
-         lang: str = "en", direction: str = "ltr") -> str:
+         lang: str = "en", direction: str = "ltr", body_cls: str = "", before: str = "", after: str = "") -> str:
     attrs = f"lang='{esc(lang)}'" + (" dir='rtl'" if direction == "rtl" else "")
     return (
         f"<!doctype html><html {attrs}><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{esc(title)} · {esc(site)}</title><style>{CSS}{extra_css}</style></head>"
-        f"<body><header><strong>{esc(site)}</strong>{nav}</header>"
-        f"<main id='main'{' class=wide' if wide else ''}><h1>{esc(title)}</h1>{body}</main></body></html>"
+        f"<body{f' class={chr(39)}{body_cls}{chr(39)}' if body_cls else ''}><header><strong>{esc(site)}</strong>{nav}</header>"
+        f"<main id='main'{' class=wide' if wide else ''}>"
+        + (f"<div class='titlebar'>{before}<h1>{esc(title)}</h1>{after}</div>" if body_cls else f"<h1>{esc(title)}</h1>")
+        + f"{body}</main></body></html>"
     )

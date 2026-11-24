@@ -14,6 +14,15 @@ An assignment is plain JSON so it can travel over the mesh:
       ]
     }
 
+Any question may also have "info": the text, table or data that goes with it, which students
+pull down on a phone and see beside the question on a computer. "pic" shows drawings from the
+picture library ("apple*3, ball"), and a choice question's "opic" one drawing per option (or "").
+Every phone has the library, so only the names travel.
+
+"why" holds the teacher's notes on wrong answers: for a choice, one per option ("" for none); for a
+number or short answer, [{"x": "2/6", "w": "Added tops and bottoms"}]. Like a written question's
+"model" answer it stays on the hub: it is never packed for phones and does not change the version.
+
 In "graded" mode the answer key never leaves the hub: the phone only checks
 that answers are complete and well-formed, and the hub grades them. In
 "practice" mode the key goes to the phone so students get instant feedback.
@@ -31,8 +40,14 @@ from typing import Dict, List, Optional, Tuple
 
 QUESTION_TYPES = ("choice", "number", "text", "long")
 KEY_FIELDS = ("answer", "tolerance", "accept")
+OWN_FIELDS = ("why", "model")   # the teacher's own notes: never on a phone, in any mode
 MAX_TEXT_CHARS = 200
 MAX_LONG_CHARS = 1500
+MAX_INFO_CHARS = 2000
+MAX_WHY_CHARS = 80
+MAX_FIRST_CHARS = 40
+MAX_UNSURE = 62   # questions the "not sure" bits cover: they stay a plain whole number on every phone
+_PIC = re.compile(r"^[a-z0-9-]{1,30}(\*\d{1,2})?$")
 
 
 class AssignmentError(ValueError):
@@ -45,6 +60,24 @@ def new_id(prefix: str = "") -> str:
 
 def _clean_str(value, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _clean_why(q: dict, raw) -> list:
+    """The teacher's notes on wrong answers, cleaned; [] when there are none."""
+    raw = raw if isinstance(raw, list) else []
+    if q["type"] == "choice":
+        notes = [_clean_str(n, MAX_WHY_CHARS) if isinstance(n, str) else "" for n in raw][:len(q["options"])]
+        notes += [""] * (len(q["options"]) - len(notes))
+        notes[q["answer"]] = ""
+        return notes if any(notes) else []
+    out = []
+    for item in raw[:12]:
+        if not isinstance(item, dict):
+            continue
+        x, w = _clean_str(item.get("x"), MAX_FIRST_CHARS), _clean_str(item.get("w"), MAX_WHY_CHARS)
+        if x and w and grade_question(q, x) == 0 and (q["type"] == "text" or parse_number(x) is not None):
+            out.append({"x": x, "w": w})
+    return out
 
 
 def normalize_assignment(data: dict) -> dict:
@@ -81,6 +114,12 @@ def normalize_assignment(data: dict) -> dict:
         if points <= 0:
             raise AssignmentError(f"question {index}: points must be positive")
         clean = {"id": qid, "type": qtype, "prompt": prompt, "points": points}
+        info = _clean_str(q.get("info"), MAX_INFO_CHARS)
+        if info:
+            clean["info"] = info
+        pics = [p.strip() for p in str(q.get("pic") or "").replace("\n", ",").split(",") if _PIC.match(p.strip())][:12]
+        if pics:
+            clean["pic"] = ",".join(pics)
 
         if qtype == "choice":
             options = [_clean_str(o, 200) for o in q.get("options") or [] if _clean_str(o, 200)]
@@ -93,6 +132,10 @@ def normalize_assignment(data: dict) -> dict:
             if not 0 <= answer < len(options):
                 raise AssignmentError(f"question {index}: correct option is out of range")
             clean.update(options=options, answer=answer)
+            opic = [str(p or "").strip() for p in q.get("opic") or []][:len(options)]
+            opic = [p if _PIC.match(p) and "*" not in p else "" for p in opic]
+            if any(opic):
+                clean["opic"] = opic + [""] * (len(options) - len(opic))
         elif qtype == "number":
             try:
                 clean["answer"] = float(q.get("answer"))
@@ -114,6 +157,9 @@ def normalize_assignment(data: dict) -> dict:
             model = _clean_str(q.get("model"), MAX_LONG_CHARS)
             if model:
                 clean["model"] = model
+        why = _clean_why(clean, q.get("why")) if qtype != "long" else []
+        if why:
+            clean["why"] = why
         questions.append(clean)
 
     return {
@@ -131,14 +177,15 @@ def normalize_assignment(data: dict) -> dict:
 
 # -- compact form for the radio and the course pack ---------------------------
 #
-# Short keys, numeric question types, and defaults left out. Packing is lossless:
-# unpack(pack(x)) == x for any normalized assignment.
+# Short keys, numeric question types, and defaults left out. Packing is lossless, except that the
+# teacher's own notes ("model", "why") are left out: otherwise unpack(pack(x)) == x.
 
 _TOP_KEYS = {"id": "i", "title": "T", "subject": "S", "instructions": "I", "due": "D", "mode": "M", "version": "v",
              "course": "C", "unit": "U", "course_title": "Ct", "unit_title": "Ut", "unit_no": "Un"}
 # Filled in by the hub for the phone's copy only; left out of unpacked assignments when empty.
 _OPTIONAL_TOP = ("version", "course_title", "unit_title", "unit_no")
-_Q_KEYS = {"id": "i", "prompt": "p", "options": "o", "answer": "a", "tolerance": "l", "accept": "c", "points": "s", "max_chars": "m"}
+_Q_KEYS = {"id": "i", "prompt": "p", "options": "o", "answer": "a", "tolerance": "l", "accept": "c", "points": "s", "max_chars": "m",
+           "pic": "g", "opic": "og"}
 _TYPE_CODES = {t: n for n, t in enumerate(QUESTION_TYPES)}
 _Q_DEFAULTS = {"points": 1.0, "tolerance": 0.0, "max_chars": 600}
 
@@ -157,6 +204,7 @@ def pack(assignment: dict) -> dict:
         elif value not in (None, ""):
             out[short] = value
     questions = []
+    info_before = ""
     for n, q in enumerate(assignment["questions"], start=1):
         cq = {"t": _TYPE_CODES[q["type"]]}
         for key, short in _Q_KEYS.items():
@@ -168,6 +216,10 @@ def pack(assignment: dict) -> dict:
             if key in _Q_DEFAULTS and value == _Q_DEFAULTS[key]:
                 continue
             cq[short] = _num(value)
+        info = q.get("info") or ""
+        if info:  # several questions about one text: it travels once, then 1 means "the same again"
+            cq["n"] = 1 if info == info_before else info
+        info_before = info
         questions.append(cq)
     out["Q"] = questions
     return out
@@ -177,6 +229,7 @@ def unpack(packed: dict) -> dict:
     out = {key: packed.get(short, "") for key, short in _TOP_KEYS.items()}
     out["mode"] = "practice" if packed.get("M") == "p" else "graded"
     questions = []
+    info_before = ""
     for n, cq in enumerate(packed.get("Q") or [], start=1):
         qtype = QUESTION_TYPES[int(cq.get("t", 0))]
         q = {"id": cq.get("i") or f"q{n}", "type": qtype, "prompt": cq.get("p", ""),
@@ -191,6 +244,15 @@ def unpack(packed: dict) -> dict:
             q["accept"] = list(cq["c"])
         if qtype == "long":
             q["max_chars"] = int(cq.get("m", _Q_DEFAULTS["max_chars"]))
+        if cq.get("g"):
+            q["pic"] = str(cq["g"])
+        if isinstance(cq.get("og"), list):
+            q["opic"] = [str(p) for p in cq["og"]]
+        info = cq.get("n") or ""
+        info = info if isinstance(info, str) else info_before
+        if info:
+            q["info"] = info
+        info_before = info
         questions.append(q)
     out["questions"] = questions
     for key in _OPTIONAL_TOP:
@@ -216,6 +278,9 @@ def max_points(assignment: dict) -> float:
 def public_view(assignment: dict) -> dict:
     """The copy sent to the phone: answer key removed unless in practice mode."""
     view = copy.deepcopy(assignment)
+    for q in view["questions"]:
+        for field in OWN_FIELDS:
+            q.pop(field, None)
     if view.get("mode") != "practice":
         for q in view["questions"]:
             for field in KEY_FIELDS:
@@ -319,6 +384,74 @@ def grade(assignment: dict, answers: Dict[str, str], manual: Optional[Dict[str, 
     }
 
 
+def same_answer(q: dict, a: str, b: str) -> bool:
+    if q["type"] == "number":
+        x, y = parse_number(a), parse_number(b)
+        return x is not None and y is not None and abs(x - y) <= 1e-9 * max(1.0, abs(x), abs(y))
+    if q["type"] == "text":
+        return _normalize_text(a) == _normalize_text(b)
+    return (a or "").strip() == (b or "").strip()
+
+
+def wrong_note(q: dict, answer: str) -> str:
+    """The teacher's note on this wrong answer, or ''."""
+    why = q.get("why") or []
+    if q["type"] == "choice":
+        return why[int(answer)] if (answer or "").isdigit() and int(answer) < len(why) else ""
+    exact = next((item["w"] for item in why if same_answer(q, item["x"], answer)), "")
+    if exact or q["type"] != "number":
+        return exact
+    got = parse_number(answer)   # 2/6 is also written 0.33
+    return next((item["w"] for item in why if "/" in item["x"] and got is not None
+                 and abs(got - (parse_number(item["x"]) or 0)) <= 0.015 * abs(parse_number(item["x"]) or 0)), "")
+
+
+def signals_of(assignment: dict, unsure, first_json: str, answers: Dict[str, str]) -> dict:
+    """What goes with a student's answers, small enough for the radio: "n", the questions they ticked as not
+    sure (one bit each, in order), and "f", their first answer where they changed it after moving on."""
+    out: dict = {}
+    mask = sum(1 << i for i, q in enumerate(assignment["questions"][:MAX_UNSURE]) if q["id"] in unsure)
+    if mask:
+        out["n"] = mask
+    try:
+        firsts = json.loads(first_json or "{}")
+    except ValueError:
+        firsts = {}
+    changed = {}
+    for q in assignment["questions"] if isinstance(firsts, dict) else []:
+        value = firsts.get(q["id"])
+        if q["type"] == "long" or not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()[:MAX_FIRST_CHARS]
+        if q["type"] == "choice" and not (value.isdigit() and int(value) < len(q["options"])):
+            continue
+        if q["type"] == "number" and parse_number(value) is None:
+            continue
+        if not same_answer(q, value, answers.get(q["id"], "")):
+            changed[q["id"]] = value
+    if changed:
+        out["f"] = changed
+    return out
+
+
+def read_signals(assignment: dict, signals) -> Tuple[set, Dict[str, str]]:
+    """The ids of the questions a student was not sure of, and their first answers where they changed."""
+    signals = signals if isinstance(signals, dict) else {}
+    mask = signals.get("n")
+    mask = mask if isinstance(mask, int) and mask > 0 else 0
+    ids = [q["id"] for q in assignment["questions"]]
+    first = signals.get("f")
+    first = {k: v for k, v in first.items() if k in ids and isinstance(v, str)} if isinstance(first, dict) else {}
+    return {qid for i, qid in enumerate(ids) if mask >> i & 1}, first
+
+
+def answer_text(q: dict, answer: str) -> str:
+    """An answer in words."""
+    if q["type"] == "choice" and (answer or "").isdigit() and int(answer) < len(q.get("options", [])):
+        return q["options"][int(answer)]
+    return answer or ""
+
+
 def practice_feedback(assignment: dict, answers: Dict[str, str]) -> Dict[str, Optional[bool]]:
     """For practice mode on the phone: True/False per auto-gradable question."""
     feedback: Dict[str, Optional[bool]] = {}
@@ -329,3 +462,15 @@ def practice_feedback(assignment: dict, answers: Dict[str, str]) -> Dict[str, Op
         else:
             feedback[q["id"]] = None
     return feedback
+
+
+def key_text(q: dict) -> str:
+    """The right answer of an auto-marked question, in words."""
+    if q["type"] == "choice" and isinstance(q.get("answer"), int) and q["answer"] < len(q.get("options", [])):
+        return q["options"][q["answer"]]
+    if q["type"] == "number" and "answer" in q:
+        tol = q.get("tolerance") or 0
+        return f"{q['answer']:g}" + (f" (± {tol:g})" if tol else "")
+    if q["type"] == "text" and q.get("accept"):
+        return " or ".join(q["accept"])
+    return ""

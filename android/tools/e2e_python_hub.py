@@ -92,7 +92,7 @@ def main() -> int:
         wait_for("OPEN packet reached the phone", lambda: "Fractions and plants check-in" in get("/"))
 
         form = get(f"/a/{aid}")
-        assert "Check and submit" in form and "chlorophyll" not in form.lower(), "answer key must not reach the phone"
+        assert "Hand it in" in form and "chlorophyll" not in form.lower(), "answer key must not reach the phone"
         done = post(f"/a/{aid}", {"q1": "1", "q2": "3/4", "q3": "Chlorophyll", "q4": "0", "q5": "We share a pizza in quarters."})
         assert "Done! Your work is saved" in done, done[-600:]
         print("  ok: student turned it in on the phone")

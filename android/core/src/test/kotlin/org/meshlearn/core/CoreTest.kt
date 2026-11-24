@@ -220,13 +220,207 @@ class CoreTest {
         phone.stop(); hub.stop()
     }
 
+    /** Question info packs as in Python (a shared text travels once) and shows beside each question, with arrows and review. */
+    @Test fun questionInfoAndReview() {
+        val rain = "Rainfall:\nJanuary 120 mm"
+        val packed = Json.parse("""{"i":"r1","T":"Rain","I":"Use the table.","Q":[{"t":1,"p":"Total?","n":"Rainfall:\nJanuary 120 mm"},""" +
+            """{"t":1,"p":"Difference?","n":1},{"t":2,"p":"Why?"}]}""").asMap()!!
+        val a = Assignments.unpack(packed)
+        assertEquals(listOf(rain, rain, null), Assignments.questions(a).map { it["info"] })
+        assertEquals(Json.dumps(packed["Q"], sortKeys = true), Json.dumps(Assignments.pack(a)["Q"], sortKeys = true))
+        val dir = tmp()
+        val link = Link(0.0, 1)
+        val phone = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        phone.importAssignment(packed, open = true)
+        val html = String(phone.app.dispatch(Request("GET", "/a/r1", emptyMap(), mapOf("cookie" to "student=Ana"), ByteArray(0), "1.2.3.4")).body)
+        assertEquals(3, html.split("<details class='qinfo'").size - 1)
+        assertEquals(2, html.split("<summary>Question info</summary>").size - 1)
+        for (part in listOf("id='back'", "id='next'", "id='toreview'", "id='review'", "January 120 mm", "data-prompt='Why?'")) assertTrue(html.contains(part))
+        // Three languages: all on the welcome page, the other two as buttons later.
+        val langDir = File(System.getProperty("meshlearn.repo"), "meshlearn/lang")
+        fun pack(code: String) = Json.parse(File(langDir, "$code.json").readText(Charsets.UTF_8)).asMap()!!
+        assertTrue(phone.importLanguage(mapOf("school" to pack("eng"), "second" to pack("swa"), "more" to listOf(pack("fra")))))
+        fun page(path: String, cookie: String) = String(phone.app.dispatch(Request("GET", path, emptyMap(), mapOf("cookie" to cookie), ByteArray(0), "1.2.3.4")).body, Charsets.UTF_8)
+        // The school's ages choose the looks, also after a restart; students pick theirs.
+        assertTrue(page("/", "student=Ana").contains("<body class='st look-mid'>"))
+        assertTrue(phone.importLanguage(mapOf("school" to pack("eng"), "second" to pack("swa"), "more" to listOf(pack("fra")),
+            "ages" to listOf("early", "upper"))))
+        val again = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1b"), db(dir, "outbox2.db"), h, retryS = 0.5) }, batchS = 0.2)
+        for (p in listOf(phone, again)) {
+            fun get(path: String, cookie: String, method: String = "GET", body: String = "") = p.app.dispatch(
+                Request(method, path, emptyMap(), mapOf("cookie" to cookie), body.toByteArray(), "1.2.3.4"))
+            fun html(path: String, cookie: String) = String(get(path, cookie).body, Charsets.UTF_8)
+            assertTrue(html("/", "student=Ana").contains("<body class='st look-teen'>"))
+            assertTrue(html("/", "").contains("How old are you?"))
+            assertTrue(get("/look", "", "POST", "to=young").headers["Set-Cookie"]!!.startsWith("look=young"))
+            val young = html("/", "student=Ana; look=young")
+            assertTrue(young.contains("class='bigplay'") && young.contains("Stars this week: 0") && young.contains("</span>My stars</a>"))
+            assertTrue(html("/results", "student=Ana; look=young").contains("<h1>My stars</h1>"))
+            assertTrue(html("/", "student=Ana").contains("class='tiles'"))
+            assertTrue(html("/a/r1", "student=Ana").contains("id='qprog'"))
+        }
+        val welcome = page("/", "")
+        for (name in listOf("English", "Kiswahili", "Français")) assertTrue(welcome.contains(">$name</button>"))
+        val french = page("/library", "student=Ana; lang=fra")
+        assertTrue(french.contains("<html lang='fr'>") && french.contains(">Kiswahili</button>") && french.contains(">English</button>"))
+    }
+
+    /** Signing in by picture, secret picture and PIN; pictures in questions; keep reading; right answers: as the Python phone. */
+    @Test fun signInPicturesReadingAndRightAnswers() {
+        assertEquals("8b86cf26c69f90f40d1f77b5a6864445", SignIn.hash("Tomás", "4321"))   // the same value is in test_meshlearn.py
+        val langDir = File(System.getProperty("meshlearn.repo"), "meshlearn/lang")
+        val eng = Json.parse(File(langDir, "eng.json").readText(Charsets.UTF_8)).asMap()!!
+        val dir = tmp()
+        val link = Link(0.0, 1)
+        val phone = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        fun go(path: String, cookie: String = "", method: String = "GET", body: String = "", headers: Map<String, String> = emptyMap()): Response {
+            val (p, q) = path.split("?", limit = 2).let { it[0] to (it.getOrNull(1) ?: "") }
+            return phone.app.dispatch(Request(method, p, Html.parseQs(q), mapOf("cookie" to cookie) + headers, body.toByteArray(), "1.2.3.4"))
+        }
+        fun html(path: String, cookie: String = "") = String(go(path, cookie).body, Charsets.UTF_8)
+        fun school(way: String, vararg students: Map<String, Any?>) = phone.importLanguage(mapOf("school" to eng, "second" to null, "more" to emptyList<Any?>(),
+            "ages" to listOf("early"), "students" to students.toList(), "signin" to mapOf("young" to way, "mid" to "list", "teen" to "pin"), "signout" to 10L))
+        assertTrue(html("/").contains("Type your name"))
+        assertTrue(school("pic", mapOf("n" to "Lena", "p" to "cat", "a" to "young")))
+        assertTrue(html("/").contains("<h1>Who are you?</h1>") && html("/").contains("data-name='Lena'"))
+        assertTrue(html("/who?n=Lena").contains("Are you Lena?"))
+        assertTrue(go("/who", "", "POST", "n=Lena").headers["Set-Cookie"]!!.startsWith("student=Lena;"))
+        assertTrue(html("/", "student=Lena").contains("class='pic face'") && html("/", "student=Lena").contains("data-min='10'"))
+        // Secret picture: not by typing the name or the cookie.
+        school("secret", mapOf("n" to "Lena", "p" to "cat", "a" to "young", "s" to SignIn.hash("Lena", "star")))
+        assertEquals(6, html("/who?n=Lena").split("name='secret'").size - 1)
+        assertTrue(html("/who?n=Lena").contains("value='star'"))
+        assertTrue(String(go("/who", "", "POST", "n=Lena&secret=ball").body).contains("Not that one"))
+        assertTrue(html("/", "student=Lena").contains("Who are you?") && html("/", "student=Lena~abc").contains("Who are you?"))
+        assertTrue(go("/login", "", "POST", "student=lena").headers["Set-Cookie"] == null)
+        val cookie = Html.unquote(go("/who", "", "POST", "n=Lena&secret=star").headers["Set-Cookie"]!!.substringBefore(';'))
+        assertTrue(html("/", cookie).contains("Hi, Lena"))
+        // PIN, with guesses slowed down.
+        school("pic", mapOf("n" to "Zara", "p" to "dog", "a" to "teen", "s" to SignIn.hash("Zara", "4321")))
+        repeat(5) { assertTrue(String(go("/who", "", "POST", "n=Zara&secret=0000").body).contains("not right")) }
+        assertTrue(String(go("/who", "", "POST", "n=Zara&secret=4321").body).contains("Too many tries"))
+        // A newcomer picks a picture and is there next time.
+        assertTrue(go("/login", "", "POST", "student=Ama&pic=frog").headers["Set-Cookie"]!!.startsWith("student=Ama"))
+        assertTrue(html("/").contains("data-name='Ama'"))
+
+        // Pictures: the same packed form, shown by name and never by number.
+        val packed = Json.parse("""{"i":"p1","T":"Count","M":"p","Q":[{"t":0,"p":"How many?","o":["2","3"],"a":1,"g":"apple*3,ball"},""" +
+            """{"t":0,"p":"Which swims?","o":["Goat","Fish"],"a":1,"og":["goat","fish"]}]}""").asMap()!!
+        val a = Assignments.unpack(packed)
+        assertEquals(Json.dumps(packed["Q"], sortKeys = true), Json.dumps(Assignments.pack(a)["Q"], sortKeys = true))
+        phone.importAssignment(packed, open = true)
+        val form = html("/a/p1", "student=Ama")
+        assertTrue(form.contains("<div class='pics n4' role='img' aria-label='Apple, Ball'>"))
+        assertEquals(2, form.split("class='opts short'").size - 1)
+        assertEquals("Fish", Assignments.keyText(Assignments.questions(a)[1]))
+        assertEquals("0.75 (± 0.001)", Assignments.keyText(mapOf("type" to "number", "answer" to 0.75, "tolerance" to 0.001)))
+
+        // Keep reading.
+        go("/library/files/starter/fractions.html", "student=Ama")
+        go("/library/files/starter/photosynthesis.html", "student=Ama", headers = mapOf("range" to "bytes=100-"))
+        assertTrue(html("/library", "student=Ama").contains("class='keepread' href='/library/files/starter/fractions.html'"))
+        assertTrue(!html("/library", "student=Kofi").contains("Keep reading"))
+
+        // Right answers arrive with the marks and show only to that student.
+        school("pic", mapOf("n" to "Lena", "p" to "cat", "a" to "mid"))
+        val graded = Json.parse("""{"i":"g1","T":"Graded","Q":[{"t":0,"p":"Which?","o":["A","B"]}]}""").asMap()!!
+        phone.importAssignment(graded, open = true)
+        go("/a/g1", "student=Lena", "POST", "q1=0")
+        val sub = phone.db.one("SELECT sub_id FROM submissions WHERE assignment_id = 'g1'")!!.str("sub_id")!!
+        fun result(extra: Map<String, Any?>) = phone.onMessage(Message(1L, Protocol.RESULT, mapOf("r" to listOf(mapOf(
+            "id" to sub, "sc" to 0L, "mx" to 1L, "ok" to 1L, "q" to mapOf("q1" to 0L)) + extra)), "hub"))
+        result(emptyMap())
+        assertTrue(html("/results", "student=Lena").contains("You said: A") && !html("/results", "student=Lena").contains("Right answer"))
+        result(mapOf("an" to mapOf("q1" to "B")))
+        assertTrue(html("/results", "student=Lena").contains("Right answer: B"))
+    }
+
+    /** Not-sure ticks and changed answers, as the Python phone sends them; and the teacher's note back. */
+    @Test fun signalsAndTeacherNotes() {
+        val a = mapOf("id" to "a1", "title" to "T", "mode" to "graded", "questions" to listOf(
+            mapOf("id" to "q1", "type" to "choice", "prompt" to "A?", "options" to listOf("x", "y"), "points" to 1.0),
+            mapOf("id" to "q2", "type" to "number", "prompt" to "B?", "points" to 1.0),
+            mapOf("id" to "q3", "type" to "text", "prompt" to "C?", "points" to 1.0),
+            mapOf("id" to "q4", "type" to "long", "prompt" to "D?", "points" to 1.0)))
+        val answers = mapOf("q1" to "1", "q2" to "0.75", "q3" to "oxygen", "q4" to "x")
+        val firsts = """{"q1":"0","q2":"3/4","q3":"Oxygen ","q4":"y","q9":"1"}"""
+        assertEquals("""{"n":5,"f":{"q1":"0"}}""", Json.dumps(Assignments.signalsOf(a, setOf("q1", "q3"), firsts, answers)))
+        assertEquals(emptyMap<String, Any?>(), Assignments.signalsOf(a, emptySet(), """{"q1":"7","q2":"abc"}""", answers))
+        assertEquals(emptyMap<String, Any?>(), Assignments.signalsOf(a, emptySet(), "[not json", answers))
+
+        val dir = tmp()
+        val link = Link(0.0, 1)
+        var radio: Messenger? = null
+        val phone = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5).also { radio = it } }, batchS = 0.2)
+        assertTrue(radio != null)
+        phone.importAssignment(Assignments.pack(a + mapOf("version" to "v1")), open = true)
+        fun ask(method: String, path: String, form: String = "") = phone.app.dispatch(Request(method, path, emptyMap(),
+            mapOf("cookie" to "student=Ana", "content-type" to "application/x-www-form-urlencoded"), form.toByteArray(), "1.2.3.4"))
+        assertTrue(String(ask("GET", "/a/a1").body).contains("name='unsure-q1'"))
+        assertTrue(String(ask("POST", "/a/a1", "q1=1&unsure-q1=1").body).contains("name='unsure-q1' value='1' checked"))
+        ask("POST", "/a/a1", "q1=1&q2=5&q3=oxygen&q4=z&unsure-q3=1&first=%7B%22q1%22%3A%220%22%7D")
+        val id = phone.db.one("SELECT sub_id, signals FROM submissions")!!
+        assertEquals("""{"n":4,"f":{"q1":"0"}}""", id.str("signals"))
+        phone.onMessage(Message(1L, Protocol.RESULT, mapOf("r" to listOf(mapOf("id" to id.str("sub_id"), "sc" to 1, "mx" to 4, "ok" to 1,
+            "q" to mapOf("q1" to 1), "nt" to mapOf("q4" to "<i>Say why</i>")))), "hub"))
+        assertTrue(String(ask("GET", "/results").body).contains("From your teacher: &lt;i&gt;Say why&lt;/i&gt;"))
+    }
+
+    /** Activities on the card run walled off, and libraries are served by name only: as the Python phone. */
+    @Test fun activitiesAreWalledOff() {
+        val dir = tmp()
+        val link = Link(0.0, 1)
+        val phone = Phone(File(dir, "phone"), "hub", "Test phone", { f, s -> JdbcDb(f.path, s) },
+            { h -> Messenger(link.node("phone-1"), db(dir, "outbox.db"), h, retryS = 0.5) }, batchS = 0.2)
+        fun zip(name: String, vararg entries: Pair<String, String>) {
+            val f = File(phone.libraryDir, name).apply { parentFile.mkdirs() }
+            java.util.zip.ZipOutputStream(f.outputStream()).use { z ->
+                for ((n, text) in entries) { z.putNextEntry(java.util.zip.ZipEntry(n)); z.write(text.toByteArray()); z.closeEntry() }
+            }
+        }
+        zip("kolibri/sim.zip", "index.html" to "<!doctype html><html><head><title>é</title></head></html>", "a/pic.png" to "x", "a/b/" to "")
+        zip("tools/geogebra.zip", "GeoGebra/deployggb.js" to "x")
+        File(phone.libraryDir, "index.json").writeText("""[{"title":"Sim","file":"kolibri/sim.zip","kind":"zip","shelf":"PhET","credit":"By PhET"},""" +
+            """{"title":"GeoGebra","file":"tools/geogebra.zip","kind":"ggb","collection":"Tools"}]""")
+        fun get(path: String, method: String = "GET", vararg extra: Pair<String, String>): Response {
+            val (p, q) = path.split("?", limit = 2).let { it[0] to (it.getOrNull(1) ?: "") }
+            return phone.app.dispatch(Request(method, p, Html.parseQs(q), mapOf("cookie" to "student=Ana", "host" to "192.168.43.1:8080") + extra,
+                ByteArray(0), "1.2.3.4"))
+        }
+        fun html(path: String) = String(get(path).body, Charsets.UTF_8)
+        assertTrue(html("/library").contains("href='/library/open?f=tools%2Fgeogebra.zip'"))
+        assertTrue(html("/library/open?f=kolibri%2Fsim.zip").contains("sandbox='allow-scripts'") && html("/library/open?f=kolibri%2Fsim.zip").contains("By PhET"))
+        val sim = get("/library/app/kolibri/sim.zip/index.html")
+        val csp = sim.headers["Content-Security-Policy"]!!
+        assertTrue(csp.startsWith("sandbox allow-scripts; default-src http://192.168.43.1:8080/library/app/kolibri/sim.zip/ ") && "allow-same-origin" !in csp)
+        assertTrue(String(sim.body, Charsets.UTF_8).startsWith("<!doctype html><html><head><script>(function(){function store()"))
+        assertTrue(String(sim.body, Charsets.UTF_8).contains("<title>é</title>"))
+        assertEquals("image/png", get("/library/app/kolibri/sim.zip/a/pic.png").contentType)
+        for (bad in listOf("kolibri/sim.zip/none.js", "kolibri/sim.zip/a/b/", "kolibri/other.zip/index.html", "../phone.db.zip/x")) {
+            assertEquals(404, get("/library/app/$bad").status)
+        }
+        assertTrue("default-src http://localhost/" in get("/library/app/kolibri/sim.zip/index.html", "GET", "host" to "evil'; script-src *").headers["Content-Security-Policy"]!!)
+        assertEquals(403, get("/status/reload", "POST", "origin" to "null").status)
+        assertTrue(get("/library/app/tools/geogebra.zip/_start.html?app=x").headers["Content-Security-Policy"]!!.startsWith("sandbox allow-scripts allow-same-origin;"))
+        assertTrue(html("/library/app/tools/geogebra.zip/_start.html?app=x").contains("\"appName\""))
+        for (ok in listOf("katex/katex.min.js", "katex/fonts/KaTeX_Main-Regular.woff2", "signature_pad/signature_pad.umd.min.js",
+            "opendyslexic/regular.woff2", "qrcode_generator/qrcode.js")) assertEquals(200, get("/site/vendor/$ok").status)
+        for (bad in listOf("looks.css", "vendor/../looks.css", "vendor/NOTICES.md", "vendor/nope/x.js")) assertEquals(404, get("/site/$bad").status)
+        assertTrue(html("/library").contains("class='keepread' href='/library/open?f=kolibri%2Fsim.zip'"))
+        assertTrue(html("/join?u=javascript:alert(1)").contains("data-qr='http://192.168.43.1:8080'"))
+    }
+
     /** The Kotlin and Python phones must serve the same student site: same stylesheet, same script. */
     @Test fun studentSiteMatchesPythonPhone() {
-        val webPy = File(System.getProperty("meshlearn.repo"), "meshlearn/web.py").readText().replace("\r\n", "\n")
-        fun block(start: String) = webPy.substringAfter(start).substringBefore("\"\"\"").trim()
-        assertEquals(block("STUDENT_CSS = \"\"\""), Html.STUDENT_CSS.trim())
-        assertEquals(block("ASSIGNMENT_JS = r\"\"\""), Html.ASSIGNMENT_JS.trim())
-        assertEquals(block("COUNTDOWN_JS = r\"\"\""), Html.COUNTDOWN_JS.trim())
+        val site = File(System.getProperty("meshlearn.repo"), "meshlearn/site")
+        fun text(name: String) = File(site, name).readText().replace("\r\n", "\n")
+        assertEquals(text("student.css") + text("looks.css"), Html.STUDENT_CSS)
+        assertEquals(text("assignment.js"), Html.ASSIGNMENT_JS)
+        assertEquals(text("countdown.js"), Html.COUNTDOWN_JS)
     }
 
     /** The school's words, from the same files the Python phone reads, give the same pages. */

@@ -5,12 +5,15 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
 import android.view.Menu
 import android.view.MenuItem
 import android.window.OnBackInvokedDispatcher
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import java.util.Locale
 
 /**
  * The student site inside the app. Pages opened here count as "on the phone itself" (teacher
@@ -19,6 +22,22 @@ import android.widget.FrameLayout
  */
 class StudentSiteActivity : Activity() {
     private lateinit var web: WebView
+    private var speech: TextToSpeech? = null
+    @Volatile private var speechReady = false
+
+    /** Android's WebView has no voice of its own, so the site's Listen buttons use the phone's. */
+    private inner class Speaker {
+        @JavascriptInterface fun can(lang: String): Boolean =
+            speechReady && (speech?.isLanguageAvailable(Locale.forLanguageTag(lang)) ?: -1) >= TextToSpeech.LANG_AVAILABLE
+
+        @JavascriptInterface fun speak(text: String, lang: String) {
+            speech?.language = Locale.forLanguageTag(lang)
+            speech?.setSpeechRate(0.9f)
+            speech?.speak(text.take(TextToSpeech.getMaxSpeechInputLength() - 1), TextToSpeech.QUEUE_FLUSH, null, "page")
+        }
+
+        @JavascriptInterface fun stop() { speech?.stop() }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,6 +46,8 @@ class StudentSiteActivity : Activity() {
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
         web.webViewClient = WebViewClient()
+        speech = TextToSpeech(applicationContext) { status -> speechReady = status == TextToSpeech.SUCCESS }
+        web.addJavascriptInterface(Speaker(), "MeshSpeak")
         // A WebView ignores its own padding, so pad a frame around it instead.
         val frame = FrameLayout(this).apply { addView(web) }
         padForSystemBars(frame)
@@ -44,6 +65,11 @@ class StudentSiteActivity : Activity() {
                 if (web.canGoBack()) web.goBack() else finish()
             }
         }
+    }
+
+    override fun onDestroy() {
+        speech?.shutdown()
+        super.onDestroy()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {

@@ -8,16 +8,27 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
+import socket
 import time
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 from . import assignments as asg
 from . import comprehension as cmp
-from .web import CSS, Request, Response, esc, redirect
+from . import language as lang
+from .web import CSS, MATH_JS, Request, Response, esc, info_panel, page, redirect
+from .zipapps import QR_JS
 
 HUB_CSS = """
-:root{--sel:#e6eefa;--sel-ink:#173f80;--goodbg:#e9f3ec;--goodink:#154a27;--warnbg:#fdf3e2;--warnline:#e2b866;--warnink:#6b4600;--soft:#f1f1ec}
-@media (prefers-color-scheme:dark){:root{--sel:#1e2c45;--sel-ink:#cfe0ff;--goodbg:#1b3324;--goodink:#bfe8cc;--warnbg:#3a2e17;--warnline:#8a6a2a;--warnink:#f3d39a;--soft:#2a2a27}}
+svg.pic{width:56px;height:56px;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;background:#fff;border-radius:12px}
+svg.pic.mini{width:34px;height:34px;vertical-align:middle}
+form.inline{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0 0}form.inline input[type=text],form.inline select{width:auto;flex:0 1 180px}form.inline button{margin:0}
+dialog#picdlg{width:min(900px,94vw);max-height:86vh;border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--ink)}
+.pichead{display:flex;gap:8px;position:sticky;top:0;background:var(--card)}.pichead button{margin:0}
+.picgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px}.picgrid button{display:flex;flex-direction:column;align-items:center;gap:4px;margin:0;padding:8px 4px;background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:400;font-size:13px}.picgrid button[hidden]{display:none}
+:root{--sel:#e6eefa;--sel-ink:#173f80;--goodbg:#e9f3ec;--goodink:#154a27;--warnbg:#fdf3e2;--warnline:#e2b866;--warnink:#6b4600;--soft:#f1f1ec;--badbg:#fbe4e1;--badink:#8c1d16;--badbar:#b4532a}
+@media (prefers-color-scheme:dark){:root{--sel:#1e2c45;--sel-ink:#cfe0ff;--goodbg:#1b3324;--goodink:#bfe8cc;--warnbg:#3a2e17;--warnline:#8a6a2a;--warnink:#f3d39a;--soft:#2a2a27;--badbg:#46201c;--badink:#ffb4ab;--badbar:#d98a5f}}
 body{font-size:16px;line-height:1.45}
 .shell{display:flex;min-height:100vh}
 .side{flex:0 0 232px;background:var(--card);border-right:1px solid var(--line);padding:20px 14px;display:flex;flex-direction:column;gap:2px;position:sticky;top:0;height:100vh;overflow-y:auto}
@@ -60,7 +71,21 @@ a.need .go{color:var(--accent);font-weight:700;margin-top:4px}
 .meter span{display:block;height:100%;background:var(--accent)}
 .level{padding:0 10px;border-radius:99px;font-size:14px;white-space:nowrap;background:var(--soft);color:var(--muted)}
 .level.strong,.level.good{background:var(--goodbg);color:var(--goodink)}
-.level.developing,.level.needs{background:var(--warnbg);color:var(--warnink)}
+.level.developing{background:var(--warnbg);color:var(--warnink)}.level.needs{background:var(--badbg);color:var(--badink)}
+.meter.ok span{background:var(--good)}.meter.bad span{background:var(--badbar)}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}.tabs a{display:flex;align-items:center;min-height:40px;padding:0 14px;border-radius:99px;border:1px solid var(--line);background:var(--card);color:var(--ink);text-decoration:none;font-size:15px}
+.tabs a[aria-current=page]{background:var(--ink);color:var(--bg);border-color:var(--ink);font-weight:600}
+.scroll{overflow-x:auto}table.grid2{margin:0;font-size:15px}table.grid2 td,table.grid2 th{vertical-align:middle;padding:8px}table.grid2 th a{color:inherit}table.grid2 th.sel{box-shadow:inset 0 -3px 0 var(--accent)}table.grid2 .level{display:inline-block;padding:3px 10px;border-radius:8px}table.grid2 tfoot td{border-top:2px solid var(--line);border-bottom:0}
+aside.col .list>div{flex-wrap:wrap}aside.col .list .grow{flex:1 1 100%}aside.col .list form{margin:0}aside.col{display:flex;flex-direction:column;gap:12px}aside.col .panel h2{font-size:16px;margin:0 0 8px}.panel.look{background:var(--warnbg);border-color:var(--warnline)}.panel.look p{margin:0 0 6px;font-size:15px}
+.mist{display:flex;flex-direction:column;gap:4px;margin:0 0 8px}.mist .row,.wrongans .row{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+details.qcard{background:var(--card);border:1px solid var(--line);border-radius:14px;margin:0 0 10px}details.qcard.hard{border:2px solid var(--warnline)}
+details.qcard>summary{display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;list-style:none}details.qcard>summary::-webkit-details-marker{display:none}details.qcard .grow{gap:6px}
+.qn{flex:none;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:14px;background:var(--soft);font-weight:800;font-size:14px}
+.qin{padding:0 16px 14px 56px}.nowrap{white-space:nowrap}.sig{margin:8px 0 0;padding:8px 12px;border-radius:10px;background:var(--soft);font-size:15px}
+.wrongans{margin:10px 0;display:flex;flex-direction:column;gap:5px}.badge{flex:none;min-width:28px;text-align:center;padding:2px 8px;border-radius:99px;background:var(--badbg);color:var(--badink);font-weight:700;font-size:14px}
+strong.note{color:var(--badink);background:var(--badbg);border-radius:6px;padding:1px 8px;font-weight:600;font-size:15px}
+details.why summary{cursor:pointer;color:var(--accent);font-size:14px}button.tiny{margin:0;padding:7px 10px;font-size:14px;white-space:nowrap}
+@media (max-width:600px){.qin{padding-left:16px}}
 .score{font-weight:700;white-space:nowrap}
 .tomark{font-size:14px;font-weight:600;color:var(--warnink);white-space:nowrap}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
@@ -95,16 +120,16 @@ table.plain{background:var(--card);border:1px solid var(--line);border-radius:14
 table.plain th{font-size:14px;color:var(--muted);font-weight:600}
 table.plain tr:last-child td{border-bottom:0}
 @media (max-width:760px){.shell{flex-direction:column}.side{position:static;height:auto;flex:none;border-right:0;border-bottom:1px solid var(--line);padding:12px}
-.side nav{flex-direction:row;flex-wrap:wrap}.brand{padding:0 6px 8px}.radiobox{margin-top:8px}.content{padding:16px}}
+.side nav{flex-direction:row;flex-wrap:wrap}.brand{padding:0 6px 8px}.radiobox{margin-top:8px}.content{padding:16px;width:100%}table.plain{display:block;overflow-x:auto}}
 """
 
 # The sidebar, in the designs' order. (key, label, link)
 NAV = [("today", "Today", "/"), ("marking", "Marking", "/marking"), ("assignments", "Assignments", "/assignments"),
-       ("class", "Class progress", "/comprehension"), ("courses", "Courses", "/courses"),
+       ("students", "Students", "/students"), ("class", "Class progress", "/comprehension"), ("courses", "Courses", "/courses"),
        ("phones", "Phones and radio", "/phones"), ("library", "Library", "/library"), ("language", "Language", "/language")]
 _TITLE_TO_NAV = {"Today": "today", "Welcome": "today", "Marking": "marking", "Assignments": "assignments",
-                 "New assignment": "assignments", "Edit assignment": "assignments", "Comprehension": "class",
-                 "Courses": "courses", "Phones and radio": "phones", "Card library": "library",
+                 "New assignment": "assignments", "Edit assignment": "assignments", "Class progress": "class",
+                 "Courses": "courses", "Students": "students", "Phones and radio": "phones", "Card library": "library",
                  "Copy to memory card": "library", "Copying to the card": "library", "School language": "language"}
 
 QUIET_S = 24 * 3600   # a phone not heard for a day needs a look
@@ -150,6 +175,7 @@ class HubUI:
         app.add_route("POST", "/assignments/open-all", self.open_all)
         app.add_route("POST", "/examples", self.examples_add)
         app.add_route("GET", "/phones", self.phones_page)
+        app.add_route("GET", "/phone-setup", self.phone_setup)
 
     def _to_mark(self) -> List[Tuple[dict, dict, dict]]:
         """Each written answer still waiting for a mark: (submission row, assignment, question), oldest first."""
@@ -183,12 +209,12 @@ class HubUI:
 
     def _page(self, title: str, body: str, current: str = "", sub: str = "", action: str = "") -> str:
         current = current or _TITLE_TO_NAV.get(title, "")
-        if not current and title.endswith(": comprehension"):
-            current = "class"
-        to_mark = len(self._to_mark())
+        to_mark, new_names = len(self._to_mark()), len(self.new_names())
         links = ""
         for key, label, href in NAV:
             badge = f"<span class='count' aria-label='{to_mark} to mark'>{to_mark}</span>" if key == "marking" and to_mark else ""
+            if key == "students" and new_names:
+                badge = f"<span class='count' aria-label='{new_names} new names'>{new_names}</span>"
             here = " aria-current='page'" if key == current else ""
             links += f"<a href='{href}'{here}><span>{esc(label)}</span>{badge}</a>"
         ok, head, detail = self._radio_state()
@@ -202,13 +228,13 @@ class HubUI:
             f"<title>{esc(title)} · MeshLearn Teacher Hub</title><style>{CSS}{HUB_CSS}</style></head><body>"
             f"<div class='shell'><aside class='side'><a class='brand' href='/'>MeshLearn</a>"
             f"<nav aria-label='Main'>{links}</nav>{radio}</aside>"
-            f"<main id='main' class='content'>{top}{body}</main></div></body></html>"
+            f"<main id='main' class='content'>{top}{body}</main></div><script>{MATH_JS}</script></body></html>"
         )
 
     # -- Today --------------------------------------------------------------------
 
     def today(self, req: Request) -> Response:
-        notice = ""
+        notice = f"<div class='notice'>{esc(req.query['msg'])}</div>" if req.query.get("msg") else ""
         if req.query.get("examples"):
             n = req.query["examples"]
             notice = (f"<div class='notice'>Added {esc(n)} example lessons. To put them on a phone: in the phone app choose "
@@ -308,7 +334,7 @@ class HubUI:
     def _first_day(self) -> str:
         phones = self.db.one("SELECT COUNT(*) AS n FROM phones")["n"]
         return (
-            "<div class='hero'><h2 style='margin-top:0;font-size:22px'>Three steps to the first lesson</h2>"
+            self._first_country() + "<div class='hero'><h2 style='margin-top:0;font-size:22px'>Three steps to the first lesson</h2>"
             "<p class='muted' style='margin:0'>Students' work comes back here over the radio, even with no internet.</p>"
             "<ol class='steps'>"
             "<li><span class='n'>1</span><span class='grow'><strong>Add lessons</strong>"
@@ -324,6 +350,16 @@ class HubUI:
             "teacher's laptop. Then open the lessons for students from here.</span></span></li>"
             "</ol></div>"
         )
+
+    def _first_country(self) -> str:
+        """Asked once: the country sets the languages for learning."""
+        if self.setting("country") or self.setting("lang") != lang.SOURCE:
+            return ""
+        buttons = "".join(f"<button name='country' value='{key}' class='secondary'>{esc(info['name'])}</button>"
+                          for key, info in lang.COUNTRIES.items())
+        return ("<form method='post' action='/language/country' class='card'><strong>Where is your school?</strong>"
+                "<p class='muted' style='margin:4px 0'>This sets the languages students learn in. You can change them any time "
+                f"on the <a href='/language'>Language</a> page.</p><input type='hidden' name='back' value='/'>{buttons}</form>")
 
     # -- example lessons ------------------------------------------------------------
 
@@ -382,6 +418,9 @@ class HubUI:
                       "<span class='tomark'>To mark</span></a>")
         qn = [x["id"] for x in a["questions"]].index(q["id"]) + 1
         said = json.loads(s["answers"]).get(q["id"], "").strip()
+        unsure, _ = asg.read_signals(a, json.loads(s["signals"] or "{}"))
+        doubt = " <span class='tomark'>not sure</span>" if q["id"] in unsure else ""
+        note = json.loads(s["notes"] or "{}").get(q["id"], "")
         points = q["points"]
         steps = [float(n) for n in range(int(points) + 1)]
         if points not in steps:
@@ -389,19 +428,24 @@ class HubUI:
         marks = "".join(
             f"<label><input type='radio' name='mark' value='{m:g}' required><span>{m:g}</span></label>" for m in steps)
         model = (f"<div class='model'><strong>Your model answer:</strong> {esc(q['model'])}</div>" if q.get("model") else "")
+        info = info_panel(q)
         body = (
             notice + "<div class='cols'>"
             f"<section class='col' aria-label='Answers to mark' style='flex:1 1 260px'><div class='list'>{queue}</div></section>"
             "<section class='wide panel' aria-labelledby='qtext'>"
             f"<span class='small'>{esc(a['title'])} · Question {qn} · worth {points:g} mark{'' if points == 1 else 's'}</span>"
-            f"<h2 id='qtext' style='margin:6px 0 12px;font-size:19px;line-height:1.4'>{esc(q['prompt'])}</h2>{model}"
+            f"<h2 id='qtext' style='margin:6px 0 12px;font-size:19px;line-height:1.4'>{esc(q['prompt'])}</h2>{info}{model}"
             f"<div style='margin-top:14px'><span class='small'>{esc(s['student'])} wrote · "
-            f"{esc(names.get(s['phone'], s['phone']))} · {esc(ago(s['submitted_at'] or s['received_at']))}</span>"
+            f"{esc(names.get(s['phone'], s['phone']))} · {esc(ago(s['submitted_at'] or s['received_at']))}</span>{doubt}"
             f"<p class='said'>{esc(said) or '<em class=muted>(left blank)</em>'}</p></div>"
             "<form method='post' action='/marking' style='margin-top:14px'>"
             f"<input type='hidden' name='sid' value='{esc(s['sub_id'])}'><input type='hidden' name='qid' value='{esc(q['id'])}'>"
             f"<fieldset class='marks'><legend style='font-weight:600;padding:0;margin-bottom:6px'>Marks</legend>{marks}</fieldset>"
-            "<button style='margin-top:16px'>Save and next</button>"
+            "<label for='note'>Short note back to the student (optional)</label>"
+            f"<input type='text' id='note' name='note' maxlength='60' value='{esc(note)}' placeholder='Good working. Check the units.'>"
+            "<span class='small'>Up to 60 letters, so it fits in one radio message.</span>"
+            "<div><button style='margin-top:16px'>Save and next</button></div>"
+            "<span class='small'>The mark goes back to the student's phone over the radio.</span> "
             f"<a class='small' style='margin-left:8px' href='/submissions/{esc(s['sub_id'])}'>See all of {esc(s['student'])}'s answers</a>"
             "</form></section></div>"
         )
@@ -412,6 +456,7 @@ class HubUI:
         sid, qid = req.form.get("sid", ""), req.form.get("qid", "")
         try:
             mark = float(req.form.get("mark", ""))
+            self.set_note(sid, qid[:20], req.form.get("note", ""))
             grade = self.grade_submission(sid, {qid: mark})
         except (KeyError, ValueError):
             return redirect("/marking")
@@ -476,6 +521,43 @@ class HubUI:
 
     # -- Phones and radio ---------------------------------------------------------
 
+    @staticmethod
+    def _lan_address(req: Request) -> str:
+        """This laptop's address for phones on the same Wi-Fi, or ''."""
+        port = (req.headers.get("Host", "") or "").rpartition(":")[2]
+        port = port if port.isdigit() else "8000"
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("10.255.255.255", 1))   # sends nothing; picks the network card phones would reach
+                ip = s.getsockname()[0]
+        except OSError:
+            return ""
+        return "" if ip.startswith("127.") else f"{ip}:{port}"
+
+    def _setup_qr(self, req: Request) -> str:
+        address = self._lan_address(req)
+        if not address:
+            return ""
+        return (f"<div style='margin:12px auto 0;max-width:220px' data-qr='http://{esc(address)}/phone-setup'></div>"
+                f"<p class='small' style='margin:4px 0 0'>Or, on the same Wi-Fi, scan this with the phone's camera "
+                f"(http://{esc(address)}/phone-setup). It needs the hub started from its start file, or with --host 0.0.0.0.</p><script>{QR_JS}</script>")
+
+    def phone_setup(self, req: Request) -> Response:
+        """What a phone sees after scanning the hub's code: the settings, and a button that hands them to the app."""
+        transport = getattr(self.messenger, "transport", None)
+        node = str(getattr(transport, "node_id", "") or "")
+        channel = getattr(transport, "channel", None)
+        address = req.headers.get("Host", "")
+        address = address if re.match(r"^[A-Za-z0-9.\-:\[\]]{1,80}$", address) else ""
+        query = urlencode({k: v for k, v in {"hub": node, "channel": channel, "address": address}.items() if v not in (None, "")})
+        body = ("<div class='card'><p>This sets a MeshLearn phone up for this school.</p>"
+                f"<p>School radio id: <strong>{esc(node or 'not known yet')}</strong></p>"
+                + (f"<p>Channel: <strong>{channel}</strong></p>" if channel is not None else "")
+                + f"<p>Laptop address: <strong>{esc(address)}</strong></p>"
+                f"<a class='button' href='meshlearn://setup?{esc(query)}'>Open in the MeshLearn app</a>"
+                "<p class='muted'>If nothing opens, install the MeshLearn app first, or type these in its Settings.</p></div>")
+        return Response(page("Set up a phone", body))
+
     def phones_page(self, req: Request) -> Response:
         now = time.time()
         phones = self.db.all("SELECT * FROM phones ORDER BY name")
@@ -526,6 +608,7 @@ class HubUI:
             "during setup or in Settings, under School, type:</p>"
             f"<p class='code' style='margin:10px 0 2px'>{esc(node or '!........')}</p>"
             + (f"<p class='small' style='margin:0'>channel <strong>{channel}</strong></p>" if channel is not None else "")
+            + self._setup_qr(req)
             + "</section>"
         )
         add = ("<details class='panel' style='margin-top:12px'><summary style='cursor:pointer;font-weight:600'>Add a phone by hand"

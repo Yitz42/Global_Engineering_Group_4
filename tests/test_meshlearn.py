@@ -116,7 +116,8 @@ class AssignmentTests(unittest.TestCase):
         self.a = asg.normalize_assignment(load_sample())
 
     def test_pack_round_trip_is_lossless(self):
-        self.assertEqual(asg.unpack(asg.pack(self.a)), self.a)
+        plain = dict(self.a, questions=[{k: v for k, v in q.items() if k not in asg.OWN_FIELDS} for q in self.a["questions"]])
+        self.assertEqual(asg.unpack(asg.pack(self.a)), plain)   # all but the teacher's own notes
         view = asg.public_view(self.a)
         self.assertEqual(asg.unpack(asg.pack(view)), view)
 
@@ -156,6 +157,602 @@ class AssignmentTests(unittest.TestCase):
     def test_bad_assignment_rejected(self):
         with self.assertRaises(asg.AssignmentError):
             asg.normalize_assignment({"title": "x", "questions": [{"type": "choice", "prompt": "?", "options": ["a"], "answer": 0}]})
+
+
+class QuestionInfoTests(unittest.TestCase):
+    RAIN = "Rainfall:\nJanuary 120 mm\nFebruary 95 mm"
+
+    def lesson(self):
+        return asg.normalize_assignment({"title": "Rain", "instructions": "Use the table.", "questions": [
+            {"type": "number", "prompt": "Total?", "answer": 215, "info": self.RAIN},
+            {"type": "number", "prompt": "Difference?", "answer": 25, "info": self.RAIN},
+            {"type": "text", "prompt": "Why <b>?</b>", "accept": ["x"]},
+            {"type": "long", "prompt": "Explain", "info": self.RAIN + "!"}]})
+
+    def test_shared_info_travels_once(self):
+        a = self.lesson()
+        packed = asg.pack(a)
+        self.assertEqual([q.get("n") for q in packed["Q"]], [self.RAIN, 1, None, self.RAIN + "!"])
+        self.assertEqual(asg.unpack(json.loads(json.dumps(packed))), a)
+        self.assertFalse(any("n" in q for q in asg.pack(asg.normalize_assignment(load_sample()))["Q"]))
+
+    def test_student_page_has_info_arrows_and_review(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        phone = Phone(os.path.join(tmp, "card"), "hub", "P", lambda h: _QuietRadio())
+        a = self.lesson()
+        phone.import_assignment(asg.pack(a), open_=True)
+        req = Request("GET", f"/a/{a['id']}", {}, {"Cookie": "student=Ana"}, b"", "192.168.43.9")
+        page_html = phone.app.dispatch(req).body.decode()
+        self.assertEqual(page_html.count("<details class='qinfo'"), 4)      # the instructions go with every question
+        self.assertEqual(page_html.count("<details class='qinfo' open>"), 1)
+        self.assertEqual(page_html.count("<summary>Question info</summary>"), 3)
+        self.assertEqual(page_html.count("<summary>Instructions</summary>"), 1)
+        self.assertIn("January 120 mm", page_html)
+        self.assertIn("data-prompt='Why &lt;b&gt;?&lt;/b&gt;'", page_html)
+        for part in ("id='back'", "id='next'", "id='toreview'", "id='review'", "Review your answers", "Hand it in", "id='qprog'", "data-listen"):
+            self.assertIn(part, page_html)
+        self.assertEqual(page_html.count("data-flag='"), 4)
+        self.assertNotIn("name='flag", page_html)                           # flags stay in the browser
+
+
+class LookTests(unittest.TestCase):
+    """The three looks by age: the hub's ages decide which a phone offers, the student's age which they see."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.phone = Phone(os.path.join(self.tmp, "card"), "hub", "P", lambda h: _QuietRadio())
+        self.a = asg.normalize_assignment({"title": "Counting", "course": "math", "mode": "practice", "due": "2026-12-01", "questions": [
+            {"type": "choice", "prompt": "How many?", "options": ["2", "3"], "answer": 1},
+            {"type": "choice", "prompt": "Who?", "options": ["A white rabbit", "A cat"], "answer": 0}]})
+        b = dict(self.a, id="a-two", title="Second", mode="graded")
+        self.phone.import_assignment(asg.pack(self.a), open_=True)
+        self.phone.import_assignment(asg.pack(asg.normalize_assignment(b)), open_=True)
+
+    def ages(self, *ages):
+        from meshlearn import language as lang
+        self.phone.import_language({"school": lang.build_pack("eng"), "second": None, "more": [], "ages": list(ages)})
+
+    def get(self, path, cookie="student=Ana", method="GET", body=b""):
+        return self.phone.app.dispatch(Request(method, path, {}, {"Cookie": cookie}, body, "192.168.43.9"))
+
+    def page(self, *args):
+        return self.get(*args).body.decode()
+
+    def test_hub_ages_choose_the_look(self):
+        self.assertIn("<body class='st look-mid'>", self.page("/"))                  # until the hub has said
+        for ages, look in ((["early"], "young"), (["primary"], "mid"), (["lower", "upper"], "teen"), (["adult"], "teen")):
+            self.ages(*ages)
+            self.assertIn(f"<body class='st look-{look}'>", self.page("/"))
+            self.assertNotIn("How old are you?", self.page("/", ""))
+        self.ages("early", "primary", "upper")
+        self.assertIn("look-mid", self.page("/"))
+        welcome = self.page("/", "")
+        for text in ("How old are you?", "5 to 7", "8 to 11", "12 or older"):
+            self.assertIn(text, welcome)
+        chosen = self.get("/look", "", "POST", b"to=young")
+        self.assertIn("look=young", chosen.headers["Set-Cookie"])
+        self.assertIn("<body class='st look-young'>", self.page("/", "student=Ana; look=young"))
+        self.assertNotIn("Set-Cookie", self.get("/look", "", "POST", b"to=<script>").headers)
+        self.assertIn("look-mid'", self.page("/", "student=Ana; look=<script>"))
+        hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        self.assertEqual(hub.language_bundle()["ages"], ["lower", "upper"])
+
+    def test_young(self):
+        self.ages("early")
+        home = self.page("/")
+        self.assertIn("class='bigplay'", home)
+        self.assertIn("Stars this week: 0", home)
+        self.assertIn("</span>My stars</a>", home)
+        form = self.page(f"/a/{self.a['id']}")
+        self.assertEqual(form.count("class='opts short'"), 1)      # "2" and "3" side by side, the long answers one per line
+        done = self.page(f"/a/{self.a['id']}", "student=Ana", "POST", b"q1=1&q2=1")
+        self.assertIn("1 of 2 right", done)
+        self.phone.db.execute("UPDATE submissions SET score = 1, max = 2, complete = 1, detail = ?", ('{"q1": 1, "q2": 0}',))
+        stars = self.page("/results")
+        self.assertIn("<h1>My stars</h1>", stars)
+        self.assertIn("aria-label='2 / 3'", stars)                  # half right: 1.5 stars, rounded up
+        self.assertIn("Try for more stars", stars)
+        self.assertIn("Stars this week: 2", self.page("/"))
+
+    def test_teen(self):
+        self.ages("upper")
+        home = self.page("/")
+        self.assertIn("class='next'", home)
+        self.assertIn("<b>1</b></span>", home)                     # the due day in the list
+        self.assertIn("class='tiles'", home)
+        self.assertIn("data-draft='Ana|", home)
+        self.page(f"/a/{self.a['id']}", "student=Ana", "POST", b"q1=1&q2=1")
+        self.phone.db.execute("UPDATE submissions SET score = 1, max = 2, complete = 1, detail = ?", ('{"q1": 1, "q2": 0}',))
+        results = self.page("/results")
+        self.assertIn("To review", results)
+        self.assertIn("You said: A cat", results)
+        self.assertIn("All marks", results)
+        self.phone.db.execute("UPDATE submissions SET complete = 0")
+        results = self.page("/results")
+        self.assertIn("1 / 2 so far<br>Your teacher is reading it", results)
+        self.assertIn("<br><span class='pill", results)
+
+    def test_handed_in_says_where_the_work_is(self):
+        page_html = self.page("/a/a-two", "student=Ana", "POST", b"q1=1&q2=0")
+        for text in ("Where your work is", "Sent by radio", "Marked by your teacher", "give the phone to the next person"):
+            self.assertIn(text, page_html)
+        self.ages("early")
+        self.phone.db.execute("DELETE FROM submissions")
+        self.assertIn("<h1>Well done!</h1>", self.page("/a/a-two", "student=Ana", "POST", b"q1=1&q2=0"))
+
+
+class SignInTests(unittest.TestCase):
+    """The class list from the hub's Students page to signing in on the phone."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        self.phone = Phone(os.path.join(self.tmp, "card"), "hub", "P", lambda h: _QuietRadio())
+
+    def hub_post(self, path, **form):
+        return self.hub.app.dispatch(Request("POST", path, {}, {}, urllib.parse.urlencode(form).encode(), "127.0.0.1"))
+
+    def hub_page(self, path):
+        path, _, query = path.partition("?")
+        return self.hub.app.dispatch(Request("GET", path, dict(urllib.parse.parse_qsl(query)), {}, b"", "127.0.0.1")).body.decode()
+
+    def go(self, path, cookie="", method="GET", **form):
+        path, _, query = path.partition("?")
+        return self.phone.app.dispatch(Request(method, path, dict(urllib.parse.parse_qsl(query)), {"Cookie": cookie},
+                                               urllib.parse.urlencode(form).encode(), "192.168.43.9"))
+
+    def sync(self):
+        self.phone.import_language(json.loads(json.dumps(self.hub.language_bundle())))
+
+    def add(self, ages, *names):
+        self.hub_post("/students/add", names="\n".join(names), ages=ages)
+
+    def test_without_a_list_students_type_their_name(self):
+        self.sync()
+        self.assertIn("Type your name", self.go("/").body.decode())
+        self.assertEqual(self.go("/login", "", "POST", student=" Ana~x ").headers["Set-Cookie"].split(";")[0], "student=Ana%20x")
+
+    def test_young_students_tap_their_picture(self):
+        self.add("young", "Lena", "Kofi", "Lena")
+        self.assertEqual([s["name"] for s in self.hub.students()], ["Kofi", "Lena"])     # no doubles
+        self.assertEqual(len({s["pic"] for s in self.hub.students()}), 2)               # a picture each
+        self.sync()
+        page_html = self.go("/").body.decode()
+        self.assertIn("<h1>Who are you?</h1>", page_html)
+        self.assertIn("data-name='Lena'", page_html)
+        self.assertIn("class='st look-young'", page_html)
+        self.assertIn("Are you Lena?", self.go("/who?n=Lena").body.decode())
+        cookie = self.go("/who", "", "POST", n="Lena").headers["Set-Cookie"].split(";")[0]
+        self.assertEqual(cookie, "student=Lena")
+        home = self.go("/", cookie).body.decode()
+        self.assertIn("Hi, Lena", home)
+        self.assertIn("class='pic face'", home)
+        self.assertIn("id='idleout' data-min='10'", home)
+        self.assertIn("Finished, Lena?", self.go("/me", cookie).body.decode())
+        self.assertNotIn("idleout", self.go("/").body.decode())                          # nobody signed in
+
+    def test_secret_picture(self):
+        self.add("young", "Lena")
+        self.hub_post("/students/ways", young="secret", signout="5")
+        self.sync()
+        secret = self.hub.students()[0]["secret"]
+        self.assertNotIn(secret, json.dumps(self.hub.language_bundle()["students"]))      # only a hash travels
+        page_html = self.go("/who?n=Lena").body.decode()
+        self.assertEqual(page_html.count("name='secret'"), 6)
+        self.assertIn(f"value='{secret}'", page_html)
+        wrong = next(k for k in ("apple", "ball") if k != secret)
+        self.assertIn("Not that one", self.go("/who", "", "POST", n="Lena", secret=wrong).body.decode())
+        self.assertNotIn("Set-Cookie", self.go("/login", "", "POST", student="lena").headers)  # typing the name is no way round
+        self.assertIn("Who are you?", self.go("/", "student=Lena").body.decode())              # nor typing the cookie
+        self.assertIn("Who are you?", self.go("/", "student=Lena~abc").body.decode())
+        cookie = self.go("/who", "", "POST", n="Lena", secret=secret).headers["Set-Cookie"].split(";")[0]
+        self.assertIn("Hi, Lena", self.go("/", urllib.parse.unquote(cookie)).body.decode())
+        self.assertIn("data-min='5'", self.go("/", urllib.parse.unquote(cookie)).body.decode())
+
+    def test_pin_and_slowing_down_guesses(self):
+        self.add("teen", "Zara Khan")
+        self.hub_post("/students/ways", teen="pin")
+        self.sync()
+        pin = self.hub.students()[0]["pin"]
+        self.assertIn("id='find'", self.go("/").body.decode())
+        self.assertIn("4-number PIN", self.go("/who?n=Zara%20Khan").body.decode())
+        bad = "0000" if pin != "0000" else "1111"
+        for _ in range(5):
+            self.assertIn("not right", self.go("/who", "", "POST", n="Zara Khan", secret=bad).body.decode())
+        self.assertIn("Too many tries", self.go("/who", "", "POST", n="Zara Khan", secret=pin).body.decode())
+        self.phone._tries["Zara Khan"] = (5, 0.0)                                         # a minute later
+        self.assertIn("Set-Cookie", self.go("/who", "", "POST", n="Zara Khan", secret=pin).headers)
+        # A new PIN from the teacher replaces it with the next copy.
+        self.hub_post("/students/edit", old="Zara Khan", do="secret")
+        self.hub.db.execute("UPDATE students SET pin = '4321'")
+        self.sync()
+        self.assertNotIn("Set-Cookie", self.go("/who", "", "POST", n="Zara Khan", secret="9999").headers)
+        self.assertIn("Set-Cookie", self.go("/who", "", "POST", n="Zara Khan", secret="4321").headers)
+        self.assertIn("4321", self.hub_page("/students/cards"))
+
+    def test_newcomers_and_names_from_phones(self):
+        self.add("mid", "Amara", "Tomás")
+        self.sync()
+        page_html = self.go("/new").body.decode()
+        self.assertIn("Welcome! You&#x27;re new", page_html)
+        for s in self.hub.students():
+            self.assertNotIn(f"value='{s['pic']}'", page_html)                            # others' pictures are hidden
+        cookie = self.go("/login", "", "POST", student="Ama", pic="frog").headers["Set-Cookie"]
+        self.assertIn("student=Ama", cookie)
+        self.assertIn("data-name='Ama'", self.go("/").body.decode())                      # next time they tap it
+        for sub, name in (("s1", "Ama"), ("s2", "Daniel")):
+            self.hub.db.execute("INSERT INTO submissions (sub_id, assignment_id, student, phone, answers, received_at) VALUES (?, 'a', ?, 'p1', '{}', 1)", (sub, name))
+        self.assertIn("New names from phones", self.hub_page("/students"))
+        self.hub_post("/students/link", name="Ama", do="same", same="Amara")
+        self.assertEqual(self.hub.db.one("SELECT student FROM submissions WHERE sub_id = 's1'")["student"], "Amara")
+        self.assertEqual(self.hub.student_name("Ama"), "Amara")                           # and later work too
+        self.hub_post("/students/link", name="Daniel", do="ignore")
+        self.assertEqual(self.hub.new_names(), [])
+        self.assertEqual(self.hub.student_name("Daniel"), "Daniel")
+        self.hub_post("/students/edit", old="Amara", do="save", name="Amara Osei", pic="dog", ages="teen")
+        self.assertEqual(self.hub.db.one("SELECT student FROM submissions WHERE sub_id = 's1'")["student"], "Amara Osei")
+        self.assertEqual(self.hub.student_name("Ama"), "Amara Osei")
+
+    def test_hash_matches_the_android_app(self):
+        from meshlearn.phonesignin import secret_hash
+        self.assertEqual(secret_hash("Tomás", "4321"), "8b86cf26c69f90f40d1f77b5a6864445")   # the same value is in CoreTest.kt
+
+
+class PictureTests(unittest.TestCase):
+    def test_pictures_travel_by_name_and_show_on_the_phone(self):
+        a = asg.normalize_assignment({"title": "Count", "questions": [
+            {"type": "choice", "prompt": "How many?", "options": ["2", "3"], "answer": 1, "pic": "apple*3, <svg>, ball"},
+            {"type": "choice", "prompt": "Which swims?", "options": ["Goat", "Fish"], "answer": 1, "opic": ["goat", "fish", "x"]},
+            {"type": "text", "prompt": "Name it", "accept": ["x"], "pic": "nosuchpicture"}]})
+        self.assertEqual(a["questions"][0]["pic"], "apple*3,ball")
+        self.assertEqual(a["questions"][1]["opic"], ["goat", "fish"])
+        self.assertEqual(asg.unpack(json.loads(json.dumps(asg.pack(a)))), a)
+        self.assertLess(len(json.dumps(asg.pack(a)["Q"][0])), 90)                        # names only
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        phone = Phone(os.path.join(tmp, "card"), "hub", "P", lambda h: _QuietRadio())
+        phone.import_assignment(asg.pack(a), open_=True)
+        html = phone.app.dispatch(Request("GET", f"/a/{a['id']}", {}, {"Cookie": "student=Ana"}, b"", "192.168.43.9")).body.decode()
+        self.assertIn("<div class='pics n4' role='img' aria-label='Apple, Ball'>", html)   # never says how many
+        self.assertEqual(html.count("class='pics"), 1)                                   # an unknown picture shows nothing
+        self.assertEqual(html.count("class='opts short'"), 2)
+        self.assertIn("<span class='otx'>Fish</span>", html)
+
+    def test_every_drawing_is_plain_paths(self):
+        import re as regex
+
+        from meshlearn.web import PICTURES, picture
+        self.assertGreater(len(PICTURES), 250)
+        for key, p in PICTURES.items():
+            self.assertRegex(key, r"^[a-z0-9-]+$")
+            for part in (p.get("d", ""), p.get("x", "")):
+                self.assertTrue(regex.match(r"^[MmLlHhVvCcSsQqTtAaZz0-9 .,\-]*$", part), key)
+            self.assertRegex(p["f"], r"^(#[0-9a-fA-F]{3,8}|none)$")
+        self.assertEqual(picture("nosuch"), "")
+
+    def test_hub_offers_the_library(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        hub = Hub(os.path.join(tmp, "hub.db"), lambda h: _QuietRadio())
+        html = hub.app.dispatch(Request("GET", "/assignments/new", {}, {}, b"", "127.0.0.1")).body.decode()
+        self.assertIn("data-pic='elephant'", html)
+        self.assertIn("Choose pictures", html)
+
+
+class ZipAppTests(unittest.TestCase):
+    """Activities and tools on the card run walled off; ready-made libraries are served by name only."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.phone = Phone(os.path.join(self.tmp, "card"), "hub", "P", lambda h: _QuietRadio())
+        lib = self.phone.library_dir
+        os.makedirs(os.path.join(lib, "kolibri"))
+        os.makedirs(os.path.join(lib, "tools"))
+        with zipfile.ZipFile(os.path.join(lib, "kolibri", "sim.zip"), "w") as z:
+            z.writestr("index.html", "<!doctype html><html><head><title>é</title></head><body>hi</body></html>")
+            z.writestr("a/pic.png", b"\x89PNG")
+            z.writestr("a/", "")
+        with zipfile.ZipFile(os.path.join(lib, "tools", "geogebra.zip"), "w") as z:
+            z.writestr("GeoGebra/deployggb.js", "x")
+            z.writestr("GeoGebra/x.html", "<head></head>")
+        with open(os.path.join(lib, "index.json"), "w", encoding="utf-8") as fh:
+            json.dump([{"title": "Sim", "file": "kolibri/sim.zip", "kind": "zip", "collection": "C", "shelf": "PhET", "credit": "By PhET"},
+                       {"title": "GeoGebra", "file": "tools/geogebra.zip", "kind": "ggb", "collection": "Tools", "credit": "GG"}], fh)
+
+    def get(self, path, method="GET", **headers):
+        path, _, query = path.partition("?")
+        return self.phone.app.dispatch(Request(method, path, dict(urllib.parse.parse_qsl(query)),
+                                               dict({"Cookie": "student=Ana", "Host": "192.168.43.1:8080"}, **headers), b"", "192.168.43.9"))
+
+    def test_activities_are_walled_off(self):
+        self.assertIn("href='/library/open?f=tools%2Fgeogebra.zip'", self.get("/library").body.decode())
+        page_html = self.get("/library/open?f=kolibri/sim.zip").body.decode()
+        self.assertIn("sandbox='allow-scripts'", page_html)
+        self.assertIn("By PhET", page_html)
+        resp = self.get("/library/app/kolibri/sim.zip/index.html")
+        csp = resp.headers["Content-Security-Policy"]
+        self.assertIn("sandbox allow-scripts; default-src http://192.168.43.1:8080/library/app/kolibri/sim.zip/ ", csp)
+        self.assertNotIn("allow-same-origin", csp)
+        self.assertIn("form-action 'none'", csp)
+        html = resp.body.decode("utf-8")
+        self.assertTrue(html.startswith("<!doctype html><html><head><script>(function(){function store()"))
+        self.assertIn("<title>é</title>", html)
+        self.assertEqual(self.get("/library/app/kolibri/sim.zip/a/pic.png").headers["Content-Type"], "image/png")
+        for bad in ("kolibri/sim.zip/none.js", "kolibri/sim.zip/a/", "kolibri/other.zip/index.html", "../phone.db.zip/x", "kolibri/sim.zip/../../x"):
+            self.assertEqual(self.get("/library/app/" + bad).status, 404, bad)
+        evil = self.get("/library/app/kolibri/sim.zip/index.html", Host="evil'; script-src *")
+        self.assertIn("default-src http://localhost/", evil.headers["Content-Security-Policy"])
+        self.assertEqual(self.get("/library/open?f=../phone.db").status, 404)
+        self.assertIn("class='keepread' href='/library/open?f=kolibri%2Fsim.zip'", self.get("/library").body.decode())
+
+    def test_an_activity_cannot_press_our_buttons(self):
+        self.assertEqual(self.get("/status/reload", "POST", Origin="null").status, 403)
+        self.assertNotEqual(self.get("/logout", "POST", Origin="http://192.168.43.1:8080").status, 403)
+        self.assertIn("HttpOnly", self.phone.app.dispatch(Request("POST", "/login", {}, {}, b"student=Ana", "1.1.1.1")).headers["Set-Cookie"])
+
+    def test_geogebra_is_the_only_one_with_its_own_origin(self):
+        page_html = self.get("/library/open?f=tools/geogebra.zip").body.decode()
+        self.assertNotIn("<iframe", page_html)
+        self.assertIn("_start.html?app=scientific", page_html)
+        resp = self.get("/library/app/tools/geogebra.zip/_start.html?app=<x>&lang='x")
+        self.assertIn("sandbox allow-scripts allow-same-origin; default-src http://192.168.43.1:8080/library/app/tools/geogebra.zip/ ",
+                      resp.headers["Content-Security-Policy"])
+        self.assertIn('"appName": "graphing"', resp.body.decode())
+        self.assertIn('"language": "en"', resp.body.decode())
+        self.assertIn("GeoGebra GmbH", resp.body.decode())
+
+    def test_libraries_by_name_only(self):
+        for path, kind in (("katex/katex.min.js", "text/javascript"), ("katex/fonts/KaTeX_Main-Regular.woff2", "font/woff2"),
+                           ("signature_pad/signature_pad.umd.min.js", "text/javascript"), ("opendyslexic/regular.woff2", "font/woff2"),
+                           ("qrcode_generator/qrcode.js", "text/javascript"), ("papaparse/papaparse.min.js", "text/javascript")):
+            resp = self.get("/site/vendor/" + path)
+            self.assertEqual(resp.status, 200, path)
+            self.assertTrue(resp.headers["Content-Type"].startswith(kind), path)
+        for bad in ("looks.css", "vendor/../looks.css", "vendor/katex/../../looks.css", "vendor/NOTICES.md", "vendor/nope/x.js"):
+            self.assertEqual(self.get("/site/" + bad).status, 404, bad)
+        css = self.get("/site/vendor/katex/katex.min.css").body.decode()
+        import re as regex
+        for name in set(regex.findall(r"url\((fonts/[^)]+)\)", css)):    # every font the stylesheet asks for is there
+            self.assertEqual(self.get("/site/vendor/katex/" + name).status, 200, name)
+
+    def test_tools_on_the_pages(self):
+        a = asg.normalize_assignment({"title": "E", "questions": [{"type": "text", "prompt": r"What is \(x\)?", "accept": ["1"]}]})
+        self.phone.import_assignment(asg.pack(a), open_=True)
+        html = self.get(f"/a/{a['id']}").body.decode()
+        for part in ("id='scratchopen'", "id='readpanel'", "data-reading", r"What is \(x\)?", "/site/vendor/katex/katex.min.js"):
+            self.assertIn(part, html)
+        self.assertIn("data-qr='http://192.168.43.1:8080'", self.get("/join?u=http://192.168.43.1:8080").body.decode())
+        self.assertIn("data-qr='http://192.168.43.1:8080'", self.get("/join?u=javascript:alert(1)").body.decode())
+        self.assertIn("PhET Interactive Simulations, University of Colorado Boulder", self.get("/about").body.decode())
+
+    def test_hub_geogebra_qr_and_import(self):
+        hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        hub.catalog.entries = catalog.parse_catalog(fake_catalog_xml())
+        def page_of(path, method="GET", body=b"", host="192.168.1.5:8000"):
+            path, _, query = path.partition("?")
+            return hub.app.dispatch(Request(method, path, dict(urllib.parse.parse_qsl(query)), {"Host": host}, body, "127.0.0.1"))
+        self.assertIn("non-commercial", page_of("/library?q=geo").body.decode())
+        page_of("/library/add", "POST", b"key=geogebra%7Capps")
+        (item,) = hub.selection()
+        self.assertEqual((item["kind"], item["files"][0][1]), ("ggb", "geogebra.zip"))
+        with mock.patch.object(library, "download", side_effect=lambda url, path, size, **k: open(path, "wb").write(b"z" * 100) and self.assertEqual(size, 0)):
+            job = catalog.DownloadJob([item], os.path.join(self.tmp, "c2"))
+            job.run()
+        self.assertEqual(job.state, "done", job.error)                    # an updated bundle of another size is fine
+        with open(os.path.join(self.tmp, "c2", "library", "index.json"), encoding="utf-8") as fh:
+            (entry,) = json.load(fh)
+        self.assertEqual((entry["file"], entry["kind"]), ("tools/geogebra.zip", "ggb"))
+        self.assertIn("GeoGebra GmbH", entry["credit"])
+        setup = page_of("/phone-setup").body.decode()
+        self.assertIn("meshlearn://setup?", setup)
+        self.assertIn("address=192.168.1.5%3A8000", setup)
+        self.assertNotIn("<b>", page_of("/phone-setup", host="<b>").body.decode())
+        builder = page_of("/assignments/new").body.decode()
+        self.assertIn("Import questions from a spreadsheet", builder)
+        self.assertEqual(page_of("/site/vendor/papaparse/papaparse.min.js").status, 200)
+
+    def test_kolibri_activities_carry_phets_credit(self):
+        case = KolibriTests("test_channels_become_catalog_entries")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        path = os.path.join(case.tmp, "mirror", "content", "databases", case.CHANNEL + ".sqlite3")
+        db = sqlite3.connect(path)
+        db.execute("INSERT INTO content_contentnode VALUES ('sim','Sim','html5',3,3,3,'add','CC BY','PhET Interactive Simulations, University of Colorado Boulder','',0)")
+        db.execute("INSERT INTO content_file VALUES ('sim', ?, 'html5_zip', 0, 0)", ("9" * 32,))
+        db.execute("INSERT INTO content_localfile VALUES (?, 'zip', 500)", ("9" * 32,))
+        db.commit()
+        db.close()
+        channel = kolibri.Channel(case.hub.kolibri_dir, case.CHANNEL)
+        channel.fetch()
+        item = channel.selection_item(channel.node("add"), case.hub.catalog.entries[0])
+        sim = next(d for d in item["details"] if d["title"] == "Sim")
+        self.assertEqual((sim["kind"], sim["credit"]), ("zip", kolibri.PHET_CREDIT))
+
+
+class WrongAnswerTests(unittest.TestCase):
+    """Notes on wrong answers, not-sure ticks and changed answers, from the builder to the class view and back."""
+
+    LESSON = {"id": "a-why", "title": "Adding", "course": "math", "unit": "fractions", "due": "2020-01-01", "questions": [
+        {"type": "choice", "prompt": "Bigger?", "options": ["1/2", "1/8"], "answer": 0, "why": ["ignored", "Bigger bottom means bigger"]},
+        {"type": "number", "prompt": "1/4 + 1/2?", "answer": 0.75, "why": [{"x": "2/6", "w": "Added tops and bottoms"}, {"x": "3/4", "w": "right"}, {"x": "abc", "w": "no"}]},
+        {"type": "text", "prompt": "Gas out?", "accept": ["oxygen"], "why": [{"x": "Carbon dioxide", "w": "Mixed up in and out"}]},
+        {"type": "long", "prompt": "Why?", "points": 2}]}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = Hub(os.path.join(self.tmp, "hub.db"), lambda h: _QuietRadio())
+        self.hub.add_phone("p1", "North village")
+
+    def page(self, path, method="GET", body=b""):
+        path, _, query = path.partition("?")
+        return self.hub.app.dispatch(Request(method, path, dict(urllib.parse.parse_qsl(query)), {}, body, "127.0.0.1"))
+
+    def hand_in(self, name, answers, **signals):
+        sid = "s" + name
+        self.hub.on_message(protocol.Message(1, protocol.SUBMIT, {"s": [dict(
+            {"id": sid, "a": "a-why", "v": self.hub.current_version("a-why"), "u": name,
+             "x": dict(zip(("q1", "q2", "q3", "q4"), answers)), "t": time.time()}, **signals)]}, "p1"))
+        return sid
+
+    def test_notes_are_cleaned_and_never_leave_the_hub(self):
+        a = asg.normalize_assignment(self.LESSON)
+        self.assertEqual(a["questions"][0]["why"], ["", "Bigger bottom means bigger"])
+        self.assertEqual(a["questions"][1]["why"], [{"x": "2/6", "w": "Added tops and bottoms"}])   # not the right answer, not a word
+        self.assertEqual(asg.wrong_note(a["questions"][1], "0,4"), "")
+        self.assertEqual(asg.wrong_note(a["questions"][1], "0,33"), "Added tops and bottoms")
+        self.assertEqual(asg.wrong_note(a["questions"][1], "4/12"), "Added tops and bottoms")
+        self.assertEqual(asg.wrong_note(a["questions"][2], " carbon DIOXIDE. "), "Mixed up in and out")
+        for mode in ("graded", "practice"):
+            b = asg.normalize_assignment(dict(self.LESSON, mode=mode))
+            self.assertNotIn("tops", json.dumps(asg.pack(asg.public_view(b))))
+            plain = asg.normalize_assignment(dict(self.LESSON, mode=mode, questions=[{k: v for k, v in q.items() if k != "why"} for q in self.LESSON["questions"]]))
+            self.assertEqual(asg.version_of(b), asg.version_of(plain))
+
+    def test_signals_are_small_and_checked(self):
+        a = asg.normalize_assignment(self.LESSON)
+        answers = {"q1": "1", "q2": "0.75", "q3": "oxygen", "q4": "x"}
+        firsts = {"q1": "0", "q2": "3/4", "q3": "Oxygen ", "q4": "y", "q9": "1"}   # only q1 really changed
+        s = asg.signals_of(a, {"q1", "q3"}, json.dumps(firsts), answers)
+        self.assertEqual(s, {"n": 5, "f": {"q1": "0"}})
+        self.assertEqual(asg.signals_of(a, set(), json.dumps({"q1": "7", "q2": "abc"}), answers), {})
+        self.assertEqual(asg.signals_of(a, set(), "[not json", answers), {})
+        self.assertEqual(asg.read_signals(a, s), ({"q1", "q3"}, {"q1": "0"}))
+        self.assertEqual(asg.read_signals(a, {"n": "x", "f": 3}), (set(), {}))
+
+    def test_phone_sends_them_and_the_class_view_shows_them(self):
+        self.hub.create_assignment(self.LESSON)
+        radio = _QuietRadio()
+        sent = []
+        radio.send = lambda dest, kind, payload: sent.append((kind, payload)) or 1
+        phone = Phone(os.path.join(self.tmp, "phone"), "hub", "P", lambda h: radio)
+        phone.import_assignment(self.hub.packed_for_phone("a-why"), open_=True)
+        def ask(method, path, form=""):
+            return phone.app.dispatch(Request(method, path, {}, {"Cookie": "student=Ana", "Content-Type": "application/x-www-form-urlencoded"}, form.encode(), "1.1.1.1"))
+        page = ask("GET", "/a/a-why").body.decode()
+        self.assertIn("name='unsure-q1'", page)
+        self.assertNotIn("tops", page)
+        again = ask("POST", "/a/a-why", "q1=1&unsure-q1=1")
+        self.assertIn("name='unsure-q1' value='1' checked", again.body.decode())
+        ask("POST", "/a/a-why", urllib.parse.urlencode({"q1": "1", "q2": "2/6", "q3": "oxygen", "q4": "x", "unsure-q3": "1", "first": '{"q1":"0"}'}))
+        phone.flush_submissions(force=True)
+        item = next(p for k, p in sent if k == protocol.SUBMIT)["s"][0]
+        self.assertEqual((item["n"], item["f"]), (4, {"q1": "0"}))
+        self.hub.on_message(protocol.Message(1, protocol.SUBMIT, {"s": [item]}, "p1"))
+        self.hand_in("Kofi", ("1", "2/6", "carbon dioxide", "y"), n=2)
+        self.hand_in("Zara", ("0", "7.5", "oxygen", "z"), n="junk", f=["junk"])
+        report = comprehension.question_report(self.hub.get_assignment("a-why"), self.hub.comprehension_records())
+        self.assertEqual([(g["note"], g["names"]) for g in report[1]["groups"]], [("Added tops and bottoms", ["Ana", "Kofi"]), ("", ["Zara"])])
+        self.assertEqual((report[0]["changed_away"], report[2]["unsure_right"], report[1]["unsure_wrong"]), (["Ana"], ["Ana"], ["Kofi"]))
+        self.assertEqual(report[3]["waiting"], ["Ana", "Kofi", "Zara"])
+        html = self.page("/assignments/a-why").body.decode()
+        for part in ("<strong>2 students</strong> on question 1: Bigger bottom means bigger", "Added tops and bottoms", "Right, but not sure:</strong> Ana",
+                     "Had it right, then changed it:</strong> Ana", "Place value", "3 answers to mark"):
+            self.assertIn(part, html)
+        self.assertIn("Not sure", self.page("/submissions/" + item["id"]).body.decode())
+        csv_text = self.page("/assignments/a-why/grades.csv").body.decode()
+        self.assertIn("not_sure,changed", csv_text)
+
+    def test_a_note_can_be_added_from_the_class_view(self):
+        self.hub.create_assignment(self.LESSON)
+        version = self.hub.current_version("a-why")
+        self.hand_in("Zara", ("0", "7.5", "oxygen", "z"))
+        self.page("/assignments/a-why/why", "POST", urllib.parse.urlencode({"q": "q2", "answer": "7.5", "note": "<b>Point</b>"}).encode())
+        self.assertIn("&lt;b&gt;Point&lt;/b&gt;", self.page("/assignments/a-why").body.decode())
+        self.assertEqual(self.hub.current_version("a-why"), version)   # nothing for phones to fetch
+        self.page("/assignments/a-why/why", "POST", b"q=q2&answer=7%2C50&note=")
+        self.assertNotIn("Point", self.page("/assignments/a-why").body.decode())
+        self.page("/assignments/a-why/why", "POST", b"q=q1&answer=9&note=x")   # no such option
+        self.assertEqual(self.page("/assignments/nope/why", "POST", b"q=q1").status, 303)
+
+    def test_class_progress_and_practice_on_a_mistake(self):
+        self.hub.create_assignment(self.LESSON)
+        for name in ("Ana", "Kofi"):
+            self.hand_in(name, ("1", "2/6", "oxygen", "y"))
+        self.assertEqual(comprehension.common_mistakes(self.hub.comprehension_records())[0], ("note", "Added tops and bottoms", 2))
+        html = self.page("/comprehension/math?unit=fractions").body.decode()
+        self.assertIn("Most common mistakes", html)
+        self.assertIn("practice=note%3AAdded+tops+and+bottoms", html)
+        draft, _ = self.hub.practice_draft("math", "fractions", "note:Added tops and bottoms")
+        self.assertEqual([q["prompt"] for q in draft["questions"]], ["1/4 + 1/2?"])
+        self.assertEqual(draft["mode"], "practice")
+        late = asg.normalize_assignment(dict(self.LESSON, due="2099-01-01"))   # still open: its answers must not go out in a practice
+        self.hub.create_assignment(late)
+        draft, note = self.hub.practice_draft("math", "fractions", "note:Added tops and bottoms")
+        self.assertEqual(draft["questions"], [])
+        self.assertIn("left out", note)
+        self.assertIn("left out", self.page("/assignments/new?course=math&unit=fractions&practice=note:Added+tops+and+bottoms").body.decode())
+
+    def test_a_note_goes_back_to_the_student(self):
+        self.hub.create_assignment(self.LESSON)
+        sid = self.hand_in("Ana", ("0", "0.75", "oxygen", "because"), n=8)
+        self.assertIn("not sure", self.page("/marking").body.decode())
+        sent = []
+        self.hub.messenger.send = lambda dest, kind, payload: sent.append(payload) or 1
+        self.page("/marking", "POST", urllib.parse.urlencode({"sid": sid, "qid": "q4", "mark": "1", "note": "Say  why, " + "x" * 90}).encode())
+        (result,) = sent[-1]["r"]
+        self.assertEqual(len(result["nt"]["q4"]), 60)
+        self.assertTrue(result["nt"]["q4"].startswith("Say why, "))
+        phone = Phone(os.path.join(self.tmp, "phone"), "hub", "P", lambda h: _QuietRadio())
+        phone.import_assignment(self.hub.packed_for_phone("a-why"), open_=True)
+        a = phone.get_assignment("a-why")
+        own = phone.submit(a, "Ana", {"q1": "0", "q2": "0.75", "q3": "oxygen", "q4": "because"})
+        phone.on_message(protocol.Message(1, protocol.RESULT, {"r": [dict(result, id=own, nt={"q4": "<i>Say why</i>"})]}, "hub"))
+        self.assertIn("From your teacher: &lt;i&gt;Say why&lt;/i&gt;", phone.app.dispatch(
+            Request("GET", "/results", {}, {"Cookie": "student=Ana"}, b"", "1.1.1.1")).body.decode())
+
+    def test_builder_sizes_saves_and_sends(self):
+        html = self.page("/assignments/new").body.decode()
+        for part in ("What students see", "Radio size", "What picking this shows", "Wrong answers to watch for"):
+            self.assertIn(part, html)
+        def post(path, data):
+            resp = self.hub.app.dispatch(Request("POST", path, {}, {"Content-Type": "application/json"}, json.dumps(data).encode(), "127.0.0.1"))
+            return resp.status, json.loads(resp.body)
+        self.assertGreaterEqual(post("/api/assignments/size", self.LESSON)[1]["frames"], 1)
+        self.assertIsNone(post("/api/assignments/size", {"title": ""})[1]["frames"])
+        self.assertIsNone(post("/api/assignments/size", [1])[1]["frames"])
+        self.assertEqual(self.hub.db.one("SELECT COUNT(*) AS n FROM assignments")["n"], 0)   # sizing saves nothing
+        status, data = post("/api/assignments", dict(self.LESSON, send=True))
+        self.assertEqual((status, data["sent"]), (200, 1))
+        self.assertEqual(self.hub.db.one("SELECT open FROM holdings")["open"], 1)
+        self.assertNotIn("send", self.hub.get_assignment("a-why"))
+        evil = dict(self.LESSON, title="</script><script>alert(1)</script>")
+        post("/api/assignments", evil)
+        self.assertNotIn("</script><script>alert", self.page("/assignments/a-why/edit").body.decode().split("const S =")[1])
+
+    def test_data_export_round_trip(self):
+        self.hub.create_assignment(self.LESSON)
+        self.hand_in("Ana", ("1", "2/6", "oxygen", "y"), n=1, f={"q1": "0"})
+        record = self.hub.learning_record()
+        self.assertEqual(record["submissions"][0]["not_sure"], ["q1"])
+        self.assertEqual(record["submissions"][0]["wrong_notes"]["q2"], "Added tops and bottoms")
+        other = Hub(os.path.join(self.tmp, "other.db"), lambda h: _QuietRadio())
+        other.import_learning_record(json.loads(json.dumps(record)))
+        (r,) = other.comprehension_records()
+        self.assertEqual((r["unsure"], r["first"]), ({"q1"}, {"q1": "0"}))
+
+
+class KeepReadingTests(unittest.TestCase):
+    def test_the_last_thing_opened_is_offered_again(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        phone = Phone(os.path.join(tmp, "card"), "hub", "P", lambda h: _QuietRadio())
+        def get(path, cookie="student=Ana", headers=None):
+            req = Request("GET", path, {}, dict({"Cookie": cookie}, **(headers or {})), b"", "192.168.43.9")
+            return phone.app.dispatch(req)
+        self.assertNotIn("Keep reading", get("/library").body.decode())
+        get("/library/files/starter/fractions.html")
+        get("/library/files/starter/photosynthesis.html", headers={"Range": "bytes=100-"})   # a player fetching a later piece
+        get("/library/files/starter/photosynthesis.html", cookie="student=Kofi")
+        page_html = get("/library").body.decode()
+        self.assertIn("Keep reading", page_html)
+        self.assertIn("class='keepread' href='/library/files/starter/fractions.html'", page_html)
+        os.remove(os.path.join(phone.library_dir, "starter", "fractions.html"))
+        self.assertNotIn("Keep reading", get("/library").body.decode())
 
 
 class SendCountdownTests(unittest.TestCase):
@@ -387,7 +984,7 @@ class EndToEndTests(EndToEndBase):
 
         self.assertTrue(wait_for(lambda: self.hub.db.one("SELECT 1 FROM submissions WHERE student = 'Ana'")))
         sub = self.hub.db.one("SELECT sub_id FROM submissions WHERE student = 'Ana'")
-        self.assertIn("needs grading", self.get(self.hport, f"/assignments/{aid}"))
+        self.assertIn("to mark", self.get(self.hport, f"/assignments/{aid}"))
         self.post(self.hport, f"/submissions/{sub['sub_id']}/grade", {"m_q5": "3"})
         self.assertTrue(wait_for(lambda: self.phone.db.one("SELECT complete FROM submissions WHERE student = 'Ana'")["complete"] == 1))
         self.assertIn("7 / 7", self.get(self.pport, "/results"))
@@ -395,6 +992,8 @@ class EndToEndTests(EndToEndBase):
 
     def test_teacher_pages_examples_and_marking(self):
         """A new hub starts from the example lessons; work comes in, is marked on the Marking page, and goes back."""
+        self.phone.looks = ["mid"]
+        self.hub.set_setting("ages", "primary")
         self.assertIn("Add example lessons", self.get(self.hport, "/"))
         today = self.post(self.hport, "/examples", {})
         self.assertIn("Added 9 example lessons", today)
@@ -666,7 +1265,7 @@ class KolibriTests(unittest.TestCase):
             {"id": self.CHANNEL, "name": "Khan Academy (Kiswahili)", "language": "sw", "included_languages": ["en", "sw"],
              "description": "Math", "published_size": 9000, "last_published": "2023-07-06T00:00:04Z",
              "kind_count": [{"kind_id": "topic", "count": 4}, {"kind_id": "video", "count": 5}, {"kind_id": "exercise", "count": 1}]},
-            {"id": "d" * 32, "name": "Only apps", "language": "en", "kind_count": [{"kind_id": "html5", "count": 9}]}])
+            {"id": "d" * 32, "name": "Only exercises", "language": "en", "kind_count": [{"kind_id": "exercise", "count": 9}]}])
         for e in self.hub.catalog.entries:
             catalog._rate(e)
         self.make_channel()
@@ -1066,7 +1665,7 @@ class LearningDataTests(unittest.TestCase):
         url = f"http://127.0.0.1:{port}"
         page = urllib.request.urlopen(f"{url}/comprehension/math").read().decode()
         self.assertIn("Ana Souza", page)
-        self.assertIn("rushing (fast and wrong)", page)
+        self.assertIn("rushed 1 piece of work (fast and wrong)", page)
         self.assertIn("Calculation", page)
         home = urllib.request.urlopen(url).read().decode()
         self.assertIn("Export all data", home)
@@ -1079,6 +1678,8 @@ class PhoneCourseTests(EndToEndBase):
     LOSS = 0.0
 
     def test_course_cards_unit_pages_timing_and_levels(self):
+        self.phone.looks = ["mid"]
+        self.hub.set_setting("ages", "primary")
         aid = self.hub.create_assignment(load_sample())["id"]
         self.phone.sync_from_hub(f"http://127.0.0.1:{self.hport}")
         self.hub.set_open(aid, "phone-1", True)
@@ -1199,6 +1800,103 @@ class SchoolLanguageTests(EndToEndBase):
         self.assertIn(">العربية</button>", english)  # the way back
         # Unknown languages and other sites are ignored.
         self.assertIn("<html lang='en'>", self.post(self.pport, "/lang", {"to": "xyz", "back": "https://example.org/"}))
+
+    def test_right_answers_only_after_the_due_date(self):
+        from datetime import date, timedelta
+        self.phone.looks = ["mid"]
+        self.hub.set_setting("ages", "primary")
+        sample = dict(load_sample(), due=(date.today() + timedelta(days=2)).isoformat())
+        aid = self.hub.create_assignment(sample)["id"]
+        self.hub.set_open(aid, "phone-1", True)
+        self.assertTrue(wait_for(self.phone_open(aid)))
+        self.post(self.pport, "/login", {"student": "Ana"})
+        self.post(self.pport, f"/a/{aid}", {"q1": "0", "q2": "5", "q3": "Chlorophyll", "q4": "1", "q5": "Cutting bread."})
+        marked = lambda: (self.phone.db.one("SELECT score FROM submissions") or {"score": None})["score"] is not None  # noqa: E731
+        self.assertTrue(wait_for(marked))
+        results = self.get(self.pport, "/results")
+        self.assertIn("You said: 2/3", results)
+        self.assertNotIn("Right answer", results)                               # classmates may still be working
+        self.assertIsNone(self.phone.db.one("SELECT right_answers FROM submissions")["right_answers"])
+        self.assertEqual(self.hub.send_right_answers(), 0)
+        self.assertIn("day after the due date", self.get(self.hport, f"/assignments/{aid}"))
+
+        # The day after: only what this student missed.
+        self.hub.create_assignment(dict(self.hub.get_assignment(aid), due=(date.today() - timedelta(days=1)).isoformat()))
+        self.assertEqual(self.hub.send_right_answers(), 1)
+        self.assertEqual(self.hub.send_right_answers(), 0)                      # once
+        got = lambda: self.phone.db.one("SELECT right_answers FROM submissions")["right_answers"]  # noqa: E731
+        self.assertTrue(wait_for(lambda: bool(got())))
+        self.assertEqual(json.loads(got()), {"q1": "3/6", "q2": "0.75 (± 0.001)"})
+        self.assertIn("Right answer: 3/6", self.get(self.pport, "/results"))
+        self.post(self.pport, "/login", {"student": "Kofi"})
+        self.assertNotIn("Right answer", self.get(self.pport, "/results"))
+
+    def test_right_answers_sent_by_hand_or_never(self):
+        aid = self.hub.create_assignment(dict(load_sample(), due=""))["id"]
+        self.assertIn("no due date", self.get(self.hport, f"/assignments/{aid}"))
+        self.assertFalse(self.hub._answers_allowed(self.hub.get_assignment(aid)))
+        self.post(self.hport, f"/assignments/{aid}/answers", {})
+        self.assertTrue(self.hub._answers_allowed(self.hub.get_assignment(aid)))
+        other = self.hub.create_assignment(dict(load_sample(), id="a-old", due="2020-01-01"))["id"]
+        self.assertTrue(self.hub._answers_allowed(self.hub.get_assignment(other)))
+        self.post(self.hport, "/settings/answers", {"right_answers": "never", "back": f"/assignments/{other}"})
+        self.assertFalse(self.hub._answers_allowed(self.hub.get_assignment(other)))
+
+    def test_country_sets_the_languages_for_learning(self):
+        from meshlearn import language as lang
+        self.assertIn("Where is your school?", self.get(self.hport, "/"))
+        html = self.post(self.hport, "/language/country", {"country": "KE"})
+        self.assertIn("Set for Kenya: English, Kiswahili, Français", html)
+        self.assertEqual((self.hub.school_language(), self.hub.other_languages()), ("eng", ["swa", "fra"]))
+        self.assertNotIn("Where is your school?", self.get(self.hport, "/"))
+        self.sync()
+        welcome = self.get(self.pport, "/")                        # students pick from all three
+        self.assertIn("Which language do you learn in?", welcome)
+        for name in ("English", "Kiswahili", "Français"):
+            self.assertIn(f">{name}</button>", welcome)
+        french = self.post(self.pport, "/lang", {"to": "fra", "back": "/library"})
+        self.assertIn("<html lang='fr'>", french)
+        self.assertIn(">Kiswahili</button>", french)               # and can switch later
+        self.assertIn(">English</button>", french)
+        self.assertIn("/library?lang=swa", self.get(self.hport, "/language") + self._library_with_list())
+
+        # Brazil: Portuguese first, in Brazil's own words
+        self.post(self.hport, "/language/country", {"country": "BR"})
+        self.assertEqual((self.hub.school_language(), self.hub.other_languages()), ("por", ["eng", "deu"]))
+        self.sync()
+        self.post(self.pport, "/lang", {"to": "por", "back": "/"})
+        welcome = self.get(self.pport, "/")
+        self.assertIn("<html lang='pt-BR'>", welcome)
+        self.assertIn("Escreva seu nome", welcome)
+        self.assertIn(">Deutsch</button>", welcome)
+
+        # Germany: English only where students are 12 or older
+        self.post(self.hport, "/language/country", {"country": "DE"})
+        self.assertEqual((self.hub.school_language(), self.hub.other_languages()), ("deu", ["eng", "fra"]))
+        self.assertEqual(self.hub.language_pack("fra")["tag"], "fr-FR")
+        self.hub.set_setting("ages", "early,primary")
+        self.assertIn("leaves out English", self.get(self.hport, "/language"))
+        self.post(self.hport, "/language/country", {"country": "DE"})
+        self.assertEqual((self.hub.school_language(), self.hub.other_languages()), ("deu", ["fra"]))
+        self.assertNotIn("leaves out English", self.get(self.hport, "/language"))
+        self.assertIn("not in the list", self.post(self.hport, "/language/country", {"country": "XX"}))
+        self.assertEqual(lang.languages_for("US"), ["eng", "spa", "fra"])
+        # A phone from before there could be three still gets two.
+        self.post(self.hport, "/language/country", {"country": "US"})
+        bundle = self.hub.language_bundle()
+        self.assertEqual((bundle["second"]["code"], [m["code"] for m in bundle["more"]]), ("spa", ["fra"]))
+
+    def _library_with_list(self):
+        self.hub.catalog.entries = catalog.parse_catalog(fake_catalog_xml())
+        return self.get(self.hport, "/library")
+
+    def test_every_language_that_comes_with_meshlearn_is_complete(self):
+        from meshlearn import language as lang
+        for code in lang.bundled():
+            self.assertEqual(set(lang.keys()) - set(lang.bundled()[code]["strings"]), set(), code)
+        brazil = lang.regional("por", "BR")
+        for key, text in brazil["strings"].items():
+            self.assertEqual(lang.check(key, text), "", key)
 
     def test_a_language_with_no_file_by_memory_card_and_shared(self):
         self.post(self.hport, "/language", {"lang": "hau"})  # MeshLearn has no Hausa words yet

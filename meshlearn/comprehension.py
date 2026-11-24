@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .assignments import parse_number
+from .assignments import answer_text, grade_question, parse_number, same_answer, wrong_note
 
 RECENT = 20
 LEVELS = ("Not started", "Just started", "Needs work", "Developing", "Good", "Strong")
@@ -144,6 +144,67 @@ def mistakes(records: Iterable[dict]) -> Dict[str, Dict[str, int]]:
         area = KINDS[kind][0]
         by_area[area] = by_area.get(area, 0) + n
     return {"areas": by_area, "kinds": by_kind}
+
+
+def mistake_label(kind: str, value: str) -> str:
+    return value if kind == "note" else KINDS.get(value, ("", value))[1]
+
+
+def common_mistakes(records: Iterable[dict]) -> List[Tuple[str, str, int]]:
+    """Most common first: ("note", the teacher's words, count) where a wrong answer has a note, else ("kind", …)."""
+    counts: Dict[Tuple[str, str], int] = {}
+    for r in records:
+        for q in r["questions"]:
+            answer = r["answers"].get(q["id"], "")
+            kind = diagnose(q, answer, r["scores"].get(q["id"]))
+            if kind:
+                note = wrong_note(q, answer)
+                key = ("note", note) if note else ("kind", kind)
+                counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][0] != "note", kv[0][1]))
+    return [(kind, value, n) for (kind, value), n in ranked]
+
+
+def question_report(assignment: dict, records: Iterable[dict]) -> List[dict]:
+    """How a class did on each question of one assignment (records of that version). A practice counts each
+    student's first try, the one that shows what they knew. Names are sorted."""
+    by_student: Dict[str, dict] = {}
+    for r in sorted(records, key=lambda r: r["at"] or 0):
+        if assignment.get("mode") == "practice":
+            by_student.setdefault(r["student"], r)
+        else:
+            by_student[r["student"]] = r
+    out = []
+    for q in assignment["questions"]:
+        item = {"q": q, "right": [], "wrong": [], "waiting": [], "groups": {}, "unsure_right": [], "unsure_wrong": [],
+                "changed_away": [], "fixed": [], "earned": []}
+        for name in sorted(by_student, key=str.lower):
+            r = by_student[name]
+            answer, earned = r["answers"].get(q["id"], ""), r["scores"].get(q["id"])
+            if earned is None:
+                item["waiting"].append(name)
+                continue
+            right = earned >= q.get("points", 1)
+            item["earned"].append(earned)
+            item["right" if right else "wrong"].append(name)
+            if q["id"] in r.get("unsure", ()):
+                item["unsure_right" if right else "unsure_wrong"].append(name)
+            first = r.get("first", {}).get(q["id"])
+            if first is not None and q["type"] != "long":
+                was = grade_question(q, first) or 0
+                if was >= q.get("points", 1) and not right:
+                    item["changed_away"].append(name)
+                elif was < q.get("points", 1) and right:
+                    item["fixed"].append(name)
+            if right or q["type"] == "long":
+                continue
+            key = next((k for k in item["groups"] if same_answer(q, k, answer)), answer)
+            group = item["groups"].setdefault(key, {"answer": answer, "text": answer_text(q, answer), "names": [],
+                                                    "note": wrong_note(q, answer), "kind": diagnose(q, answer, earned)})
+            group["names"].append(name)
+        item["groups"] = sorted(item["groups"].values(), key=lambda g: (-len(g["names"]), g["text"]))
+        out.append(item)
+    return out
 
 
 def pace(record: dict) -> Optional[str]:

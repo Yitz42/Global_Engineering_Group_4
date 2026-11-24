@@ -14,6 +14,7 @@ import time
 from typing import Dict, List, Optional
 
 from . import __version__
+from . import assignments as asg
 from . import comprehension as cmp
 from . import courses as crs
 from .web import Request, Response, esc, json_response, redirect
@@ -35,6 +36,9 @@ RECORD_DICTIONARY = {
     "submissions.answers": "What the student typed or picked, by question id (choice answers are option numbers, 0 = first).",
     "submissions.scores": "Points earned per question; null = not graded yet (a written answer).",
     "submissions.mistakes": "The kind of mistake per question that lost marks (see 'mistake_kinds').",
+    "submissions.wrong_notes": "What the teacher says a wrong answer shows, per question (their own words).",
+    "submissions.not_sure": "Questions the student ticked 'I'm not sure about this one'.",
+    "submissions.first_answers": "Their first answer, where they changed it after moving on.",
     "submissions.pace": "'rushing', 'fast_right', 'slow' or null: a signal worth a look, never proof.",
     "mistake_kinds": "Every mistake kind, its area and what it means.",
 }
@@ -63,8 +67,6 @@ class HubPages:
         app.add_route("POST", "/courses/reload", self.courses_reload)
         app.add_route("GET", "/courses/<cid>", self.course_page)
         app.add_route("POST", "/courses/<cid>", self.course_update)
-        app.add_route("GET", "/comprehension", self.comprehension_home)
-        app.add_route("GET", "/comprehension/<cid>", self.comprehension_page)
         app.add_route("GET", "/data/export.json", self.data_export)
         app.add_route("POST", "/api/data/import", self.data_import)
 
@@ -79,7 +81,9 @@ class HubPages:
             if not a:
                 continue
             grade = json.loads(s["grade"])
+            unsure, first = asg.read_signals(a, json.loads(s["signals"] or "{}"))
             records.append({
+                "unsure": unsure, "first": first,
                 "sub_id": s["sub_id"], "student": s["student"], "phone": s["phone"], "aid": a["id"],
                 "version": s["version"] or "", "course": a.get("course", "") if a.get("course", "") in known else "",
                 "unit": a.get("unit", ""),
@@ -219,50 +223,6 @@ class HubPages:
             pass
         return redirect(f"/courses/{cid}")
 
-    # -- comprehension ----------------------------------------------------------
-
-    def comprehension_home(self, req: Request) -> Response:
-        records = self.comprehension_records()
-        body = ("<p class='muted'>Worked out from every graded answer: how well each course and unit is understood, "
-                "and where the mistakes are. Practice tries count the way the sandbox counts them: right first time "
-                "1.0, on the second try 0.6, later 0.3.</p>" + self._course_cards(records, link="/comprehension/"))
-        return Response(self._page("Comprehension", body))
-
-    def comprehension_page(self, req: Request) -> Response:
-        cid = req.params["cid"]
-        course = crs.OTHER if cid == "_other" else self.get_course(cid)
-        if course is None:
-            return Response(self._page("Not found", "<p>No such course.</p>"), status=404)
-        s = self.course_summary(course)
-        units = s["units"]
-        head = "".join(f"<th>Unit {u['number']}<div class='muted'>{esc(u['title'])}</div></th>" for u in units)
-        overall = "".join(f"<td>{_level_pill(u['level'], u['score'])}</td>" for u in units)
-        rows = f"<tr><td><strong>Whole class</strong></td><td>{_level_pill(s['level'], s['score'])}</td>{overall}<td></td></tr>"
-        for student, st in s["students"].items():
-            cells = "".join(f"<td>{_level_pill(u['level'], u['score'])}</td>" for u in st["units"])
-            flags = ", ".join(f"{n}× {cmp.PACE_LABELS[k]}" for k, n in st["pace"].items())
-            rows += (f"<tr><td>{esc(student)}</td><td>{_level_pill(st['level'], st['score'])}</td>{cells}"
-                     f"<td class='muted'>{esc(flags)}</td></tr>")
-        areas = s["mistakes"]["areas"]
-        total = sum(areas.values())
-        mistake_rows = "".join(
-            f"<tr><td>{esc(cmp.AREAS[a]['label'])}<div class='muted'>{esc(cmp.AREAS[a]['about'])}</div></td>"
-            f"<td>{n}</td><td>{round(100 * n / total)}%</td></tr>"
-            for a, n in sorted(areas.items(), key=lambda kv: -kv[1]))
-        kind_rows = "".join(f"<li>{esc(cmp.KINDS[k][1])}: {n}</li>"
-                            for k, n in sorted(s["mistakes"]["kinds"].items(), key=lambda kv: -kv[1]))
-        body = (
-            "<p class='muted'>A unit's level is the average of each student's 20 most recent scored questions in it. "
-            "Levels: Strong 85%+, Good 65%+, Developing 40%+, Needs work below; fewer than 3 answers is "
-            "“Just started”. Timing signals are worth a look, never proof.</p>"
-            + (f"<div style='overflow-x:auto'><table><tr><th>Student</th><th>Course</th>{head}<th>Timing</th></tr>{rows}</table></div>"
-               if s["students"] else "<p class='muted'>No graded answers in this course yet.</p>")
-            + "<h2>Where the mistakes are</h2>"
-            + (f"<table><tr><th>Area</th><th>Mistakes</th><th>Share</th></tr>{mistake_rows}</table><ul>{kind_rows}</ul>"
-               if total else "<p class='muted'>No mistakes recorded yet.</p>")
-        )
-        return Response(self._page(f"{course['title']}: comprehension", body))
-
     # -- learning data ----------------------------------------------------------
 
     def _secret(self, key: str) -> str:
@@ -294,6 +254,8 @@ class HubPages:
                 "complete": r["complete"],
                 "mistakes": {q["id"]: k for q in r["questions"]
                              for k in [cmp.diagnose(q, r["answers"].get(q["id"], ""), r["scores"].get(q["id"]))] if k},
+                "wrong_notes": {q["id"]: n for q in r["questions"] for n in [asg.wrong_note(q, r["answers"].get(q["id"], ""))] if n},
+                "not_sure": sorted(r["unsure"]), "first_answers": r["first"],
                 "pace": cmp.pace(r), "source": r["source"],
             })
         return {
@@ -356,11 +318,13 @@ class HubPages:
                     tzinfo=datetime.timezone.utc).timestamp()
             except ValueError:
                 when = None
+            signals = asg.signals_of(a, set(s.get("not_sure") or []), json.dumps(s.get("first_answers") or {}), s.get("answers") or {})
             self.db.execute(
                 "INSERT INTO submissions (sub_id, assignment_id, version, student, phone, answers, submitted_at, received_at, "
-                "grade, duration, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "grade, duration, source, signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (sid, a["id"], str(s.get("version", "")), str(s.get("student", "?"))[:60], str(s.get("phone", "?"))[:60],
-                 json.dumps(s.get("answers") or {}), when, time.time(), json.dumps(grade), s.get("duration_s"), source),
+                 json.dumps(s.get("answers") or {}), when, time.time(), json.dumps(grade), s.get("duration_s"), source,
+                 json.dumps(signals) if signals else None),
             )
             added["submissions"] += 1
         return added

@@ -85,6 +85,46 @@ object Html {
     fun whenText(ts: Double?): String =
         if (ts == null || ts == 0.0) "" else SimpleDateFormat("MMM dd, HH:mm", Locale.US).format(Date((ts * 1000).toLong()))
 
+    /** A file of the student site's look or scripts, shared with the Python phone (meshlearn/site). */
+    fun site(name: String): String =
+        Html::class.java.getResource("/site/$name")!!.readText(Charsets.UTF_8).replace("\r\n", "\n")
+
+    private val ICONS: Map<String, Any?> by lazy { Json.parse(site("icons.json")).asMap()!! }
+
+    /** Drawings for young learners, one set on every phone. */
+    private val PICTURES: Map<String, Any?> by lazy { Json.parse(site("pictures.json")).asMap()!! }
+    private const val MAX_PICS = 12
+
+    fun hasPicture(key: String): Boolean = key in PICTURES
+    fun pictureName(key: String): String = PICTURES[key].asMap()?.get("n")?.toString() ?: key
+
+    /** One drawing from the picture library, or "" when this version doesn't have it. */
+    fun picture(key: String, cls: String = ""): String {
+        val p = PICTURES[key].asMap() ?: return ""
+        val paths = (if (p["d"] != null) "<path d='${p["d"]}' fill='${p["f"]}'/>" else "") +
+            (if (p["x"] != null) "<path d='${p["x"]}' fill='none'/>" else "")
+        return "<svg class='pic${if (cls.isEmpty()) "" else " $cls"}' viewBox='0 0 24 24' stroke='${p["s"] ?: "#1a1a1a"}' aria-hidden='true'>$paths</svg>"
+    }
+
+    /** The pictures a question shows: "apple*3, ball" -> apple, apple, apple, ball (at most MAX_PICS). */
+    fun picturesOf(spec: String): List<String> = spec.split(",").flatMap { part ->
+        val key = part.trim().substringBefore('*')
+        val count = part.trim().substringAfter('*', "").trim().toIntOrNull() ?: 1
+        if (key in PICTURES) List(count.coerceIn(1, MAX_PICS)) { key } else emptyList()
+    }.take(MAX_PICS)
+
+    /** A question's pictures in a frame. Read aloud as the names of what is shown, never how many. */
+    fun picturesHtml(spec: String): String {
+        val keys = picturesOf(spec)
+        if (keys.isEmpty()) return ""
+        val names = keys.distinct().joinToString(", ") { pictureName(it) }
+        return "<div class='pics n${keys.size}' role='img' aria-label='${esc(names)}'>${keys.joinToString("") { picture(it) }}</div>"
+    }
+
+    /** A line icon from the designs. Decorative: the words beside it carry the meaning. */
+    fun icon(name: String, cls: String = ""): String =
+        "<svg class='i${if (cls.isEmpty()) "" else " $cls"}' viewBox='0 0 24 24' aria-hidden='true'><path d='${ICONS[name]}'/></svg>"
+
     val CSS = """
 :root{--bg:#f7f7f4;--card:#fff;--ink:#1d1d1b;--muted:#5b5b57;--line:#d9d9d3;--accent:#1f5fbf;--accent-ink:#fff;--good:#1d7a3a;--bad:#b3261e;--warn:#8a5a00}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#22221f;--ink:#efefea;--muted:#b4b4ad;--line:#3a3a36;--accent:#7fb0ff;--accent-ink:#0b1a33;--good:#6fcf8a;--bad:#ff8a80;--warn:#f0c060}}
@@ -119,132 +159,38 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-a
 """
 
     fun page(title: String, body: String, nav: String = "", site: String = "MeshLearn", extraCss: String = "",
-             lang: String = "en", dir: String = "ltr"): String =
+             lang: String = "en", dir: String = "ltr", bodyCls: String = "", before: String = "", after: String = ""): String =
         "<!doctype html><html lang='${esc(lang)}'${if (dir == "rtl") " dir='rtl'" else ""}><head><meta charset='utf-8'>" +
             "<meta name='viewport' content='width=device-width,initial-scale=1'>" +
             "<title>${esc(title)} · ${esc(site)}</title><style>$CSS$extraCss</style></head>" +
-            "<body><header><strong>${esc(site)}</strong>$nav</header>" +
-            "<main id='main'><h1>${esc(title)}</h1>$body</main></body></html>"
+            "<body${if (bodyCls.isEmpty()) "" else " class='$bodyCls'"}><header><strong>${esc(site)}</strong>$nav</header>" +
+            "<main id='main'>" + (if (bodyCls.isEmpty()) "<h1>${esc(title)}</h1>"
+            else "<div class='titlebar'>$before<h1>${esc(title)}</h1>$after</div>") + "$body</main></body></html>"
 
     /**
      * The student site's look, on top of [CSS]: made for a phone held in one hand. Big tap targets,
-     * whole cards that open, tabs that show where you are. Kept identical to STUDENT_CSS in web.py.
+     * whole cards that open, tabs that show where you are. The files in meshlearn/site, as the Python phone.
      */
-    val STUDENT_CSS = """
-body{font-size:18px}
-header{position:sticky;top:0;z-index:5;flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px}
-header strong{font-size:16px;margin:0;display:flex;justify-content:space-between;gap:8px}
-.who{font-weight:400;color:var(--muted);font-size:15px}
-nav.tabs{display:flex;gap:6px}
-nav.tabs a{flex:1;display:flex;align-items:center;justify-content:center;white-space:nowrap;padding:9px 4px;border-radius:10px;border:1px solid var(--line);font-size:16px;color:var(--accent);text-decoration:none}
-nav.tabs a[aria-current=page]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
-main{padding:12px 14px 32px}
-h1{font-size:24px;margin:6px 0 10px}
-.lead{font-size:19px;margin:0 0 14px}
-a.card{display:block;color:var(--ink);text-decoration:none}
-a.card:hover,a.card:focus{border-color:var(--accent)}
-a.card h2,a.card h3{color:var(--accent);margin:0 0 6px}
-a.card h3{font-size:19px}
-.meta{color:var(--muted);font-size:15px;margin:4px 0}
-.due{font-size:15px;font-weight:700;margin:6px 0}
-.due.late{color:var(--bad)} .due.soon{color:var(--warn)} .due.done{color:var(--muted);font-weight:400}
-.go{display:block;text-align:center;margin:12px 0 0}
-.bar{height:10px;border-radius:99px;background:var(--line);overflow:hidden;margin:10px 0 4px}
-.bar span{display:block;height:100%;background:var(--good)}
-fieldset.q{background:var(--card);margin:14px 0;padding:14px}
-fieldset.q legend{float:left;width:100%;padding:0;margin:0 0 10px;font-size:19px;line-height:1.35}
-fieldset.q legend+*{clear:both}
-.qnum{display:block;color:var(--muted);font-size:14px;font-weight:600;margin-bottom:2px}
-.q label:not(.option){font-weight:400;font-size:15px;color:var(--muted);margin:4px 0}
-.option{border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0;min-height:52px;font-size:18px;color:var(--ink);cursor:pointer}
-.option.on{border-color:var(--accent);outline:2px solid var(--accent)}
-.q.bad{border-color:var(--bad)}
-.counter{font-size:14px;color:var(--muted);text-align:right;margin:4px 0 0}
-.submitbar{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0;margin-top:12px}
-.submitbar .meta{margin:0 0 6px}
-button.big,.button.big{display:block;width:100%;text-align:center;padding:15px;font-size:19px;margin:8px 0 0}
-.grade{font-size:22px;font-weight:700;margin:6px 0}
-.units{list-style:none;padding:0;margin:8px 0 0}
-.units li{padding:8px 0;border-top:1px solid var(--line)}
-a.item{padding:12px 14px;margin:8px 0}
-a.item strong{color:var(--accent)}
-form.search{display:flex;gap:8px;align-items:center;margin:0 0 8px}
-form.search input{flex:1}
-form.search button{margin:0}
-form.lang{align-self:flex-end;margin:0}
-form.lang button{margin:0;padding:6px 14px;font-size:15px;background:transparent;color:var(--accent);border:1px solid var(--line)}
-[dir=rtl] fieldset.q legend{float:right}
-[dir=rtl] .counter{text-align:left}
-[dir=rtl] button,[dir=rtl] .button{margin:8px 0 0 8px}
-[dir=rtl] button.big,[dir=rtl] .button.big,[dir=rtl] form.search button,[dir=rtl] form.lang button{margin:8px 0 0}
-[dir=rtl] th,[dir=rtl] td{text-align:right}
-.week{margin:0 0 14px}
-.week .wk{display:flex;justify-content:space-between;gap:8px;font-size:16px}
-.week .bar{height:14px;margin:6px 0 0}
-.next{background:var(--accent);color:var(--accent-ink);border-radius:22px;padding:20px;margin:0 0 16px}
-.next .label{font-size:15px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;opacity:.85}
-.next h2{margin:8px 0 6px;font-size:23px;line-height:1.25;color:inherit}
-.next .meta{color:inherit;opacity:.9}
-.next .due{color:inherit}
-.next .button{display:block;text-align:center;background:var(--card);color:var(--accent);font-size:20px;padding:16px;border-radius:16px;margin:14px 0 0}
-.row{display:flex;align-items:center;gap:12px;background:var(--card);border:2px solid var(--line);border-radius:18px;padding:12px 14px;margin:8px 0;color:var(--ink);text-decoration:none}
-.row.wait{border-style:dashed;background:transparent}
-.row .grow{flex:1;min-width:0;display:flex;flex-direction:column}
-.row .meta{margin:0}
-.row .end{font-weight:700;text-align:right}
-.row .end.small{font-weight:400;font-size:15px;color:var(--muted)}
-.chev{color:var(--muted);font-size:22px}
-.squares{display:grid;grid-template-columns:repeat(auto-fill,minmax(40px,1fr));gap:6px;margin:10px 0}
-.squares span{display:flex;align-items:center;justify-content:center;height:40px;border-radius:10px;font-weight:800}
-.squares .right{background:var(--good);color:var(--card)}
-.squares .part{background:var(--warn);color:var(--card)}
-.squares .wrong{border:3px solid var(--bad);color:var(--bad)}
-.squares .wait{border:2px dashed var(--line);color:var(--muted)}
-.new{display:inline-block;padding:2px 10px;border-radius:99px;background:var(--accent);color:var(--accent-ink);font-size:14px;font-weight:800}
-.bigscore{font-size:24px;font-weight:800;margin:6px 0}
-.missed{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:10px 0 0}
-.missed strong{display:block}
-.sendin{font-weight:700}
-"""
+    val STUDENT_CSS: String = site("student.css") + site("looks.css")
 
     /**
      * Counts down to when the phone sends the student's work by radio (data-in seconds from now),
-     * then says it is on its way. Kept identical to COUNTDOWN_JS in web.py. Plain ES5.
+     * then says it is on its way. Plain ES5.
      */
-    const val COUNTDOWN_JS = """
-(function(){var el=document.getElementById('sendin');if(!el)return;
-var left=parseInt(el.getAttribute('data-in'),10)||0,t0=new Date().getTime();
-function tick(){var s=Math.max(0,Math.round(left-(new Date().getTime()-t0)/1000));
-if(s<=0){el.textContent=el.getAttribute('data-now');return;}
-var m=Math.floor(s/60),r=s%60;el.textContent=el.getAttribute('data-words').replace('{time}',m+':'+(r<10?'0':'')+r);
-setTimeout(tick,1000);}tick();})();
-"""
+    val COUNTDOWN_JS: String = site("countdown.js")
 
     /**
      * Keeps a student's answers in the browser while they work (so a closed tab or a flat battery loses
      * nothing), counts what is answered, and shows which choice is picked. Plain ES5 for old phones.
      */
-    const val ASSIGNMENT_JS = """
-(function(){var f=document.getElementById('aform');if(!f)return;var key='meshlearn-draft:'+f.getAttribute('data-key');
-var store=null;try{store=window.localStorage;}catch(e){}
-function all(){return f.querySelectorAll('input[type=text],input[type=radio],textarea');}
-function save(){if(!store)return;var d={},els=all();for(var i=0;i<els.length;i++){var el=els[i];
-if(el.type==='radio'){if(el.checked)d[el.name]=el.value;}else if(el.value)d[el.name]=el.value;}
-try{store.setItem(key,JSON.stringify(d));}catch(e){}}
-function restore(){if(!store)return;var d;try{d=JSON.parse(store.getItem(key)||'{}')||{};}catch(e){d={};}
-var els=all();for(var i=0;i<els.length;i++){var el=els[i];if(!d.hasOwnProperty(el.name))continue;
-if(el.type==='radio'){if(!f.querySelector('input[name="'+el.name+'"]:checked')&&el.value===d[el.name])el.checked=true;}
-else if(!el.value)el.value=d[el.name];}}
-function update(){var qs=f.querySelectorAll('fieldset.q'),done=0;for(var i=0;i<qs.length;i++){
-var q=qs[i],ok=false,els=q.querySelectorAll('input,textarea');for(var j=0;j<els.length;j++){var el=els[j];
-if(el.type==='radio'){var lab=el.parentNode;if(el.checked){ok=true;lab.className='option on';}else lab.className='option';}
-else if(el.value.replace(/\s/g,''))ok=true;
-if(el.tagName==='TEXTAREA'){var c=document.getElementById(el.id+'-count');if(c)c.innerHTML=el.value.length+' / '+el.getAttribute('maxlength');}}
-if(ok)done++;}var a=document.getElementById('answered');
-if(a)a.textContent=(a.getAttribute('data-words')||'{done} of {total} answered').replace('{done}',done).replace('{total}',qs.length);}
-restore();update();f.addEventListener('input',function(){save();update();});f.addEventListener('change',function(){save();update();});
-var bad=f.querySelector('[aria-invalid=true]');if(bad)bad.focus();})();
-"""
+    val ASSIGNMENT_JS: String = site("assignment.js")
+    val LISTEN_JS: String = site("listen.js")   // reads aloud, where the device has a voice for the language
+    val SIGNIN_JS: String = site("signin.js")   // finds a name in the class list
+    val IDLE_JS: String = site("idle.js")       // goes back to "Who are you?" when nobody taps for a while
+    val MATH_JS: String = site("math.js")         // equations (KaTeX), only on pages that have some
+    val READING_JS: String = site("reading.js")   // bigger text, easy-to-read letters, more space
+    val SCRATCH_JS: String = site("scratch.js")   // a scratchpad per question; stays in the browser
+    val RESUME_JS: String = site("resume.js")   // "Keep going" on work this student has begun
 
     /** Forgets a saved draft once the work is safely turned in. */
     const val CLEAR_DRAFT_JS =
@@ -334,7 +280,7 @@ class Response(
     constructor(html: String, status: Int = 200) : this(html.toByteArray(Charsets.UTF_8), status)
 
     fun setCookie(name: String, value: String, maxAge: Int = 60 * 60 * 24 * 180): Response {
-        headers["Set-Cookie"] = "$name=${Html.quote(value)}; Path=/; Max-Age=$maxAge; SameSite=Lax"
+        headers["Set-Cookie"] = "$name=${Html.quote(value)}; Path=/; Max-Age=$maxAge; SameSite=Lax; HttpOnly"
         return this
     }
 
@@ -362,6 +308,8 @@ class App(private val maxBody: Int = 256 * 1024) {
     }
 
     fun dispatch(req: Request): Response {
+        // A walled-off activity (ZipApps.kt) must not be able to press our buttons.
+        if (req.method == "POST" && req.headers["origin"] == "null") return Response("Not allowed".toByteArray(), 403, "text/plain")
         var pathMatched = false
         for (r in routes) {
             val m = r.regex.matchEntire(req.path) ?: continue
@@ -433,7 +381,7 @@ class App(private val maxBody: Int = 256 * 1024) {
             return if (start <= end) start..end else null
         }
 
-        private val REASONS = mapOf(200 to "OK", 206 to "Partial Content", 303 to "See Other", 400 to "Bad Request", 404 to "Not Found",
+        private val REASONS = mapOf(200 to "OK", 206 to "Partial Content", 303 to "See Other", 400 to "Bad Request", 403 to "Forbidden", 404 to "Not Found",
             405 to "Method Not Allowed", 413 to "Payload Too Large", 500 to "Internal Server Error")
     }
 }

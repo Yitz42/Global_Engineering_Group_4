@@ -5,9 +5,9 @@ Academy in Swahili, split into topics. Each channel comes with a small database 
 and the files, sizes and licences of every lesson. The hub downloads that database once, lets the
 teacher pick topics, and copies just those lessons' files.
 
-Only lessons that any browser can open (videos, sound, PDF and e-books) and that have an open licence
-are offered. Exercises, apps and lessons with other licences need Kolibri itself, so they are left out,
-and so is material marked for teachers only.
+Only lessons that any browser can open (videos, sound, PDF, e-books and interactive activities such as PhET
+simulations) and that have an open licence are offered. Activities stay in their zip file on the card and run walled
+off (zipapps.py). Exercises and lessons with other licences are left out, and so is material marked for teachers only.
 """
 
 from __future__ import annotations
@@ -30,9 +30,10 @@ MAX_FILES = 3000              # more than this in one go: the teacher picks smal
 ID = re.compile(r"^[0-9a-f]{32}$")
 
 # Best file first when a lesson comes in several versions: the smaller video, PDF before e-book.
-PRESETS = {"low_res_video": 0, "high_res_video": 1, "audio": 0, "document": 0, "epub": 1}
-EXTENSIONS = ("mp4", "webm", "mp3", "pdf", "epub")
-KINDS = {"video": ("video", "videos"), "audio": ("recording", "recordings"), "document": ("document", "documents")}
+PRESETS = {"low_res_video": 0, "high_res_video": 1, "audio": 0, "document": 0, "epub": 1, "html5_zip": 0}
+EXTENSIONS = ("mp4", "webm", "mp3", "pdf", "epub", "zip")
+KINDS = {"video": ("video", "videos"), "audio": ("recording", "recordings"), "document": ("document", "documents"),
+         "html5": ("activity", "activities")}
 PLAYABLE = tuple(KINDS)
 
 # Kolibri's language codes -> the hub's (ISO 639-3).
@@ -47,6 +48,8 @@ ISO3 = {
     "th": "tha", "ti": "tir", "tr": "tur", "uk": "ukr", "ur": "urd", "uz": "uzb", "vi": "vie", "xh": "xho", "yo": "yor",
     "zh": "zho", "zu": "zul", "fil": "tgl", "tl": "tgl",
 }
+PHET_CREDIT = ("Simulation by PhET Interactive Simulations, University of Colorado Boulder, licensed under CC BY 4.0 "
+               "(https://phet.colorado.edu).")
 _NODE = "SELECT id, title, kind, lft, rght, level, parent_id FROM content_contentnode "
 
 
@@ -195,10 +198,13 @@ class Channel:
             above = topics.get(parent["parent_id"]) if parent else None
             names = [t["title"].strip() for t in (above, parent) if t is not None and t["level"] > 0]
             owner = (x["license_owner"] or x["author"] or "").strip()
+            credit = " · ".join(t for t in (owner, x["license_name"]) if t)
+            if "phet" in owner.lower():   # the words PhET asks for, beside each simulation
+                credit = PHET_CREDIT
             files.append((file_url(x["file"], x["extension"]), f"{x['file']}.{x['extension']}"))
             details.append({"title": x["title"].strip(), "size": x["file_size"], "kind": x["extension"],
                             "shelf": entry["title"], "collection": ": ".join(names) or entry["title"],
-                            "license": x["license_name"], "credit": " · ".join(t for t in (owner, x["license_name"]) if t)})
+                            "license": x["license_name"], "credit": credit})
         if not files:
             raise KolibriError("nothing in this topic can go on the card")
         if len(files) > MAX_FILES:

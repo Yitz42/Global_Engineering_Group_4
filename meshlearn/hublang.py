@@ -1,9 +1,9 @@
 """Hub pages for the school's language: choose it, translate MeshLearn's words, share them.
 
 The school language is the hub's "lang" setting (an ISO 639-3 code, the same one the card
-library uses), so books and buttons always match. A second language is optional; students
-can then switch on the phone. Phones get the words with their lessons (Wi-Fi copy or memory
-card), never by radio.
+library uses), so books and buttons always match. Up to two more are optional; students can
+then switch on the phone. Choosing the school's country sets them all. Phones get the words
+with their lessons (Wi-Fi copy or memory card), never by radio.
 """
 
 from __future__ import annotations
@@ -36,22 +36,32 @@ class HubLanguage:
     def language_pack(self, code: str) -> dict:
         name, direction = self._meta(code)
         base = lang.bundled().get(code, {})
-        return lang.build_pack(code, self.phrases(code), name=name or base.get("name") or cat.language_name(code),
-                               direction=direction)
+        country = self.setting("country")
+        return lang.build_pack(code, self.phrases(code), name=name or lang.regional(code, country).get("name")
+                               or base.get("name") or cat.language_name(code), direction=direction, country=country)
 
     def school_language(self) -> str:
         code = self.setting("lang")
         return code if _CODE.match(code or "") else lang.SOURCE
 
-    def second_language(self) -> str:
-        code = self.setting("lang2")
-        return code if _CODE.match(code or "") and code != self.school_language() else ""
+    def other_languages(self) -> List[str]:
+        """The other languages students can switch to, in order."""
+        out: List[str] = []
+        for key in ("lang2", "lang3"):
+            code = self.setting(key)
+            if _CODE.match(code or "") and code != self.school_language() and code not in out:
+                out.append(code)
+        return out
 
     def language_bundle(self) -> dict:
-        """What phones get with their lessons: the school's words, and the second language's if there is one."""
-        second = self.second_language()
-        return {"school": self.language_pack(self.school_language()),
-                "second": self.language_pack(second) if second else None}
+        """What phones get with their lessons: the school's words, and the other languages' if there are any.
+        ("second" apart from "more": phones from before there could be three know only the second.)"""
+        packs = [self.language_pack(c) for c in self.other_languages()]
+        return {"school": self.language_pack(self.school_language()), "second": packs[0] if packs else None,
+                "more": packs[1:], "ages": self.student_ages(), **self.student_bundle()}
+
+    def all_under_12(self) -> bool:
+        return all(a in ("early", "primary") for a in self.student_ages())
 
     def known_languages(self) -> List[str]:
         codes = set(cat.LANGUAGES) | set(lang.bundled()) | {r["lang"] for r in self.db.all("SELECT DISTINCT lang FROM phrases")}
@@ -67,6 +77,7 @@ class HubLanguage:
         app = self.app
         app.add_route("GET", "/language", self.language_page)
         app.add_route("POST", "/language", self.language_choose)
+        app.add_route("POST", "/language/country", self.language_country)
         app.add_route("GET", "/language/words", self.language_words)
         app.add_route("POST", "/language/words", self.language_words_save)
         app.add_route("GET", "/language/export/<code>", self.language_export)
@@ -87,7 +98,7 @@ class HubLanguage:
                 + " · <a href='/language'>change</a>")
 
     def language_page(self, req: Request) -> Response:
-        current, second = self.school_language(), self.second_language()
+        current, others = self.school_language(), self.other_languages()
         query = (req.query.get("q") or "").strip().lower()
         notice = req.query.get("msg", "")
         books = dict(self.catalog.languages()) if self.catalog.entries else {}
@@ -115,17 +126,22 @@ class HubLanguage:
             f"<a class='button' href='/language/words?lang={esc(current)}'>Translate or fix words</a>"
             "</div>"
         )
-        second_options = "<option value=''>None</option>" + "".join(
-            f"<option value='{esc(c)}'{' selected' if c == second else ''}>{esc(cat.language_name(c))}</option>"
-            for c in sorted(packs, key=lambda c: cat.language_name(c)) if c != current)
+        def pick(n: int) -> str:
+            chosen = others[n] if len(others) > n else ""
+            return "<option value=''>None</option>" + "".join(
+                f"<option value='{esc(c)}'{' selected' if c == chosen else ''}>{esc(cat.language_name(c))}</option>"
+                for c in sorted(packs, key=lambda c: cat.language_name(c)) if c != current)
+
         second_form = (
             "<form method='post' action='/language' class='card'>"
             f"<input type='hidden' name='lang' value='{esc(current)}'>"
-            "<label for='lang2'>Some students also learn in</label>"
-            f"<select id='lang2' name='lang2'>{second_options}</select>"
-            "<p class='muted'>Students can then switch between the two languages on the phone.</p>"
+            "<strong>Students can also learn in</strong><div class='grid'>"
+            f"<div><label for='lang2'>Second language</label><select id='lang2' name='lang2'>{pick(0)}</select></div>"
+            f"<div><label for='lang3'>Third language</label><select id='lang3' name='lang3'>{pick(1)}</select></div></div>"
+            "<p class='muted'>Students choose their language when they sign in, and can switch on any page.</p>"
             "<button class='secondary'>Save</button></form>"
         )
+        countries = self._country_cards()
 
         def rank(code: str):
             return (code != current, -lang.coverage(packs[code]), -books.get(code, 0), cat.language_name(code))
@@ -155,9 +171,44 @@ class HubLanguage:
                  if rows else "<p class='muted'>No language matches. Try its name in English.</p>")
         note = ("" if books else "<p class='muted'>Book counts appear once the list of library collections is downloaded "
                 "on the <a href='/library'>Card library</a> page.</p>")
-        body = ((f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "") + top + second_form
+        body = ((f"<p class='good' role='status'>{esc(notice)}</p>" if notice else "") + top
+                + "<h2>Languages for learning, by country</h2>" + countries + second_form
                 + "<h2>All languages</h2>" + search + note + table)
         return Response(self._page("School language", body))
+
+    def _country_cards(self) -> str:
+        country, young = self.setting("country"), self.all_under_12()
+        cards = ""
+        for key, info in lang.COUNTRIES.items():
+            codes = lang.languages_for(key, young)
+            names = "".join(f"<li>{self._language_label(lang.build_pack(c, country=key))}</li>" for c in codes)
+            button = ("<span class='pill good'>Your country</span>" if key == country else "")
+            text = "Set these languages again" if key == country else f"Use for {info['name']}"
+            cards += (f"<form method='post' action='/language/country' class='card' style='margin:0'>"
+                      f"<input type='hidden' name='country' value='{key}'><strong>{esc(info['name'])}</strong> {button}"
+                      f"<ol style='margin:8px 0;padding-left:22px'>{names}</ol><p class='muted'>{esc(info['why'])}</p>"
+                      f"<button class='secondary'>{esc(text)}</button></form>")
+        hint = ""
+        dropped = [c for c in lang.COUNTRIES.get(country, {}).get("from_12", [])
+                   if young and c in [self.school_language()] + self.other_languages()]
+        if dropped:
+            hint = (f"<p class='warn'>Your students are all under 12, and {esc(lang.COUNTRIES[country]['name'])} leaves out "
+                    f"{esc(cat.language_name(dropped[0]))} for them. Press “Set these languages again” to leave it out.</p>")
+        ages = ("Your students are all under 12." if young else "Some of your students are 12 or older.")
+        return (f"<p class='muted'>Sets the school's main language and the others students can choose. {ages} "
+                f"<a href='/library'>Change their ages</a></p>{hint}<div class='grid'>{cards}</div>")
+
+    def language_country(self, req: Request) -> Response:
+        country = req.form.get("country", "").strip().upper()
+        codes = lang.languages_for(country, self.all_under_12())
+        if not codes:
+            return redirect("/language?" + urlencode({"msg": "That country is not in the list. Choose the languages below."}))
+        self.set_setting("country", country)
+        for key, code in zip(("lang", "lang2", "lang3"), codes + ["", ""]):
+            self.set_setting(key, code)
+        names = [self.language_pack(c)["name"] for c in codes]
+        msg = f"Set for {lang.COUNTRIES[country]['name']}: {', '.join(names)}. Phones switch with their next lesson copy."
+        return redirect(("/?" if req.form.get("back") == "/" else "/language?") + urlencode({"msg": msg}))
 
     def language_choose(self, req: Request) -> Response:
         code = req.form.get("lang", "").strip()
@@ -165,11 +216,9 @@ class HubLanguage:
             return redirect("/language?" + urlencode({"msg": "That language is not in the list."}))
         changed = code != self.school_language()
         self.set_setting("lang", code)
-        if "lang2" in req.form:
-            second = req.form.get("lang2", "").strip()
-            self.set_setting("lang2", second if self._valid_code(second) and second != code else "")
-        elif self.setting("lang2") == code:
-            self.set_setting("lang2", "")
+        for key in ("lang2", "lang3"):
+            other = req.form.get(key, "").strip() if key in req.form else self.setting(key)
+            self.set_setting(key, other if self._valid_code(other) and other != code else "")
         name = self.language_pack(code)["name"]
         msg = (f"Your school now uses {name}. Phones switch with their next lesson copy." if changed
                else "Saved. Phones get the change with their next lesson copy.")

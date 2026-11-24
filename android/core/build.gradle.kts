@@ -17,11 +17,11 @@ kotlin {
 
 sourceSets {
     main {
-        // The starter library pages and the English words ship inside the app, from the same files
+        // The starter library pages, the student site's look and scripts, and the English words ship inside the app, from the same files
         // the Python phone uses, so the two phones can never drift apart.
         resources {
             srcDir("../../meshlearn")
-            include("starter_library/**", "lang/eng.json")
+            include("starter_library/**", "lang/eng.json", "site/**")
         }
     }
 }

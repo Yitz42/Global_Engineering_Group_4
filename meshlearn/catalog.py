@@ -342,6 +342,18 @@ def gutenberg_choice() -> dict:
     return {"item": item, "option": library.Option("", item["title"], size, files, "txt")}
 
 
+GEOGEBRA_URL = "https://download.geogebra.org/package/geogebra-math-apps-bundle"
+GEOGEBRA_BYTES = 33_500_000   # about: the bundle is updated now and then
+
+
+def geogebra_item() -> dict:
+    """GeoGebra's own offline bundle. Free to copy for non-commercial use, with credit: https://www.geogebra.org/license"""
+    from .zipapps import GEOGEBRA_CREDIT
+    return {"key": "geogebra|apps", "title": "GeoGebra", "label": "Tools", "level": 3, "lang": "mul", "size": GEOGEBRA_BYTES, "approx": True,
+            "folder": "tools", "kind": "ggb", "files": [(GEOGEBRA_URL, "geogebra.zip")], "license": "GeoGebra non-commercial licence",
+            "credit": GEOGEBRA_CREDIT, "ages": [8, 99]}
+
+
 def selection_item(entry: dict) -> dict:
     flavour = f" ({entry['flavour']})" if entry["flavour"] else ""
     return {"key": f"{entry['name']}|{entry['flavour']}", "title": entry["title"] + flavour, "label": entry["label"],
@@ -423,7 +435,7 @@ class DownloadJob(threading.Thread):
             if self._cancel.is_set():
                 return False
             detail = item["details"][n] if item.get("details") else None
-            size = detail["size"] if detail else item["size"] if len(item["files"]) == 1 else 0
+            size = detail["size"] if detail else item["size"] if len(item["files"]) == 1 and not item.get("approx") else 0
             self.current = f"{item['title']}: {detail['title'] if detail else filename}"
             self.file_bytes = 0
             path = os.path.join(folder, filename)
@@ -450,6 +462,8 @@ class DownloadJob(threading.Thread):
             rel = f"{item['folder']}/{filename}"
             entry = {"title": titles.get(filename, item["title"]), "file": rel, "collection": item["label"],
                      "kind": item["kind"], "lang": item["lang"], "source": url, "license": item["license"]}
+            if item.get("credit"):
+                entry["credit"] = item["credit"]
             if item.get("details"):
                 if not os.path.exists(os.path.join(folder, filename)):
                     continue

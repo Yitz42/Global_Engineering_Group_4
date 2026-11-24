@@ -80,7 +80,7 @@ The five students on the demo phone (Lena, Ana, Bruno, Kofi, Mateus) send their 
    Each start finds the radio's USB port and the channel named MeshLearn by itself, then opens the hub in the browser. Keep the window open while you work; closing it stops the hub. If two radios are plugged in, it asks which one is the hub's.
 
    A new hub offers **Add example lessons** (nine lessons in mathematics, science and reading) to test with.
-   The **Phones and radio** page shows this hub's radio id to type into each phone. Phones register themselves the first time they check in.
+   The **Phones and radio** page shows this hub's radio id to type into each phone. With the MeshLearn app on the phone, scanning the QR code on that page fills in the radio id and channel instead. Phones register themselves the first time they check in.
 
    The start file lets other devices on the school Wi-Fi reach the hub, so phones can copy assignments from it. To run the hub by hand, use:
    ```bash
@@ -119,7 +119,7 @@ Every assignment belongs to a unit of a course, for example *Mathematics · Unit
 
 ### Comprehension
 
-The hub's **Comprehension** page scores every student in every unit and course from their graded answers, using the sandbox's rules:
+The hub's **Class progress** page scores every student in every unit and course from their graded answers, using the sandbox's rules:
 
 | | |
 | --- | --- |
@@ -143,6 +143,14 @@ The hub's **Comprehension** page scores every student in every unit and course f
 - **much slower than expected:** stuck?
 
 Students see their own levels on their course cards and on **My results**.
+
+### Where students went wrong
+
+- **Notes on wrong answers.** In the builder, or straight from the class's answers, the teacher says what a wrong answer shows: for 1/4 + 1/2, "2/6: added tops and bottoms". A fraction also matches its decimal (0.33). Notes stay on the laptop. They are never sent to phones and cost no radio.
+- **The class view.** Each assignment's page shows every question: how many got it right, each wrong answer with its note and who gave it, and at the top the mistakes most students share. A practice counts each student's first try.
+- **Not sure, and changed answers.** Students can tick "I'm not sure about this one", which never changes their mark (ages 5 to 7 don't see it). If they change an answer after moving on, the first one is sent too. So the teacher sees right answers that were guesses, and right answers that were changed to wrong ones. For 10 students on a 20-question test this added 72 to 92 bytes (about 680 to about 760) and no extra packet.
+- **Class progress.** Beside the grid: a unit's most common mistakes, students worth a look, and **Make a practice** from the questions students missed that way. A practice sends its right answers to phones, so questions from assignments whose answers must still stay on the laptop are left out.
+- **Notes back.** When marking, the teacher can add a note of up to 60 letters. It travels with the marks and shows on the student's results.
 
 ### Learning data
 
@@ -183,10 +191,14 @@ For young children that means picture books, children's encyclopedias, TED talks
 
 **Kolibri courses, topic by topic.** Kolibri publishes courses such as Khan Academy in dozens of languages, split into topics. **Choose topics…** downloads a course's list of lessons (usually a few MB), and the teacher adds a grade or a topic at a time. For example, Khan Academy in Swahili is 1,106 videos (2.7 GB), and its first-grade maths is 31 videos (38 MB).
 
-- **What is offered:** videos, sound, PDFs and e-books with an open licence (Creative Commons or public domain). Students open them in the MeshLearn library, without the Kolibri app.
-- **What is left out:** exercises and apps, which need Kolibri; lessons with other licences; and material marked for teachers only, such as answer keys.
+- **What is offered:** videos, sound, PDFs, e-books and interactive activities (PhET simulations, Blockly Games) with an open licence (Creative Commons or public domain). Students open them in the MeshLearn library, without the Kolibri app.
+- **What is left out:** exercises, which need Kolibri; lessons with other licences; and material marked for teachers only, such as answer keys.
 - **Counted once:** a video listed under several topics is copied once. Adding a bigger topic replaces the smaller ones inside it.
 - **On the phone:** each course gets one card under **Courses** in the Library, in the course's own order, with each lesson's author and licence. Students can skip ahead in videos.
+
+**GeoGebra.** The **Tools** kind offers GeoGebra's graphing, geometry, 3D and calculator apps as one 33 MB file, for offline use. GeoGebra is free for non-commercial use only, so leave it off any card that is sold or part of a paid service.
+
+**Activities run walled off.** PhET, Blockly and GeoGebra are other people's programs. They stay in their zip files on the card, and the phone gives each one a browser sandbox: no forms, no sign-in cookie, and no requests to anything but its own files, so their usage tracking is blocked too. The phone also refuses button presses that come from a sandbox. GeoGebra cannot start in its own origin, so it runs as a whole page with the same limits otherwise.
 
 **Copying to the card.** "Copy to memory card" downloads the picks straight onto a card in the laptop's card reader. It runs in the background with a progress bar, can be stopped and resumed, and skips files already on the card. The phone's Library page lists everything once the card is back in the phone.
 
@@ -240,18 +252,38 @@ Moving a due date or hiding an assignment is always 1 packet.
 - **Only lost pieces are resent.** When a burst ends with pieces missing, the receiver asks for exactly those. If the sender hears nothing, it sends one probe packet instead of the whole message. At 20% packet loss, a 10-packet message costs about 13 transmissions this way, compared with about 90 if the whole message were resent.
 - **Nothing is lost.** Every outgoing message is written to SQLite before it is sent. Retries back off from 30 s up to 10 min on real radios. If a phone reboots or the link is down for days, the queue picks up where it left off.
 - **No duplicates.** The receiver remembers which messages it has handled. It re-acknowledges a repeat without acting on it twice.
-- **The answer key stays home.** In graded mode, the phone's copy has no answers, so nothing on the memory card gives them away, and grading happens on the hub. In practice mode the key is included, so students get instant right/wrong feedback.
+- **The answer key stays home.** In graded mode, the phone's copy has no answers, so nothing on the memory card gives them away, and grading happens on the hub. In practice mode the key is included, so students get instant right/wrong feedback. The day after a graded assignment's due date, the hub sends each student the right answers to the questions they missed (the teacher can send them sooner, or turn this off).
 - **Separate from chat.** MeshLearn uses Meshtastic's `PRIVATE_APP` port, so ordinary Meshtastic text messages on the same mesh are unaffected.
 
 ## Accessibility and adaptation built in
 
 - Works in any browser on any device that can join Wi-Fi; no app install for students.
 - Large touch targets, visible labels on every field, error messages linked to their fields for screen readers, and light and dark themes that follow the device.
+- **Three looks, by age.** Ages 5–7 get big pictures, stars and few words; ages 8–11 get one thing to do next; ages 12 and up get due dates, course scores and what to review. The hub's students' ages decide which looks a phone offers, and when there is more than one, students pick their age on the welcome page.
+- **Signing in.** With a class list on the hub's **Students** page, ages 5–7 tap their picture (and a secret picture, if the teacher turns it on), ages 8–11 find their name, and ages 12 and up type it (and a PIN, if turned on). Students who are not on the list can start anyway; the hub asks the teacher who they are. The phone goes back to "Who are you?" after a while with no taps. Without a list, students type their name.
+- **Pictures in questions.** 289 drawings come with every phone, so a question sends only a picture's name (`apple*3, ball`). They can also stand for the answers.
+- **Keep reading.** The library offers each student the last thing they opened.
+- **Listen.** A button reads the page or the question aloud in the student's language, on devices that have a voice for it (inside the Android app, the phone's own voice). It hides itself where there is none.
+- **One question at a time.** Arrows move back and forward, and **Review** lists every question with the student's answer, what is still blank and what they ticked "Come back to this later". Answers and the place in the lesson are kept in the browser. Without JavaScript, every question shows in one list.
+- **Equations.** Teachers write them between `\(` and `\)`, like `\(\frac{1}{2} + x^2\)`, and KaTeX draws them on the phone.
+- **Scratchpad.** The pencil opens squared paper to work things out on, one sheet per question. It stays in the student's browser and is never sent.
+- **Reading help.** **Aa** makes the text bigger, spaces it out or switches it to OpenDyslexic. Each student's browser remembers the choice.
+- **Questions from a spreadsheet.** The assignment builder imports a CSV file, notes on wrong answers included, and lists any row whose answer doesn't fit.
+- **Question info.** A question can carry a text, a table or data (up to 2,000 characters). On a phone students pull it down above the question; on a computer it stays open at the side. Several questions about the same text share it, so it travels by radio once. The assignment's instructions are in the same panel.
 - Numbers accept `3.5`, `3,5` (comma decimals used in Brazil and Germany), and fractions like `3/4`.
-- **The school's own language.** On the hub's **Language** page the teacher picks the language the school teaches in, from any language in the library catalog (more than 100). That one choice sets the words students see on every phone and the books suggested for the memory card. A second language is optional; students then switch with a button at the top of the phone's site. Right-to-left languages such as Arabic and Urdu mirror the whole page.
-- **Translations that can be partly done.** MeshLearn comes with its phone words in Spanish, French, Portuguese, Kiswahili and Arabic (`meshlearn/lang/`; not yet checked by native speakers). Any other language starts in English and the teacher translates word by word on the hub; anything not yet translated shows in English. Translations travel to phones with the lessons (Wi-Fi copy or memory card, never the radio), and can be downloaded and shared with other schools or sent to the project.
+- **The school's own language.** On the hub's **Language** page the teacher picks the language the school teaches in, from any language in the library catalog (more than 100). That one choice sets the words students see on every phone and the books suggested for the memory card. Up to two more languages are optional: students pick theirs on the welcome page and can switch at the top of any page. Right-to-left languages such as Arabic and Urdu mirror the whole page.
+- **Languages by country.** Choosing the school's country sets its languages for learning, main one first. Any of it can be changed afterwards.
+
+  | Country | Languages | Note |
+  | --- | --- | --- |
+  | Germany | German, English, French | English is left out when all students are under 12; French is European French |
+  | Kenya | English, Swahili, French | English comes before the native language |
+  | United States | English, Spanish, French | |
+  | Brazil | Portuguese, English, German | Brazilian Portuguese (`lang/por-BR.json` holds the words that differ from `por.json`) |
+
+- **Translations that can be partly done.** MeshLearn comes with every phone word in German, Spanish, French, Portuguese (European and Brazilian), Kiswahili and Arabic (`meshlearn/lang/`; not yet checked by native speakers). Any other language starts in English and the teacher translates word by word on the hub; anything not yet translated shows in English. Translations travel to phones with the lessons (Wi-Fi copy or memory card, never the radio), and can be downloaded and shared with other schools or sent to the project.
 - Text-only and smaller library editions are chosen automatically for small cards.
-- Students identify themselves by name only. No accounts, passwords, or personal data beyond what the teacher needs.
+- Students identify themselves by name, with no accounts or personal data beyond what the teacher needs. Secret pictures and PINs keep classmates honest but are not strong protection: phones carry only a hash of each, and slow down guessing, yet a 4-number PIN can be worked out by someone with the phone's files. The class list is copied over Wi-Fi to any phone that syncs.
 
 ## Project layout
 
@@ -271,6 +303,7 @@ meshlearn/
   hubui.py           the hub's sidebar and everyday pages: Today, Marking, Assignments, Phones and radio,
                      and the example lessons a new hub can start from
   hubpages.py        hub pages for courses, comprehension and learning data (export / import)
+  hubstudents.py     the class list: students, their pictures and how they sign in
   hublang.py         hub pages for the school's language: choose it, translate words, share them
   language.py        the words students see, in the school's language, falling back to English
   lang/              those words: eng.json (every word) and the translations that come with MeshLearn
@@ -279,8 +312,14 @@ meshlearn/
   library.py         open-content planner and downloader
   catalog.py         full Kiwix catalog: education rating, card budget, background copy to card
   kolibri.py         Kolibri's public courses: topics, lessons, licences and files for the card
+  hubbuilder.py      the assignment builder: question cards, notes, phone preview, radio size
+  hubclass.py        the class view of an assignment, and class progress
   hubkolibri.py      hub pages for choosing Kolibri topics
+  zipapps.py         activities on the card (PhET, Blockly, GeoGebra), walled off; the joining QR code
+  phonesignin.py     signing in on the phone by picture, name or PIN
   web.py             tiny standard-library web framework
+  site/              the student site's look, icons, picture library and scripts, shared with the Android app
+  site/vendor/       ready-made libraries and their licences (NOTICES.md): KaTeX, Signature Pad, OpenDyslexic, Papa Parse, QR codes
   starter_library/   three short original lessons included on every phone
   sample_assignment.json
 tests/test_meshlearn.py
@@ -297,6 +336,11 @@ They cover:
 
 - framing, corruption, and missing-piece reports;
 - lossless compact format;
+- question info that several questions share, and the arrows and review on the student's page;
+- languages set by country, with three on one phone;
+- the three looks by age;
+- signing in by picture, secret picture and PIN, and names that are not on the list;
+- pictures in questions, keep reading, and right answers only after the due date;
 - version stamps;
 - grading and validation;
 - the library planner;
@@ -308,6 +352,8 @@ They cover:
 - learning-data export with no real names, and import that skips doubles;
 - starter sets that fit the card;
 - Kolibri topics from the channel's list to the student library: licences, repeated files, stopped copies and skipping ahead in a video;
+- notes on wrong answers (never on a phone, never a new version), not-sure ticks, changed answers, the class view, practice from a mistake, and notes back;
+- activities on the card: the sandbox, path traversal, refused button presses, and ready-made libraries served by name only;
 - copying chosen collections onto a card from a local test server.
 
 End-to-end tests run through both websites:
@@ -330,6 +376,8 @@ Tested:
 - **Real Meshtastic radios on a desk.** A RAK4631 and a Wio Tracker L1, 1 m apart, ran the hub and phone through a full cycle with no resends, with the phone's radio on USB and then on Bluetooth (from a Mac). See the [bench test](docs/hardware.md#7-bench-test-with-two-radios).
 - The library fetcher's live lookups against the Kiwix catalog and Project Gutenberg, and a real download.
 - Kolibri: the live list, topics from two courses, a real copy of 24 Swahili lessons (checksums matched), and one of them playing in the Android app on an emulator with the lessons on its memory card. Several students watching videos from one phone has not been tried.
+- Ready-made tools, on Windows (Python 3.12) and in the Android app on an emulator: a real copy of 7 PhET simulations, 8 Blockly Games and GeoGebra (Kolibri checksums matched), the scratchpad, the joining QR code and the phone setup link. On the computer, spreadsheet import, including a German Excel file. No QR code has been scanned with a real camera yet, and GeoGebra has not been tried on a slow phone.
+- The notes, class view and builder in a desktop browser on the made-up school (simulated radio), and the student side in the Android app on an emulator. No teacher or class has used them yet.
 
 Not yet tested:
 

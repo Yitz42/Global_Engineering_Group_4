@@ -10,13 +10,15 @@ copy, and phones say which versions they hold whenever they check in.
 from __future__ import annotations
 
 import csv
+import datetime
 import io
 import json
 import logging
 import os
+import threading
 import time
 import zipfile
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from . import assignments as asg
@@ -25,12 +27,16 @@ from . import courses as crs
 from . import library
 from . import protocol
 from .db import Database
+from .hubbuilder import HubBuilder
+from .hubclass import HubClass
 from .hubkolibri import HubKolibri
 from .hublang import HubLanguage
+from .hubstudents import HubStudents
 from .hubpages import HubPages
 from .hubui import HubUI
 from .messenger import Messenger
-from .web import App, Request, Response, esc, json_response, page, redirect
+from .zipapps import vendor_response
+from .web import PICTURES, App, Request, Response, esc, info_panel, json_response, page, picture, redirect
 
 log = logging.getLogger(__name__)
 
@@ -61,11 +67,18 @@ CREATE TABLE IF NOT EXISTS courses (
     id TEXT PRIMARY KEY, data TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, updated REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS library_selection (key TEXT PRIMARY KEY, item TEXT NOT NULL, added REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS students (
+    name TEXT PRIMARY KEY, pic TEXT NOT NULL, ages TEXT NOT NULL, secret TEXT NOT NULL, pin TEXT NOT NULL, added REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS name_links (name TEXT PRIMARY KEY, student TEXT NOT NULL);   -- a name from a phone -> the class list ('' = not a student)
+CREATE TABLE IF NOT EXISTS released (aid TEXT PRIMARY KEY, at REAL NOT NULL);           -- right answers sent early by the teacher
 CREATE TABLE IF NOT EXISTS phrases (lang TEXT NOT NULL, key TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY (lang, key));
 """
 
-LIBRARY_DEFAULTS = {"card_gb": "32", "reserve_gb": "2", "lang": "eng", "lang2": "", "dest": "",
-                    "ages": ",".join(library.DEFAULT_AGES)}
+MAX_NOTE_CHARS = 60   # so it fits in one radio message with the marks
+LIBRARY_DEFAULTS = {"card_gb": "32", "reserve_gb": "2", "lang": "eng", "lang2": "", "lang3": "", "country": "", "dest": "",
+                    "ages": ",".join(library.DEFAULT_AGES), "right_answers": "due",
+                    "signin_young": "pic", "signin_mid": "list", "signin_teen": "list", "signout": "10"}
 AGE_FILTERS = [("fit", "Suited to the students' ages"), ("any", "Any age (suited ones first)")]
 LEVEL_FILTERS = [("3", "Core learning only"), ("2", "Education and reference"), ("0", "Everything")]
 
@@ -76,19 +89,7 @@ def _when(ts: Optional[float]) -> str:
     return time.strftime("%b %d, %H:%M", time.localtime(ts)) if ts else "never"
 
 
-def _key_text(q: dict) -> str:
-    """The right answer of an auto-marked question, in words, for the teacher."""
-    if q["type"] == "choice" and isinstance(q.get("answer"), int) and q["answer"] < len(q.get("options", [])):
-        return q["options"][q["answer"]]
-    if q["type"] == "number" and "answer" in q:
-        tol = q.get("tolerance") or 0
-        return f"{q['answer']:g}" + (f" (± {tol:g})" if tol else "")
-    if q["type"] == "text" and q.get("accept"):
-        return " or ".join(q["accept"])
-    return ""
-
-
-class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
+class Hub(HubUI, HubClass, HubBuilder, HubPages, HubLanguage, HubKolibri, HubStudents):
     def __init__(self, db_path: str, messenger_factory):
         self.db = Database(db_path, SCHEMA)
         self.messenger: Messenger = messenger_factory(self.on_message)
@@ -100,13 +101,21 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         self.app = App("hub", max_body=32 * 1024 * 1024)  # learning-data files can be large
         self._routes()
         self._ui_routes()
+        self._builder_routes()
+        self._class_routes()
         self._page_routes()
         self._language_routes()
+        self._student_routes()
+        self.app.add_route("GET", "/site/<path:path>", lambda req: vendor_response(req.params["path"]))
+        threading.Thread(target=self._answers_loop, name="right-answers", daemon=True).start()
 
     def _migrate(self) -> None:
         """Columns added after the first release; older hub databases get them here."""
         for sql in ("ALTER TABLE submissions ADD COLUMN duration REAL",
-                    "ALTER TABLE submissions ADD COLUMN source TEXT NOT NULL DEFAULT 'radio'"):
+                    "ALTER TABLE submissions ADD COLUMN source TEXT NOT NULL DEFAULT 'radio'",
+                    "ALTER TABLE submissions ADD COLUMN answers_sent INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE submissions ADD COLUMN signals TEXT",
+                    "ALTER TABLE submissions ADD COLUMN notes TEXT"):
             try:
                 self.db.execute(sql)
             except Exception:
@@ -309,20 +318,123 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         )
         return grade
 
+    def set_note(self, sub_id: str, qid: str, note: str) -> None:
+        """A short note back to the student about one answer. It travels with the marks."""
+        row = self.db.one("SELECT notes FROM submissions WHERE sub_id = ?", (sub_id,))
+        if row is None:
+            return
+        notes = json.loads(row["notes"] or "{}")
+        notes[qid] = " ".join(note.split())[:MAX_NOTE_CHARS]
+        notes = {k: v for k, v in notes.items() if v}
+        self.db.execute("UPDATE submissions SET notes = ? WHERE sub_id = ?", (json.dumps(notes, ensure_ascii=False) if notes else None, sub_id))
+
     def _send_results(self, node_id: str, sub_ids: Iterable[str]) -> None:
         results = []
         ids = list(sub_ids)
         for sub_id in ids:
-            row = self.db.one("SELECT grade FROM submissions WHERE sub_id = ?", (sub_id,))
+            row = self.db.one("SELECT * FROM submissions WHERE sub_id = ?", (sub_id,))
             if row and row["grade"]:
                 g = json.loads(row["grade"])
-                results.append({"id": sub_id, "sc": g["score"], "mx": g["max"], "ok": 1 if g["complete"] else 0,
-                                "q": {q["id"]: q["score"] for q in g["questions"]}})
+                result = {"id": sub_id, "sc": g["score"], "mx": g["max"], "ok": 1 if g["complete"] else 0,
+                          "q": {q["id"]: q["score"] for q in g["questions"]}}
+                missed = self._missed_answers(row, g)
+                if missed is not None:
+                    self.db.execute("UPDATE submissions SET answers_sent = 1 WHERE sub_id = ?", (sub_id,))
+                    if missed:
+                        result["an"] = missed
+                notes = json.loads(row["notes"] or "{}")
+                if notes:
+                    result["nt"] = notes
+                results.append(result)
         if not results:
             return
         msg_id = self.messenger.send(node_id, protocol.RESULT, {"r": results})
         for sub_id in ids:
             self.db.execute("UPDATE submissions SET result_msg_id = ? WHERE sub_id = ?", (msg_id, sub_id))
+
+    # -- right answers --------------------------------------------------------
+    #
+    # The key stays on the hub until the due date has passed (or the teacher sends it), so it can't reach
+    # classmates who have not done the work. Then each student gets the answers to what they missed.
+
+    def _answers_allowed(self, assignment: dict) -> bool:
+        if assignment.get("mode") == "practice":
+            return False   # the phone already has a practice key
+        if self.db.one("SELECT 1 FROM released WHERE aid = ?", (assignment["id"],)):
+            return True
+        if self.setting("right_answers") != "due":
+            return False
+        try:
+            return datetime.date.fromisoformat((assignment.get("due") or "")[:10]) < datetime.date.today()
+        except ValueError:
+            return False   # no due date: only when the teacher sends them
+
+    def _missed_answers(self, row, grade: dict) -> Optional[dict]:
+        """Right answers to the questions this student got wrong; None while they must stay on the hub."""
+        current = self.get_assignment(row["assignment_id"])
+        done = self.get_assignment(row["assignment_id"], row["version"])
+        if not current or not done or not self._answers_allowed(current):
+            return None
+        scores = {q["id"]: q["score"] for q in grade["questions"]}
+        return {q["id"]: asg.key_text(q)[:120] for q in done["questions"]
+                if scores.get(q["id"]) is not None and scores[q["id"]] < q["points"] and asg.key_text(q)}
+
+    def send_right_answers(self) -> int:
+        """Send answers that have become allowed since the work was marked. Returns how many pieces of work."""
+        by_phone: Dict[str, List[str]] = {}
+        for row in self.db.all("SELECT * FROM submissions WHERE answers_sent = 0 AND grade IS NOT NULL AND source = 'radio'"):
+            missed = self._missed_answers(row, json.loads(row["grade"]))
+            if missed:
+                by_phone.setdefault(row["phone"], []).append(row["sub_id"])
+            elif missed is not None:
+                self.db.execute("UPDATE submissions SET answers_sent = 1 WHERE sub_id = ?", (row["sub_id"],))
+        for phone, ids in by_phone.items():
+            for start in range(0, len(ids), 5):
+                self._send_results(phone, ids[start:start + 5])
+        return sum(len(ids) for ids in by_phone.values())
+
+    def _answers_loop(self) -> None:
+        wait = 60
+        while True:
+            time.sleep(wait)
+            wait = 1800
+            try:
+                if hasattr(self.messenger, "send"):
+                    self.send_right_answers()
+            except Exception:
+                log.exception("could not send right answers")
+
+    def release_answers(self, req: Request) -> Response:
+        aid = req.params["aid"]
+        if self.current_version(aid) is None:
+            return redirect("/assignments")
+        self.db.execute("INSERT OR IGNORE INTO released (aid, at) VALUES (?, ?)", (aid, time.time()))
+        n = self.send_right_answers()
+        return redirect(f"/assignments/{aid}?" + urlencode({"msg": f"Sending the right answers for {n} piece{'' if n == 1 else 's'} of work."}))
+
+    def answers_setting(self, req: Request) -> Response:
+        self.set_setting("right_answers", "due" if req.form.get("right_answers") == "due" else "never")
+        back = req.form.get("back", "")
+        return redirect(back if back.startswith("/assignments/") else "/assignments")
+
+    def _answers_card(self, assignment: dict) -> str:
+        if assignment.get("mode") == "practice":
+            return ""
+        aid = esc(assignment["id"])
+        auto = self.setting("right_answers") == "due"
+        if self._answers_allowed(assignment):
+            text, button = "Students can see the right answers to questions they missed.", ""
+        else:
+            text = ("Students see the right answers to what they missed the day after the due date." if auto and assignment.get("due") else
+                    "This has no due date, so the right answers stay on this laptop until you send them." if auto else
+                    "Right answers stay on this laptop.")
+            button = (f"<form method='post' action='/assignments/{aid}/answers' style='display:inline'>"
+                      "<button class='secondary'>Send right answers now</button></form>")
+        return (f"<h2>Right answers</h2><div class='card'><p>{text} They travel with the marks, only for questions that student got wrong. "
+                f"Anyone who does the work later could ask a classmate.</p>{button}"
+                f"<form method='post' action='/settings/answers' style='display:inline'><input type='hidden' name='back' value='/assignments/{aid}'>"
+                f"<button class='secondary' name='right_answers' value='{'never' if auto else 'due'}'>"
+                f"{'Never send them by themselves (all lessons)' if auto else 'Send them after the due date (all lessons)'}</button></form></div>")
 
     # -- mesh -----------------------------------------------------------------
 
@@ -350,12 +462,18 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
                 if not sub_id:
                     continue
                 duration = s.get("d")
+                signals: dict = {}
+                if isinstance(s.get("n"), int) and 0 < s["n"] < 1 << 200:
+                    signals["n"] = s["n"]
+                if isinstance(s.get("f"), dict):
+                    signals["f"] = {str(k)[:20]: str(v)[:asg.MAX_FIRST_CHARS] for k, v in list(s["f"].items())[:100]}
                 self.db.execute(
                     "INSERT OR IGNORE INTO submissions (sub_id, assignment_id, version, student, phone, answers, submitted_at, "
-                    "received_at, duration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (sub_id, str(s.get("a", ""))[:20], str(s.get("v", ""))[:16], str(s.get("u", "?"))[:60], src,
+                    "received_at, duration, signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (sub_id, str(s.get("a", ""))[:20], str(s.get("v", ""))[:16], self.student_name(str(s.get("u", "?"))[:60]), src,
                      json.dumps(s.get("x") or {}), s.get("t"), time.time(),
-                     float(duration) if isinstance(duration, (int, float)) and duration > 0 else None),
+                     float(duration) if isinstance(duration, (int, float)) and duration > 0 else None,
+                     json.dumps(signals) if signals else None),
                 )
                 grade = self.grade_submission(sub_id)
                 if grade:
@@ -371,13 +489,10 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
 
     def _routes(self) -> None:
         app = self.app
-        app.add_route("GET", "/assignments/new", self.new_assignment)
-        app.add_route("POST", "/api/assignments", self.api_create)
-        app.add_route("GET", "/api/assignments/<aid>", self.api_get)
+        app.add_route("POST", "/assignments/<aid>/answers", self.release_answers)
+        app.add_route("POST", "/settings/answers", self.answers_setting)
         app.add_route("GET", "/api/pack", self.api_pack)
         app.add_route("GET", "/pack.zip", self.pack_zip)
-        app.add_route("GET", "/assignments/<aid>", self.assignment_detail)
-        app.add_route("GET", "/assignments/<aid>/edit", self.edit_assignment)
         app.add_route("POST", "/assignments/<aid>/open", lambda r: self.assignment_action(r, True))
         app.add_route("POST", "/assignments/<aid>/close", lambda r: self.assignment_action(r, False))
         app.add_route("GET", "/assignments/<aid>/grades.csv", self.grades_csv)
@@ -398,42 +513,6 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         app.add_route("GET", "/api/library/progress", self.library_progress)
         self.add_kolibri_routes(app)
 
-    def _builder(self, edit_id: str, preset_course: str = "", preset_unit: str = "") -> str:
-        courses = [{"id": c["id"], "title": c["title"], "units": c["units"]} for c in self.courses() if not c.get("comingSoon")]
-        return (BUILDER_HTML.replace("__EDIT_ID__", esc(edit_id))
-                .replace("__COURSES__", json.dumps(courses).replace("</", "<\\/"))
-                .replace("__PRESET__", json.dumps({"course": preset_course, "unit": preset_unit}).replace("</", "<\\/")))
-
-    def new_assignment(self, req: Request) -> Response:
-        return Response(self._page("New assignment", self._builder("", req.query.get("course", ""), req.query.get("unit", ""))))
-
-    def edit_assignment(self, req: Request) -> Response:
-        aid = req.params["aid"]
-        if self.get_assignment(aid) is None:
-            return redirect("/")
-        note = ("<p class='warn'>Changing questions creates a new version. Phones that already hold this assignment "
-                "will need the full copy again (sent automatically to phones where it is open). Changing only the "
-                "due date costs one packet per phone.</p>")
-        return Response(self._page("Edit assignment", note + self._builder(aid)))
-
-    def api_create(self, req: Request) -> Response:
-        try:
-            data = req.json()
-            old_version = self.current_version(str(data.get("id") or "")) if isinstance(data, dict) else None
-            assignment = self.create_assignment(data)
-        except (asg.AssignmentError, ValueError, AttributeError) as exc:
-            return json_response({"error": str(exc)}, status=400)
-        aid = assignment["id"]
-        if old_version is not None:
-            # Edited: push changes to phones where it is open (full copy if questions changed, 1 packet if only the date).
-            for row in self.db.all("SELECT node_id FROM holdings WHERE aid = ? AND open = 1", (aid,)):
-                self.set_open(aid, row["node_id"], True)
-        return json_response({"id": aid, "frames": protocol.frame_count(protocol.ASSIGN, {"a": self.packed_for_phone(aid)})})
-
-    def api_get(self, req: Request) -> Response:
-        assignment = self.get_assignment(req.params["aid"])
-        return json_response(assignment) if assignment else json_response({"error": "not found"}, status=404)
-
     def api_pack(self, req: Request) -> Response:
         """Course pack for a phone syncing over Wi-Fi. ?node=<radio id> records what it now holds."""
         pack = self.course_pack()
@@ -449,84 +528,11 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         return Response(self.course_pack_zip(), content_type="application/zip",
                         headers={"Content-Disposition": "attachment; filename=meshlearn-course-pack.zip"})
 
-    def assignment_detail(self, req: Request) -> Response:
-        aid = req.params["aid"]
-        assignment = self.get_assignment(aid)
-        if assignment is None:
-            return Response(self._page("Not found", "<p>No such assignment.</p>"), status=404)
-        version = self.current_version(aid)
-        full = protocol.frame_count(protocol.ASSIGN, {"a": self.packed_for_phone(aid), "o": 1, "d": assignment.get("due", "")})
-        phones = self.db.all("SELECT * FROM phones ORDER BY name")
-        holdings = {h["node_id"]: h for h in self.db.all("SELECT * FROM holdings WHERE aid = ?", (aid,))}
-        phone_rows = ""
-        for p in phones:
-            h = holdings.get(p["node_id"])
-            if h and h["version"] == version:
-                held = "<span class='good'>yes</span>"
-            elif h and h["version"]:
-                held = "<span class='warn'>older version</span>"
-            else:
-                held = "<span class='muted'>no</span>"
-            seen = "<span class='good'>open</span>" if h and h["open"] else "<span class='muted'>hidden</span>"
-            if h and h["msg_id"]:
-                state = self.messenger.message_status(h["msg_id"])
-                if state == "pending":
-                    seen += f" <span class='warn'>({ACTION_LABELS.get(h['action'], 'sending')}…)</span>"
-                elif state == "failed":
-                    seen += " <span class='bad'>(not delivered)</span>"
-            cost = "1 packet" if h and h["version"] == version else f"{full} packets"
-            node = esc(p["node_id"])
-            buttons = (
-                f"<form method='post' action='/assignments/{esc(aid)}/open' style='display:inline'>"
-                f"<input type='hidden' name='node_id' value='{node}'><button class='secondary'>"
-                f"{'Resend' if h and h['open'] else 'Open'} ({cost})</button></form>"
-            )
-            if h and h["open"]:
-                buttons += (f"<form method='post' action='/assignments/{esc(aid)}/close' style='display:inline'>"
-                            f"<input type='hidden' name='node_id' value='{node}'><button class='secondary'>Hide</button></form>")
-            phone_rows += f"<tr><td>{esc(p['name'])}</td><td>{held}</td><td>{seen}</td><td>{buttons}</td></tr>"
-        subs = self.db.all("SELECT * FROM submissions WHERE assignment_id = ? ORDER BY received_at DESC", (aid,))
-        sub_rows = ""
-        for s in subs:
-            grade = json.loads(s["grade"]) if s["grade"] else None
-            if grade is None:
-                score = "<span class='muted'>—</span>"
-            elif grade["complete"]:
-                score = f"{grade['score']:g} / {grade['max']:g}"
-            else:
-                score = f"<span class='warn'>{grade['score']:g} / {grade['max']:g} so far · needs grading</span>"
-            old = " <span class='muted'>(earlier version)</span>" if s["version"] and s["version"] != version else ""
-            sub_rows += (
-                f"<tr><td><a href='/submissions/{esc(s['sub_id'])}'>{esc(s['student'])}</a></td>"
-                f"<td>{esc(s['phone'])}</td><td>{_when(s['submitted_at'])}</td><td>{score}{old}</td></tr>"
-            )
-        questions = "".join(f"<li>{esc(q['prompt'])} <span class='muted'>({q['type']}, {q['points']:g} pt)</span></li>"
-                            for q in assignment["questions"])
-        meta = [self._placement(assignment) or assignment.get("subject") or "", f"{assignment['mode']} mode",
-                f"due {assignment['due']}" if assignment.get("due") else "", f"version {version}"]
-        body = (
-            f"<p class='muted'>{esc(' · '.join(m for m in meta if m))}</p>"
-            f"<div class='card'><p>{esc(assignment.get('instructions') or '')}</p><ol>{questions}</ol>"
-            f"<a class='button secondary' href='/assignments/{esc(aid)}/edit'>Edit</a></div>"
-            "<h2>On student phones</h2>"
-            f"<p class='muted'>Opening costs 1 radio packet on phones that already hold this version; "
-            f"otherwise the full assignment goes by radio ({full} packets).</p>"
-            + (f"<table><tr><th>Phone</th><th>Has it</th><th>Students</th><th></th></tr>{phone_rows}</table>"
-               + (f"<form method='post' action='/assignments/{esc(aid)}/open'><input type='hidden' name='node_id' value='*'>"
-                  "<button>Open on every phone</button></form>" if len(phones) > 1 else "")
-               if phones else "<p class='muted'>Add a phone first on the <a href='/phones'>Phones</a> page.</p>")
-            + "<h2>Submissions</h2>"
-            + (f"<table><tr><th>Student</th><th>Phone</th><th>Submitted</th><th>Score</th></tr>{sub_rows}</table>"
-               f"<a class='button secondary' href='/assignments/{esc(aid)}/grades.csv'>Download grades (CSV)</a>"
-               if subs else "<p class='muted'>Nothing yet.</p>")
-        )
-        return Response(self._page(assignment["title"], body, current="assignments"))
-
     def assignment_action(self, req: Request, open_: bool) -> Response:
         aid = req.params["aid"]
         node_id = req.form.get("node_id", "")
         if self.current_version(aid) is None or not node_id:
-            return redirect("/")
+            return redirect("/assignments")
         targets = [r["node_id"] for r in self.db.all("SELECT node_id FROM phones")] if node_id == "*" else [node_id]
         for target in targets:
             self.set_open(aid, target, open_)
@@ -540,14 +546,19 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         out = io.StringIO()
         writer = csv.writer(out)
         qids = [q["id"] for q in assignment["questions"]]
-        writer.writerow(["student", "phone", "submitted", "score", "max", "complete"] + qids)
+        writer.writerow(["student", "phone", "submitted", "score", "max", "complete"] + qids + ["not_sure", "changed"])
         for s in self.db.all("SELECT * FROM submissions WHERE assignment_id = ? ORDER BY student", (aid,)):
             grade = json.loads(s["grade"]) if s["grade"] else {"score": "", "max": "", "complete": False, "questions": []}
             per_q = {q["id"]: q["score"] for q in grade["questions"]}
             writer.writerow([s["student"], s["phone"], _when(s["submitted_at"]), grade["score"], grade["max"],
-                             grade["complete"]] + [per_q.get(q, "") for q in qids])
+                             grade["complete"]] + [per_q.get(q, "") for q in qids] + list(self._signal_cells(s)))
         return Response(out.getvalue(), content_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f"attachment; filename=grades-{aid}.csv"})
+
+    def _signal_cells(self, s) -> Tuple[str, str]:
+        a = self.get_assignment(s["assignment_id"], s["version"])
+        unsure, first = asg.read_signals(a, json.loads(s["signals"] or "{}")) if a else (set(), {})
+        return " ".join(sorted(unsure)), " ".join(sorted(first))
 
     def submission_detail(self, req: Request) -> Response:
         notice = "Saved. The result is on its way to the student's phone." if req.query.get("saved") else ""
@@ -559,13 +570,12 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         grade = json.loads(s["grade"]) if s["grade"] else None
         scores = {q["id"]: q["score"] for q in (grade or {}).get("questions", [])}
         manual = json.loads(s["manual"] or "{}")
+        notes = json.loads(s["notes"] or "{}")
+        unsure, first = asg.read_signals(assignment, json.loads(s["signals"] or "{}")) if assignment else (set(), {})
         rows = ""
         for q in (assignment or {"questions": []})["questions"]:
             given = answers.get(q["id"], "")
-            if q["type"] == "choice" and given.isdigit() and int(given) < len(q["options"]):
-                shown = q["options"][int(given)]
-            else:
-                shown = given
+            shown = asg.answer_text(q, given)
             score = scores.get(q["id"])
             current = "" if score is None else f"{score:g}"
             # Every mark can be changed: written answers always, and auto-marked ones when the
@@ -579,11 +589,20 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
             else:
                 mark = "good" if score else "bad"
                 note = f"<div class='small {mark}'>{'Right' if score else 'Wrong'}, marked by MeshLearn</div>"
-            key = _key_text(q)
+            key = asg.key_text(q)
             answer_cell = esc(shown) or "<em class='muted'>(left blank)</em>"
             if key:
                 answer_cell += f"<div class='small'>Right answer: {esc(key)}</div>"
-            rows += f"<tr><td>{esc(q['prompt'])}</td><td>{answer_cell}</td><td>{box}{note}</td></tr>"
+            if score is not None and score < q["points"] and asg.wrong_note(q, given):
+                answer_cell += f"<div class='small'><strong class='note'>{esc(asg.wrong_note(q, given))}</strong></div>"
+            if q["id"] in unsure:
+                answer_cell += "<div class='small tomark'>Not sure</div>"
+            if q["id"] in first:
+                was = " (right)" if (asg.grade_question(q, first[q["id"]]) or 0) >= q["points"] else ""
+                answer_cell += f"<div class='small'>First answer: {esc(asg.answer_text(q, first[q['id']]))}{was}</div>"
+            answer_cell += (f"<input type='text' name='n_{esc(q['id'])}' maxlength='{MAX_NOTE_CHARS}' value='{esc(notes.get(q['id'], ''))}' "
+                            f"placeholder='Short note to the student (optional)' aria-label='Note about {esc(q['prompt'][:40])}' style='margin-top:6px'>")
+            rows += f"<tr><td>{esc(q['prompt'])}{info_panel(q)}</td><td>{answer_cell}</td><td>{box}{note}</td></tr>"
         total = f"{grade['score']:g} / {grade['max']:g}" if grade else "—"
         phone = self._phone_names().get(s["phone"], s["phone"])
         body = (
@@ -603,6 +622,8 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         sid = req.params["sid"]
         manual = {}
         for key, value in req.form.items():
+            if key.startswith("n_"):
+                self.set_note(sid, key[2:22], value)
             if key.startswith("m_") and value.strip():
                 try:
                     manual[key[2:]] = float(value)
@@ -778,9 +799,13 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
             level_filter = "".join(f"<option value='{v}'{' selected' if v == level else ''}>{esc(t)}</option>" for v, t in LEVEL_FILTERS)
             age_filter = "".join(f"<option value='{v}'{' selected' if v == agefit else ''}>{esc(t)}</option>" for v, t in AGE_FILTERS)
             kind_filter = "<option value=''>All kinds</option>" + "".join(
-                f"<option{' selected' if k == kind else ''}>{esc(k)}</option>" for k in self.catalog.labels(lang, min_level))
+                f"<option{' selected' if k == kind else ''}>{esc(k)}</option>" for k in self.catalog.labels(lang, min_level) + ["Tools"])
+            school = [self.school_language()] + self.other_languages()
+            by_language = ("<p>Books and courses in: " + " ".join(
+                f"<a class='button{'' if c == lang else ' secondary'}' href='/library?{esc(urlencode({'lang': c}))}'>"
+                f"{esc(cat.language_name(c))}</a>" for c in school) + "</p>") if len(school) > 1 else ""
             filters = (
-                "<form method='get' action='/library' class='card grid'>"
+                by_language + "<form method='get' action='/library' class='card grid'>"
                 f"<div><label for='q'>Search</label><input type='text' id='q' name='q' value='{esc(query)}' placeholder='e.g. math, biology, chemistry'></div>"
                 f"<div><label for='lang'>Language</label><select id='lang' name='lang'>{lang_filter}</select></div>"
                 f"<div><label for='level'>Show</label><select id='level' name='level'>{level_filter}</select></div>"
@@ -796,6 +821,13 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
                 items += self._library_row(g["title"], "Ten well-known novels as plain text that opens in any browser.",
                                            g["label"], 2, "eng", [(g, "Add", g["key"] in selected)], here, show_lang=not lang,
                                            ages=g["ages"], age_est=False, fits=g_fits)
+            gg = cat.geogebra_item()
+            gg_fits = library.ages_overlap(tuple(gg["ages"]), ages)
+            if (kind in ("", "Tools") and page_no == 1 and (gg_fits or agefit == "any")
+                    and (not query or query.lower() in "geogebra geometry graph algebra calculator maths math tools")):
+                items += self._library_row(gg["title"], "Graphing, geometry, 3D, scientific calculator and more, for maths. Free for non-commercial "
+                                           "use only: not on cards that are sold or part of a paid service.", gg["label"], 3, "mul",
+                                           [(gg, "Add", gg["key"] in selected)], here, show_lang=False, ages=gg["ages"], fits=gg_fits)
             for g in shown:
                 if g["category"] == "kolibri":
                     items += self._library_row(g["title"], g["summary"], g["label"], g["level"], g["lang"], [], here,
@@ -893,6 +925,8 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
         key = req.form.get("key", "")
         if key == "gutenberg|classics":
             self.select_item(cat.gutenberg_choice()["item"])
+        elif key == "geogebra|apps":
+            self.select_item(cat.geogebra_item())
         else:
             name, _, flavour = key.partition("|")
             entry = self.catalog.find(name, flavour)
@@ -1009,119 +1043,3 @@ class Hub(HubUI, HubPages, HubLanguage, HubKolibri):
 
     def library_progress(self, req: Request) -> Response:
         return json_response(self.download_job.progress() if self.download_job else {"state": "idle"})
-
-
-BUILDER_HTML = """
-<p class="muted">Write the assignment here. Phones that sync over Wi-Fi or by memory card get every assignment in
-advance; opening it for students then costs one radio packet.</p>
-<form id="builder" class="card" novalidate>
-  <label for="title">Title</label><input type="text" id="title" required maxlength="120">
-  <div class="grid">
-    <div><label for="course">Course</label><select id="course"></select></div>
-    <div><label for="unit">Unit</label><select id="unit"></select></div>
-  </div>
-  <label for="subject">Topic (optional)</label><input type="text" id="subject" maxlength="60">
-  <label for="due">Due date</label><input type="date" id="due">
-  <label for="instructions">Instructions for students</label><textarea id="instructions" maxlength="2000"></textarea>
-  <label for="mode">Mode</label>
-  <select id="mode">
-    <option value="graded">Graded: answers are checked on this hub (answer key stays here)</option>
-    <option value="practice">Practice: students see right/wrong instantly on the phone</option>
-  </select>
-  <div id="questions"></div>
-  <p>
-    <button type="button" class="secondary" data-add="choice">+ Multiple choice</button>
-    <button type="button" class="secondary" data-add="number">+ Number</button>
-    <button type="button" class="secondary" data-add="text">+ Short answer</button>
-    <button type="button" class="secondary" data-add="long">+ Written response</button>
-  </p>
-  <p id="error" class="error" role="alert"></p>
-  <button type="submit">Save assignment</button>
-</form>
-<script>
-const EDIT_ID = "__EDIT_ID__";
-const COURSES = __COURSES__;
-const PRESET = __PRESET__;
-const courseSel = document.getElementById('course'), unitSel = document.getElementById('unit');
-courseSel.add(new Option('No course', ''));
-COURSES.forEach(c => courseSel.add(new Option(c.title, c.id)));  // Option() sets text, so titles can't inject HTML
-function fillUnits(selected) {
-  const c = COURSES.find(c => c.id === courseSel.value);
-  unitSel.length = 0;
-  unitSel.add(new Option('No unit', ''));
-  if (c) c.units.forEach((u, i) => unitSel.add(new Option(`Unit ${i + 1}: ${u.title}`, u.id)));
-  if (selected) unitSel.value = selected;
-}
-courseSel.addEventListener('change', () => fillUnits());
-courseSel.value = PRESET.course || ''; fillUnits(PRESET.unit);
-const box = document.getElementById('questions');
-let n = 0;
-const labels = {choice: 'Multiple choice', number: 'Number', text: 'Short answer', long: 'Written response (you grade it)'};
-function field(id, label, html) { return `<label for="${id}">${label}</label>${html}`; }
-function setv(id, v) { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.value = v; }
-function addQuestion(type, q) {
-  n += 1;
-  const id = 'q' + n;
-  const fs = document.createElement('fieldset');
-  fs.dataset.type = type;
-  let extra = '';
-  if (type === 'choice') {
-    extra = field(id + 'o', 'Options, one per line', `<textarea id="${id}o" rows="4"></textarea>`) +
-            field(id + 'a', 'Number of the correct option (1 = first)', `<input type="number" id="${id}a" min="1" value="1">`);
-  } else if (type === 'number') {
-    extra = field(id + 'a', 'Correct answer', `<input type="text" id="${id}a" inputmode="decimal">`) +
-            field(id + 't', 'Allowed difference (0 = exact)', `<input type="text" id="${id}t" value="0" inputmode="decimal">`);
-  } else if (type === 'text') {
-    extra = field(id + 'a', 'Accepted answers, one per line (not case-sensitive)', `<textarea id="${id}a" rows="3"></textarea>`);
-  } else {
-    extra = field(id + 'm', 'Maximum characters', `<input type="number" id="${id}m" value="600" min="50" max="1500">`);
-  }
-  fs.innerHTML = `<legend>Question ${n}: ${labels[type]}</legend>` +
-    field(id + 'p', 'Question', `<textarea id="${id}p" rows="2"></textarea>`) + extra +
-    field(id + 'pts', 'Points', `<input type="number" id="${id}pts" value="${type === 'long' ? 4 : 1}" min="0.5" step="0.5">`) +
-    `<button type="button" class="secondary" onclick="this.parentElement.remove()">Remove question</button>`;
-  fs.dataset.key = id;
-  box.appendChild(fs);
-  if (q) {
-    setv(id + 'p', q.prompt); setv(id + 'pts', q.points);
-    if (type === 'choice') { setv(id + 'o', (q.options || []).join('\\n')); setv(id + 'a', (q.answer || 0) + 1); }
-    if (type === 'number') { setv(id + 'a', q.answer); setv(id + 't', q.tolerance); }
-    if (type === 'text') { setv(id + 'a', (q.accept || []).join('\\n')); }
-    if (type === 'long') { setv(id + 'm', q.max_chars); }
-  } else {
-    fs.querySelector('textarea').focus();
-  }
-}
-document.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => addQuestion(b.dataset.add)));
-const val = id => (document.getElementById(id) || {}).value || '';
-const lines = id => val(id).split('\\n').map(s => s.trim()).filter(Boolean);
-document.getElementById('builder').addEventListener('submit', async e => {
-  e.preventDefault();
-  const questions = [...box.querySelectorAll('fieldset')].map((fs, i) => {
-    const k = fs.dataset.key, type = fs.dataset.type;
-    const q = {id: 'q' + (i + 1), type, prompt: val(k + 'p'), points: val(k + 'pts')};
-    if (type === 'choice') { q.options = lines(k + 'o'); q.answer = parseInt(val(k + 'a'), 10) - 1; }
-    if (type === 'number') { q.answer = val(k + 'a').replace(',', '.'); q.tolerance = val(k + 't').replace(',', '.'); }
-    if (type === 'text') { q.accept = lines(k + 'a'); }
-    if (type === 'long') { q.max_chars = val(k + 'm'); }
-    return q;
-  });
-  const body = {title: val('title'), subject: val('subject'), due: val('due'), instructions: val('instructions'),
-                mode: val('mode'), course: val('course'), unit: val('unit'), questions};
-  if (EDIT_ID) body.id = EDIT_ID;
-  const res = await fetch('/api/assignments', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-  const data = await res.json();
-  if (!res.ok) { document.getElementById('error').textContent = data.error; return; }
-  location.href = '/assignments/' + data.id;
-});
-if (EDIT_ID) {
-  fetch('/api/assignments/' + EDIT_ID).then(r => r.json()).then(a => {
-    ['title', 'subject', 'due', 'instructions', 'mode'].forEach(k => setv(k, a[k]));
-    courseSel.value = a.course || ''; fillUnits(a.unit || '');
-    a.questions.forEach(q => addQuestion(q.type, q));
-  });
-} else {
-  addQuestion('choice');
-}
-</script>
-"""
